@@ -1,0 +1,15 @@
+[package]
+name = "firefly-protos"
+version = "0.1.0"
+edition = "2024"
+
+
+[lib]
+name = "firefly_protos"
+
+[dependencies]
+bytes = { workspace = true }
+quick-protobuf = { workspace = true }
+
+[build-dependencies]
+pb-rs = "0.10.0"

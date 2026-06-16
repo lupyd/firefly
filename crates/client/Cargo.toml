@@ -1,0 +1,45 @@
+[package]
+name = "firefly-client"
+version = "0.0.4"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "firefly_client"
+path = "src/lib.rs"
+
+
+[dependencies]
+chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
+android_logger = "0.15.1"
+anyhow = { workspace = true, features = ["backtrace"] }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+itertools = "0.14.0"
+lazy_static = { workspace = true }
+libsignal_protocol = { git = "https://github.com/signalapp/libsignal.git", package = "libsignal-protocol", rev = "6e5a0466b35e23925ad4b3a31a8c6572471c33d9" }
+firefly-core = { workspace = true }
+firefly-protos = { workspace = true }
+log = { workspace = true }
+
+quick-protobuf = { workspace = true }
+rand = { workspace = true }
+rand_chacha = "0.9.0"
+reqwest = { workspace = true, features = ["rustls-tls", "zstd", "brotli", "gzip"], default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+env_logger = { workspace = true }
+mls-rs = { workspace = true }
+zeroize = { workspace = true }
+shfs = { git = "https://github.com/lupyd/shfs", version = "0.1.0" }
+twox-hash = "2.1.2"
+
+[dev-dependencies]
+firefly-server = { workspace = true }
+dotenv = { workspace = true }
+

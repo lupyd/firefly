@@ -1,0 +1,9 @@
+target/
+.env*
+
+Cargo.lock
+
+*.so
+
+.antigravitycli/
+

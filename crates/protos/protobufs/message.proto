@@ -1,0 +1,537 @@
+syntax = "proto3";
+
+package firefly;
+
+message UserMessage {
+  fixed64 id = 1;
+  uint64 toId = 2;
+  uint64 fromId = 3;
+  bytes text = 4;
+  uint32 type = 6;
+  uint32 settings = 7; // flags for server to notify or just send or don't send
+  fixed64 hashValue = 10;
+
+  // optional sends these for decryption purposes
+  string fromUsername = 8;
+  uint32 fromDeviceId = 9;
+}
+
+message Group {
+  fixed64 id = 1;
+  string name = 2;
+  string description = 3;
+  bytes state = 5;
+  uint32 settings = 6;
+  bool upgraded = 7;
+}
+
+message Groups {
+  repeated Group groups = 1;
+}
+
+message UserMessages {
+  repeated UserMessage messages = 1;
+}
+
+message GroupInvite {
+  uint64 groupId = 1;
+  string inviter = 2;
+  string invitee = 3;
+  bytes welcomeMessage = 4;
+  fixed64 commitId = 5;
+}
+
+message GroupCommitAndWelcome {
+  fixed64 id = 1;
+  uint64 groupId = 2;
+  bytes commitMessage = 3;
+
+  string inviter = 4;
+  string invitee = 5;
+  repeated bytes welcomeMessages = 6;
+  repeated uint64 inviteeAddresses = 7;
+}
+
+message GroupInvites {
+  repeated GroupInvite invites = 1;
+}
+
+message GroupMessage {
+  fixed64 id = 1;
+  uint64 groupId = 2;
+  bytes message = 3;
+  uint32 epoch = 4;
+}
+
+message GroupKeyPackage {
+  uint64 address = 3;
+  bytes package = 2;
+  string username = 4;
+  int32 id = 1;
+}
+
+message GroupKeyPackages {
+  repeated GroupKeyPackage packages = 1;
+}
+
+message GroupMessages {
+  repeated GroupMessage messages = 2;
+}
+
+message GroupSyncRequest {
+  uint64 group_id = 1;
+  fixed64 start_after = 2;
+  fixed64 until = 3;
+  uint32 limit = 4;
+}
+
+message GroupSyncRequests {
+  repeated GroupSyncRequest requests = 1;
+}
+
+message GroupMemberUpdate {
+  uint64 group_id = 1;
+  fixed64 last_message_seen = 2;
+  uint32 last_epoch = 3;
+}
+
+message GroupMemberUpdates {
+  repeated GroupMemberUpdate updates = 1;
+}
+
+message GroupCommit {
+  fixed64 id = 1;
+  uint64 groupId = 2;
+  bytes commit = 4;
+  uint32 epoch = 3;
+}
+
+message GroupCommits {
+  repeated GroupCommit commits = 1;
+}
+
+message GroupCommitSyncRequest {
+  uint64 group_id = 1;
+  uint32 epoch = 2;
+}
+
+message GroupReAddRequest {
+  uint64 group_id = 1;
+  uint64 address_id = 2;
+  string username = 3;
+}
+
+message GroupReAddRequests {
+  repeated GroupReAddRequest requests = 1;
+}
+
+message Error {
+  string error = 2;
+  uint32 errorCode = 1;
+}
+
+message Result {
+  bytes body = 2;
+  uint32 resultCode = 1;
+}
+
+message Address {
+  uint64 id = 1;
+  string username = 2;
+  string fcmToken = 4;
+  uint32 deviceId = 3;
+}
+
+message Addresses {
+  repeated Address addresses = 1;
+}
+
+message UploadUserMessage {
+  repeated UserMessage messages = 1;
+}
+
+message MessageIdAndTo {
+  fixed64 id = 1;
+  uint64 to = 2;
+  bool is_self = 3;
+}
+
+message UserMessageUploaded {
+  repeated MessageIdAndTo messageIds = 1;
+}
+message UserOnlineStatusRequest {
+  repeated string usernames = 1; // max 32 usernames
+}
+
+message UserOnlineStatusResponse {
+  fixed32 online_bits = 1; // bit i is 1 if usernames[i] is online
+}
+
+message Request {
+  uint32 id = 1;
+  oneof payload {
+    UserMessage createUserMessage = 2;
+    UploadUserMessage uploadUserMessage = 3;
+    GroupMessage uploadGroupMessage = 4;
+    RequestGroupReAdds requestGroupReAdds = 5;
+    RequestGroupSync requestGroupSync = 6;
+    UserOnlineStatusRequest userOnlineStatus = 7;
+    CreateJoinLinkRequest createJoinLink = 8;
+    JoinViaLinkRequest joinViaLink = 9;
+    CreateMeetingRequest createMeeting = 10;
+    JoinMeetingRequest joinMeeting = 11;
+    LeaveMeetingRequest leaveMeeting = 12;
+    EndMeetingRequest endMeeting = 13;
+    GetActiveSessionRequest getActiveSession = 14;
+  }
+}
+
+message Response {
+  uint32 id = 1;
+  Error error = 2;
+  oneof body {
+    UserMessage createdUserMessage = 3;
+    UserMessageUploaded userMessageUploaded = 4;
+    GroupMessage groupMessageUploaded = 5;
+    GroupReAddRequestSuccess groupReAddRequestSuccess = 6;
+    UserOnlineStatusResponse userOnlineStatus = 7;
+    CreateJoinLinkResponse createJoinLink = 8;
+    JoinViaLinkSuccess joinViaLinkSuccess = 9;
+    CreateMeetingResponse createMeetingResponse = 10;
+    JoinMeetingResponse joinMeetingResponse = 11;
+    GetActiveSessionResponse getActiveSessionResponse = 14;
+  }
+}
+
+
+message ServerMessage {
+  oneof message {
+    UserMessage userMessage = 1;
+    GroupMessage groupMessage = 2;
+    UserMessages userMessages = 3;
+    GroupMessages groupMessages = 4;
+    Response response = 10;
+
+    bytes ping = 11;
+    bytes pong = 12;
+
+    GroupInvite groupInvite = 15;
+    GroupCommits groupCommits = 16;
+    GroupReAddRequests groupReAddRequests = 17;
+    GroupJoinRequests groupJoinRequests = 18;
+    CallSignal callSignal = 20;
+    GroupMeetingSignal groupMeetingSignal = 21;
+  }
+}
+
+
+message ClientMessage {
+  oneof message {
+    UserMessage userMessage = 1;
+    GroupMessage groupMessage = 2;
+    UserMessage verifiedUserMessage = 3;
+    Request request = 10;
+    bytes ping = 11;
+    bytes pong = 12;
+    CallSignal callSignal = 20;
+    GroupMeetingSignal groupMeetingSignal = 21;
+  }
+}
+
+enum CallSignalType {
+  CALL_REQUEST = 0;      // Call invitation (contains SDP Offer)
+  CALL_ANSWER = 1;       // Call accepted (contains SDP Answer)
+  CALL_REJECT = 2;       // Call declined by receiver
+  CALL_CANCEL = 3;       // Call canceled by caller before answer
+  CALL_HANGUP = 4;       // Call ended by either party during or after session
+  CALL_DISMISS = 5;      // Server-sent notification to dismiss call on other devices
+  CALL_ICECANDIDATE = 6; // Dynamic ICE candidates signaling
+}
+
+message CallSignal {
+  fixed64 call_id = 1;
+  string sender_username = 2;
+  string receiver_username = 3;
+  CallSignalType type = 4;
+  string sdp = 5;
+  string candidate = 6;
+  int32 sdp_m_line_index = 7;
+  string sdp_mid = 8;
+  uint32 sender_device_id = 9;
+}
+
+message GroupId {
+  uint64 id = 2;
+}
+
+message AuthToken {
+  string username = 1;
+  uint64 valid_until = 2;
+  bytes credential = 4;
+  uint64 address_id = 6;
+  uint32 device_id = 5;
+}
+
+message SignedToken {
+  string kid = 1;
+  bytes payload = 2;
+  bytes signature = 3;
+}
+
+message FireflyIdentity {
+  bytes secret = 2;
+  bytes public = 3;
+  bytes credential = 4;
+}
+
+message FireflyGroupExtension {
+  string name = 1;
+  repeated FireflyGroupRole roles = 2;
+  repeated FireflyGroupChannel channels = 3;
+  repeated FireflyGroupMember members = 4;
+  fixed32 default_permissions = 5;
+}
+
+message FireflyGroupRole {
+  uint32 id = 1;
+  string name = 2;
+  fixed32 permissions = 3;
+}
+
+message FireflyGroupMember {
+  string username = 1;
+  uint32 role = 2;
+}
+
+message FireflyGroupChannel {
+  uint32 id = 1;
+  string name = 2;
+  uint32 type = 3;
+  repeated FireflyGroupRole roles = 4;
+  fixed32 default_permissions = 5;
+}
+
+message PreKeyBundle {
+  uint32 registrationId = 1;
+  uint32 deviceId = 2;
+  uint32 preKeyId = 3;
+  bytes prePublicKey = 4;
+  uint32 signedPreKeyId = 5;
+  bytes signedPrePublicKey = 6;
+  bytes signedPreKeySignature = 7;
+  bytes identityPublicKey = 8;
+  uint32 KEMPreKeyId = 9;
+  bytes KEMPrePublicKey = 10;
+  bytes KEMPreKeySignature = 11;
+}
+
+message PreKeyBundleEntry {
+  uint32 id = 1;
+  uint64 address = 2;
+  PreKeyBundle bundle = 3;
+
+  string username = 4;
+  uint32 device_id = 5;
+}
+
+message PreKeyBundleEntries {
+  repeated PreKeyBundleEntry entries = 1;
+}
+
+message ConversationStart {
+  uint64 conversationId = 1;
+  string started_by = 2;
+  string other = 3;
+  PreKeyBundle bundle = 4;
+}
+
+message PreKeyBundles {
+  repeated PreKeyBundle bundles = 1;
+}
+
+message Conversation {
+  string user1 = 1;
+  string user2 = 2;
+  uint64 settings = 3;
+}
+
+message Conversations {
+  repeated Conversation conversations = 1;
+}
+
+message EncryptedFile {
+  string url = 1;
+  bytes secretKey = 3;
+  uint32 contentType = 2;
+  uint32 contentLength = 4;
+}
+
+message EncryptedFiles {
+  repeated EncryptedFile files = 1;
+}
+
+message MessagePayload {
+  string text = 1;
+  fixed64 replyingTo = 2;
+  EncryptedFiles files = 3;
+}
+
+enum CallMessageType {
+  none = 0;
+  request = 1;
+  reject = 2;
+  end = 3;
+  // for saving call messages
+  ended = 4;
+  rejected = 5;
+  // webrtc messages
+  candidate = 10;
+  answer = 11;
+  offer = 12;
+}
+
+message CallMessage {
+  bytes message = 1;
+  CallMessageType type = 3;
+  string jsonBody = 4;
+  uint32 sessionId = 2;
+}
+
+message SelfUserMessage {
+  string to = 1;
+  bytes inner = 2; // UserMessageInner encrypted
+}
+
+message UserMessageInner {
+  oneof message {
+    bytes plainText = 1;
+    CallMessage callMessage = 2;
+    MessagePayload messagePayload = 3;
+    SelfUserMessage selfMessage = 4;
+  }
+
+  fixed32 nonce = 10;
+}
+
+message GroupMessageInner {
+  uint32 channelId = 1;
+  oneof message {
+    MessagePayload messagePayload = 2;
+  }
+}
+message RequestGroupReAdds {
+  repeated uint64 group_ids = 1;
+}
+
+message RequestGroupSync {
+  uint64 group_id = 1;
+  uint32 epoch = 2;
+}
+
+message GroupReAddRequestSuccess {}
+
+message CreateJoinLinkRequest {
+  uint64 group_id = 1;
+  uint64 expires_in_seconds = 2;
+  uint32 max_uses = 3;
+}
+
+message CreateJoinLinkResponse {
+  string token = 1;
+}
+
+message JoinViaLinkRequest {
+  string token = 1;
+}
+
+message JoinViaLinkSuccess {}
+
+message GroupJoinRequest {
+  uint64 group_id = 1;
+  uint64 address_id = 2;
+  string username = 3;
+}
+
+message GroupJoinRequests {
+  repeated GroupJoinRequest requests = 1;
+}
+
+// ─── Group Meeting Session ─────────────────────────────────
+
+enum MeetingSessionStatus {
+  MEETING_STATUS_ACTIVE = 0;
+  MEETING_STATUS_ENDED = 1;
+}
+
+message GroupMeetingSession {
+  fixed64 session_id = 1;           // UUIDv7 timestamp-based ID
+  uint64 group_id = 2;
+  uint32 channel_id = 3;            // Which voice/text channel this meeting is in
+  string creator_username = 4;
+  MeetingSessionStatus status = 5;
+  fixed64 created_at = 6;           // Microsecond timestamp
+  fixed64 ended_at = 7;
+  repeated string participants = 8; // Current participant usernames
+  string cf_meeting_id = 9;         // Cloudflare RealtimeKit meeting ID
+  bool e2ee_enabled = 10;
+}
+
+message CreateMeetingRequest {
+  uint64 group_id = 1;
+  uint32 channel_id = 2;
+  bool e2ee_enabled = 3;
+}
+
+message CreateMeetingResponse {
+  GroupMeetingSession session = 1;
+  string participant_token = 2;    // CF RealtimeKit auth token for creator
+}
+
+message JoinMeetingRequest {
+  uint64 group_id = 1;
+  fixed64 session_id = 2;
+}
+
+message JoinMeetingResponse {
+  GroupMeetingSession session = 1;
+  string participant_token = 2;    // CF RealtimeKit auth token for joiner
+}
+
+message LeaveMeetingRequest {
+  uint64 group_id = 1;
+  fixed64 session_id = 2;
+}
+
+message EndMeetingRequest {
+  uint64 group_id = 1;
+  fixed64 session_id = 2;
+}
+
+message GetActiveSessionRequest {
+  uint64 group_id = 1;
+  uint32 channel_id = 2;
+}
+
+message GetActiveSessionResponse {
+  GroupMeetingSession session = 1;  // null/empty if no active session
+}
+
+enum MeetingSignalType {
+  MEETING_SIGNAL_STARTED = 0;    // New meeting created in a channel
+  MEETING_SIGNAL_JOINED = 1;     // A user joined
+  MEETING_SIGNAL_LEFT = 2;       // A user left
+  MEETING_SIGNAL_ENDED = 3;      // Meeting ended (by creator or last participant)
+}
+
+
+// Signal sent over WebSocket to notify group members of meeting events
+message GroupMeetingSignal {
+  uint64 group_id = 1;
+  uint32 channel_id = 2;
+  fixed64 session_id = 3;
+  MeetingSignalType type = 4;
+  string username = 5;             // Who triggered the event
+  string cf_meeting_id = 6;
+}
+
+

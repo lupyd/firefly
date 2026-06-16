@@ -1,0 +1,46 @@
+[package]
+name = "firefly-core"
+version = "0.1.2"
+edition = "2024"
+
+
+[lib]
+name = "firefly_core"
+
+
+
+[dependencies]
+firefly-protos = { workspace = true }
+anyhow = { workspace = true, features = ["backtrace"] }
+async-trait = { workspace = true }
+log = { workspace = true }
+maybe-async = "0.2.10"
+mls-rs = { workspace = true, features = ["external_client"] }
+mls-rs-core = "0.26.0"
+mls-rs-codec = "0.7.0"
+mls-rs-crypto-rustcrypto = "0.21.0"
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rsa = "0.9.8"
+base64 = { workspace = true }
+sha2 = { workspace = true }
+p256 = { workspace = true }
+lazy_static = { workspace = true }
+httpdate = { workspace = true }
+rand_core = "0.6.4"
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+reqwest = { workspace = true, features = ["rustls-tls"], default-features = false }
+quick-protobuf = { workspace = true }
+zeroize = { workspace = true }
+
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mls_build_async)'] }
+
+[dev-dependencies]
+env_logger = { workspace = true }
+sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
+rand = { workspace = true }
+firefly-server = { path = "../server" }
+dotenv = { workspace = true }

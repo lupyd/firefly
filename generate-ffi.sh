@@ -1,0 +1,1 @@
+cargo run --bin uniffi-bindgen -- generate -n -l kotlin -o out --library target/debug/libfirefly_mls.so

@@ -1,0 +1,47 @@
+[workspace]
+members = [
+    "crates/core",
+    "crates/server",
+    "crates/protos",
+    "crates/client",
+]
+resolver = "2"
+
+
+[workspace.dependencies]
+firefly-protos = { path = "crates/protos" }
+firefly-core = { path = "crates/core" }
+firefly-server = { path = "crates/server" }
+firefly-client = { path = "crates/client" }
+
+anyhow = "1.0.100"
+async-trait = "0.1.89"
+base64 = "0.22.1"
+bytes = "1.11.0"
+dotenv = "0.15.0"
+env_logger = "0.11.8"
+futures = "0.3.31"
+httpdate = "1.0.3"
+lazy_static = "1.5.0"
+log = "0.4.28"
+mls-rs = "0.54.0"
+p256 = "0.13.2"
+quick-protobuf = "0.8.1"
+rand = "0.9.2"
+reqwest = { version = "0.12.24", default-features = false }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+sha2 = "0.10.9"
+sqlx = "0.8.6"
+thiserror = "2.0.16"
+tokio = "1.48.0"
+tokio-tungstenite = "0.28.0"
+zeroize = "1.8.1"
+
+
+[profile.release]
+strip = true
+opt-level = 3
+panic = "abort"
+lto = true
+codegen-units = 1
