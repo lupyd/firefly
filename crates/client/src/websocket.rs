@@ -219,6 +219,7 @@ pub struct FireflyWsClient {
     fully_initialized: AtomicBool,
     pool: SqlitePool,
     next_request_id: AtomicU32,
+    last_connection_error: std::sync::Mutex<Option<String>>,
 }
 
 impl FireflyWsClient {
@@ -263,6 +264,7 @@ impl FireflyWsClient {
             firefly_mls_client: Default::default(),
             group_info_store,
             next_request_id: Default::default(),
+            last_connection_error: std::sync::Mutex::new(None),
         })
     }
     pub async fn initialize_with_retrying(&self) -> anyhow::Result<()> {
@@ -309,18 +311,12 @@ impl FireflyWsClient {
                         get_current_timestamp_millis_since_epoch(),
                         std::sync::atomic::Ordering::Relaxed,
                     );
-                    if let Err(err) = self.connect().await {
-                        log::error!("connection ended {:?}", err);
-                    }
+                    let _ = self.connect().await;
 
                     if !self
                         .stop_reconnecting
                         .load(std::sync::atomic::Ordering::Relaxed)
                     {
-                        log::info!(
-                            "waiting {}ms to reconnect",
-                            self.retry_interval.as_millis()
-                        );
                         tokio::time::sleep(self.retry_interval).await;
                     }
                 })
@@ -369,15 +365,35 @@ impl FireflyWsClient {
             self.firefly_base_ws_url, addressId, device_id, last_synced_upto, token
         );
 
-        log::info!("connecting to {}", url);
+        let show_connecting = {
+            let last_err = self.last_connection_error.lock().unwrap();
+            last_err.is_none()
+        };
+        if show_connecting {
+            log::info!("connecting to {}", url);
+        }
 
         let (stream, response) = match tokio_tungstenite::connect_async(&url).await {
             Ok(v) => v,
             Err(err) => {
-                log::error!("connection request failed {:?}", err);
+                let err_str = format!("{:?}", err);
+                let mut last_err = self.last_connection_error.lock().unwrap();
+                if last_err.as_ref() != Some(&err_str) {
+                    log::error!("connection request failed {:?}", err);
+                    log::info!(
+                        "waiting {}ms to reconnect",
+                        self.retry_interval.as_millis()
+                    );
+                    *last_err = Some(err_str);
+                }
                 return Err(err.into());
             }
         };
+
+        {
+            let mut last_err = self.last_connection_error.lock().unwrap();
+            *last_err = None;
+        }
 
         {
             *self.state.write().unwrap() = ConnectionState::Connected;
