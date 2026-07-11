@@ -25,7 +25,12 @@ impl AddressStore {
     }
 
     pub async fn add(&self, id: u64, username: &str, device_id: u8) -> anyhow::Result<()> {
-        log::info!("store insert: address id={} username={} device_id={}", id, username, device_id);
+        log::info!(
+            "store insert: address id={} username={} device_id={}",
+            id,
+            username,
+            device_id
+        );
         let q = "INSERT INTO addresses (id, username, device_id) VALUES (?, ?, ?)";
 
         sqlx::query(q)
@@ -60,7 +65,11 @@ impl AddressStore {
     }
 
     pub async fn delete_by_device_id(&self, username: &str, device_id: u8) -> anyhow::Result<()> {
-        log::info!("store delete: address username={} device_id={}", username, device_id);
+        log::info!(
+            "store delete: address username={} device_id={}",
+            username,
+            device_id
+        );
         let q = "DELETE FROM addresses WHERE username = ? AND device_id = ?";
 
         sqlx::query(q)

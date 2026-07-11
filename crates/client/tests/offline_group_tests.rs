@@ -173,7 +173,10 @@ async fn test_offline_group_operations() {
 
     // Bob should auto-join. Wait for Bob to receive the invite and join.
     println!("Bob joining group...");
-    bob_client.check_setup().await.expect("Bob failed to join group");
+    bob_client
+        .check_setup()
+        .await
+        .expect("Bob failed to join group");
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Bob sends a message

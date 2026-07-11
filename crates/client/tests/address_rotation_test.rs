@@ -160,7 +160,6 @@ async fn test_address_rotation() {
         .await
         .expect("Bob failed to send message");
 
-
     // 4. Verify all 5 receive it
     for i in 0..5 {
         println!("Checking message for device {}...", i + 1);
@@ -171,47 +170,47 @@ async fn test_address_rotation() {
         assert_eq!(msg.message, b"hello 1");
     }
     println!("All 5 devices received the first message.");
-// 6. Create 6th device
-println!("Creating 6th Alice device (should trigger rotation)...");
-let (msg_tx6, mut msg_rx6) = mpsc::channel(100);
-let (gmsg_tx6, _gmsg_rx6) = mpsc::channel(100);
-let callbacks6 = TestCallbacks {
-    name: "alice_dev_6".into(),
-    token: "alice".into(),
-    message_tx: msg_tx6,
-    group_message_tx: gmsg_tx6,
-};
+    // 6. Create 6th device
+    println!("Creating 6th Alice device (should trigger rotation)...");
+    let (msg_tx6, mut msg_rx6) = mpsc::channel(100);
+    let (gmsg_tx6, _gmsg_rx6) = mpsc::channel(100);
+    let callbacks6 = TestCallbacks {
+        name: "alice_dev_6".into(),
+        token: "alice".into(),
+        message_tx: msg_tx6,
+        group_message_tx: gmsg_tx6,
+    };
 
-let db6 = format!("/tmp/alice_rot_6_{}.db", test_run_id);
-let _ = std::fs::remove_file(&db6);
+    let db6 = format!("/tmp/alice_rot_6_{}.db", test_run_id);
+    let _ = std::fs::remove_file(&db6);
 
-let client6 = FireflyWsClient::create(
-    base_url.clone(),
-    ws_url.clone(),
-    1000,
-    Box::new(callbacks6),
-    db6.clone(),
-    5000,
-)
-.await
-.expect("Failed to create Alice client 6");
-let client6 = Arc::new(client6);
-
-let client_init6 = client6.clone();
-tokio::spawn(async move {
-    let _ = client_init6.initialize_with_retrying().await;
-});
-
-wait_for_init(&client6)
+    let client6 = FireflyWsClient::create(
+        base_url.clone(),
+        ws_url.clone(),
+        1000,
+        Box::new(callbacks6),
+        db6.clone(),
+        5000,
+    )
     .await
-    .expect("Alice device 6 failed to initialize");
+    .expect("Failed to create Alice client 6");
+    let client6 = Arc::new(client6);
 
-// 7. Bob sends second message
-println!("Bob sending second message to Alice...");
-bob_client
-    .encrypt_and_send("alice".to_string(), b"hello 2".to_vec())
-    .await
-    .expect("Bob failed to send second message");
+    let client_init6 = client6.clone();
+    tokio::spawn(async move {
+        let _ = client_init6.initialize_with_retrying().await;
+    });
+
+    wait_for_init(&client6)
+        .await
+        .expect("Alice device 6 failed to initialize");
+
+    // 7. Bob sends second message
+    println!("Bob sending second message to Alice...");
+    bob_client
+        .encrypt_and_send("alice".to_string(), b"hello 2".to_vec())
+        .await
+        .expect("Bob failed to send second message");
 
     // Check device 1 (the oldest one)
     println!("Checking that device 1 does NOT receive the message...");
@@ -246,7 +245,7 @@ bob_client
     }
     client6.dispose().await;
     bob_client.dispose().await;
-    
+
     // Attempt cleanup of db files
     for i in 1..=5 {
         let _ = std::fs::remove_file(format!("/tmp/alice_rot_{}_{}.db", i, test_run_id));

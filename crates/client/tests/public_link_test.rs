@@ -97,13 +97,15 @@ async fn test_public_link_flow() {
     )
     .await
     .expect("Failed to create Alice client");
-    
+
     let alice_init = alice_client.clone();
     tokio::spawn(async move {
         let _ = alice_init.initialize_with_retrying().await;
     });
 
-    wait_for_init(&alice_client).await.expect("Alice failed to initialize");
+    wait_for_init(&alice_client)
+        .await
+        .expect("Alice failed to initialize");
 
     // Bob Setup
     let (bob_msg_tx, _bob_msg_rx) = mpsc::channel(100);
@@ -128,23 +130,34 @@ async fn test_public_link_flow() {
     )
     .await
     .expect("Failed to create Bob client");
-    
+
     let bob_init = bob_client.clone();
     tokio::spawn(async move {
         let _ = bob_init.initialize_with_retrying().await;
     });
 
-    wait_for_init(&bob_client).await.expect("Bob failed to initialize");
+    wait_for_init(&bob_client)
+        .await
+        .expect("Bob failed to initialize");
 
     // 1. Alice creates a group
-    let group = alice_client.create_group("Public Group".into(), "Description".into()).await.expect("Failed to create group");
-    
+    let group = alice_client
+        .create_group("Public Group".into(), "Description".into())
+        .await
+        .expect("Failed to create group");
+
     // 2. Alice creates a join link
-    let link_token = alice_client.create_join_link(group.id, 3600, 10).await.expect("Failed to create join link");
+    let link_token = alice_client
+        .create_join_link(group.id, 3600, 10)
+        .await
+        .expect("Failed to create join link");
     println!("Created join link: {}", link_token);
 
     // 3. Bob joins via link
-    bob_client.join_via_link(&link_token).await.expect("Bob failed to join via link");
+    bob_client
+        .join_via_link(&link_token)
+        .await
+        .expect("Bob failed to join via link");
 
     // Wait for Alice to process the join request and add Bob
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -157,7 +170,7 @@ async fn test_public_link_flow() {
                 text: std::borrow::Cow::Borrowed("Hello from Alice to the public group!"),
                 replyingTo: 0,
                 files: None,
-            }
+            },
         ),
     };
     let alice_msg_bytes = firefly_client::utils::serialize_proto(&alice_msg_inner).unwrap();
@@ -172,8 +185,13 @@ async fn test_public_link_flow() {
         .expect("Bob timed out waiting for Alice's message")
         .expect("Bob failed to receive message");
 
-    let decoded_bob_msg = firefly_client::utils::deserialize_proto::<firefly_protos::firefly::GroupMessageInner>(&received_msg_by_bob.message).unwrap();
-    if let firefly_protos::firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(payload) = decoded_bob_msg.message {
+    let decoded_bob_msg = firefly_client::utils::deserialize_proto::<
+        firefly_protos::firefly::GroupMessageInner,
+    >(&received_msg_by_bob.message)
+    .unwrap();
+    if let firefly_protos::firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(payload) =
+        decoded_bob_msg.message
+    {
         assert_eq!(payload.text, "Hello from Alice to the public group!");
     } else {
         panic!("Unexpected message type");
@@ -187,7 +205,7 @@ async fn test_public_link_flow() {
                 text: std::borrow::Cow::Borrowed("Hello from Bob!"),
                 replyingTo: 0,
                 files: None,
-            }
+            },
         ),
     };
     let bob_msg_bytes = firefly_client::utils::serialize_proto(&bob_msg_inner).unwrap();
@@ -202,8 +220,13 @@ async fn test_public_link_flow() {
         .expect("Alice timed out waiting for Bob's message")
         .expect("Alice failed to receive message");
 
-    let decoded_alice_msg = firefly_client::utils::deserialize_proto::<firefly_protos::firefly::GroupMessageInner>(&received_msg_by_alice.message).unwrap();
-    if let firefly_protos::firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(payload) = decoded_alice_msg.message {
+    let decoded_alice_msg = firefly_client::utils::deserialize_proto::<
+        firefly_protos::firefly::GroupMessageInner,
+    >(&received_msg_by_alice.message)
+    .unwrap();
+    if let firefly_protos::firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(payload) =
+        decoded_alice_msg.message
+    {
         assert_eq!(payload.text, "Hello from Bob!");
     } else {
         panic!("Unexpected message type");
@@ -213,7 +236,10 @@ async fn test_public_link_flow() {
 
     // --- Test Max Uses ---
     println!("Testing max uses limit...");
-    let link_max_uses = alice_client.create_join_link(group.id, 3600, 1).await.expect("Failed to create max_uses link");
+    let link_max_uses = alice_client
+        .create_join_link(group.id, 3600, 1)
+        .await
+        .expect("Failed to create max_uses link");
     // Charlie Setup
     let (charlie_msg_tx, _charlie_msg_rx) = mpsc::channel(100);
     let (charlie_gmsg_tx, mut charlie_gmsg_rx) = mpsc::channel(100);
@@ -232,27 +258,34 @@ async fn test_public_link_flow() {
         Box::new(charlie_callbacks),
         charlie_db.clone(),
         5000,
-    ).await.expect("Failed to create Charlie client");
-    
+    )
+    .await
+    .expect("Failed to create Charlie client");
+
     let charlie_init = charlie_client.clone();
     tokio::spawn(async move {
         let _ = charlie_init.initialize_with_retrying().await;
     });
-    wait_for_init(&charlie_client).await.expect("Charlie failed to initialize");
+    wait_for_init(&charlie_client)
+        .await
+        .expect("Charlie failed to initialize");
 
-    charlie_client.join_via_link(&link_max_uses).await.expect("Charlie failed to join");
+    charlie_client
+        .join_via_link(&link_max_uses)
+        .await
+        .expect("Charlie failed to join");
 
     // Wait for Alice to process Charlie
     tokio::time::sleep(Duration::from_secs(3)).await;
-// Dave Setup
-let (dave_msg_tx, _dave_msg_rx) = mpsc::channel(100);
-let (dave_gmsg_tx, mut dave_gmsg_rx) = mpsc::channel(100);
-let dave_callbacks = TestCallbacks {
-    name: "dave".into(),
-    token: "dave".into(),
-    message_tx: dave_msg_tx,
-    group_message_tx: dave_gmsg_tx,
-};
+    // Dave Setup
+    let (dave_msg_tx, _dave_msg_rx) = mpsc::channel(100);
+    let (dave_gmsg_tx, mut dave_gmsg_rx) = mpsc::channel(100);
+    let dave_callbacks = TestCallbacks {
+        name: "dave".into(),
+        token: "dave".into(),
+        message_tx: dave_msg_tx,
+        group_message_tx: dave_gmsg_tx,
+    };
     let dave_db = format!("/tmp/dave_link_test_{}.db", test_run_id);
     let _ = std::fs::remove_file(&dave_db);
     let dave_client = FfiFireflyWsClient::create(
@@ -262,25 +295,46 @@ let dave_callbacks = TestCallbacks {
         Box::new(dave_callbacks),
         dave_db.clone(),
         5000,
-    ).await.expect("Failed to create Dave client");
-    
+    )
+    .await
+    .expect("Failed to create Dave client");
+
     let dave_init = dave_client.clone();
     tokio::spawn(async move {
         let _ = dave_init.initialize_with_retrying().await;
     });
-    wait_for_init(&dave_client).await.expect("Dave failed to initialize");
+    wait_for_init(&dave_client)
+        .await
+        .expect("Dave failed to initialize");
 
-    let err = dave_client.join_via_link(&link_max_uses).await.expect_err("Dave should have failed to join");
-    assert!(err.to_string().contains("Invalid link"), "Unexpected error: {}", err);
+    let err = dave_client
+        .join_via_link(&link_max_uses)
+        .await
+        .expect_err("Dave should have failed to join");
+    assert!(
+        err.to_string().contains("Invalid link"),
+        "Unexpected error: {}",
+        err
+    );
     println!("Max uses limit verified successfully!");
 
     // --- Test Expiry ---
     println!("Testing link expiry...");
-    let link_expiry = alice_client.create_join_link(group.id, 1, 10).await.expect("Failed to create expiry link");
+    let link_expiry = alice_client
+        .create_join_link(group.id, 1, 10)
+        .await
+        .expect("Failed to create expiry link");
 
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let err2 = dave_client.join_via_link(&link_expiry).await.expect_err("Dave should have failed to join expired link");
-    assert!(err2.to_string().contains("Invalid link"), "Unexpected error: {}", err2);
+    let err2 = dave_client
+        .join_via_link(&link_expiry)
+        .await
+        .expect_err("Dave should have failed to join expired link");
+    assert!(
+        err2.to_string().contains("Invalid link"),
+        "Unexpected error: {}",
+        err2
+    );
     println!("Link expiry verified successfully!");
 }

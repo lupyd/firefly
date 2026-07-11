@@ -140,7 +140,6 @@ AND gm.id = last.max_id;
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

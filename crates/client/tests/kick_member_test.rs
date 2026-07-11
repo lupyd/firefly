@@ -209,18 +209,30 @@ async fn test_kick_member() {
         .expect("Alice failed to add Charles");
 
     println!("Bob and Charles joining group...");
-    bob_client.check_setup().await.expect("Bob failed to join group");
-    charles_client.check_setup().await.expect("Charles failed to join group");
+    bob_client
+        .check_setup()
+        .await
+        .expect("Bob failed to join group");
+    charles_client
+        .check_setup()
+        .await
+        .expect("Charles failed to join group");
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Alice removes Bob
     println!("Alice kicking Bob...");
-    alice_client.kick_group_member(group_id, "bob".into()).await.expect("Alice failed to kick Bob");
+    alice_client
+        .kick_group_member(group_id, "bob".into())
+        .await
+        .expect("Alice failed to kick Bob");
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Verify Charles synchronizes the kick
     println!("Charles checking setup to sync kick...");
-    charles_client.check_setup().await.expect("Charles failed to sync group");
+    charles_client
+        .check_setup()
+        .await
+        .expect("Charles failed to sync group");
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Verify Bob is not in the group roster on Alice's side (skip for now since no API exists)
@@ -240,24 +252,36 @@ async fn test_kick_member() {
             },
         ),
     };
-    
+
     // We expect upload_group_message to potentially fail since Bob is kicked
-    let upload_result = bob_client.upload_group_message(group_id, group_msg, 0).await;
+    let upload_result = bob_client
+        .upload_group_message(group_id, group_msg, 0)
+        .await;
     if upload_result.is_ok() {
         println!("Bob's upload succeeded (it shouldn't be processed by active members)");
     } else {
-        println!("Bob's upload correctly failed: {:?}", upload_result.err().unwrap());
+        println!(
+            "Bob's upload correctly failed: {:?}",
+            upload_result.err().unwrap()
+        );
     }
 
     // Alice should NOT receive the message
     println!("Alice waiting for message (should timeout)...");
     let received = tokio::time::timeout(Duration::from_secs(5), alice_gmsg_rx.recv()).await;
-    assert!(received.is_err(), "Alice received a message from a kicked member!");
+    assert!(
+        received.is_err(),
+        "Alice received a message from a kicked member!"
+    );
 
     // Charles should NOT receive the message
     println!("Charles waiting for message (should timeout)...");
-    let received_charles = tokio::time::timeout(Duration::from_secs(5), charles_gmsg_rx.recv()).await;
-    assert!(received_charles.is_err(), "Charles received a message from a kicked member!");
+    let received_charles =
+        tokio::time::timeout(Duration::from_secs(5), charles_gmsg_rx.recv()).await;
+    assert!(
+        received_charles.is_err(),
+        "Charles received a message from a kicked member!"
+    );
 
     // Charles sends a message to Alice
     println!("Charles sending group message to prove he is still in the group...");
@@ -283,8 +307,9 @@ async fn test_kick_member() {
         .expect("Channel closed");
 
     assert_eq!(received_from_charles.group_id, group_id);
-    let decoded_inner = deserialize_proto::<firefly::GroupMessageInner>(&received_from_charles.message)
-        .expect("Failed to decode group message inner");
+    let decoded_inner =
+        deserialize_proto::<firefly::GroupMessageInner>(&received_from_charles.message)
+            .expect("Failed to decode group message inner");
     if let firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(payload) =
         decoded_inner.message
     {

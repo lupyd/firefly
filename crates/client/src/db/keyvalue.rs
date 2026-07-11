@@ -119,7 +119,7 @@ mod tests {
     async fn test_set_and_get() {
         let pool = setup_test_db().await;
         let store = KeyValueStore::new(pool).await.unwrap();
-        
+
         store.set("test_key", "test_value").await.unwrap();
         let value = store.get("test_key").await.unwrap();
         assert_eq!(value, "test_value");
@@ -129,7 +129,7 @@ mod tests {
     async fn test_get_nonexistent_key() {
         let pool = setup_test_db().await;
         let store = KeyValueStore::new(pool).await.unwrap();
-        
+
         let result = store.get("nonexistent").await;
         assert!(result.is_err());
     }
@@ -138,7 +138,7 @@ mod tests {
     async fn test_set_overwrites_existing() {
         let pool = setup_test_db().await;
         let store = KeyValueStore::new(pool).await.unwrap();
-        
+
         store.set("key", "value1").await.unwrap();
         store.set("key", "value2").await.unwrap();
         let value = store.get("key").await.unwrap();
@@ -149,7 +149,7 @@ mod tests {
     async fn test_update_last_received_message_id_new() {
         let pool = setup_test_db().await;
         let store = KeyValueStore::new(pool).await.unwrap();
-        
+
         store.update_last_received_message_id(100).await.unwrap();
         let value = store.get(KEY_LAST_RECEIVED_MESSAGE_ID).await.unwrap();
         assert_eq!(value, "100");
@@ -159,7 +159,7 @@ mod tests {
     async fn test_update_last_received_message_id_higher() {
         let pool = setup_test_db().await;
         let store = KeyValueStore::new(pool).await.unwrap();
-        
+
         store.update_last_received_message_id(100).await.unwrap();
         store.update_last_received_message_id(200).await.unwrap();
         let value = store.get(KEY_LAST_RECEIVED_MESSAGE_ID).await.unwrap();
@@ -170,7 +170,7 @@ mod tests {
     async fn test_update_last_received_message_id_lower() {
         let pool = setup_test_db().await;
         let store = KeyValueStore::new(pool).await.unwrap();
-        
+
         store.update_last_received_message_id(200).await.unwrap();
         store.update_last_received_message_id(100).await.unwrap();
         let value = store.get(KEY_LAST_RECEIVED_MESSAGE_ID).await.unwrap();

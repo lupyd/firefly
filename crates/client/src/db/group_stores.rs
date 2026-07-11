@@ -417,7 +417,6 @@ impl GroupInfoStore {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

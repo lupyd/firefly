@@ -148,7 +148,11 @@ async fn test_online_status() {
 
     // Check online status
     println!("Checking online status...");
-    let usernames = vec!["alice".to_string(), "bob".to_string(), "charlie".to_string()];
+    let usernames = vec![
+        "alice".to_string(),
+        "bob".to_string(),
+        "charlie".to_string(),
+    ];
     let online_users = alice_client
         .get_online_status(usernames.clone())
         .await
@@ -162,7 +166,7 @@ async fn test_online_status() {
     // Dispose Bob and check again
     println!("Disposing Bob...");
     bob_client.dispose().await;
-    
+
     // Give some time for server to handle disconnect
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -171,7 +175,10 @@ async fn test_online_status() {
         .await
         .expect("Failed to get online status after Bob left");
 
-    println!("Online users after Bob left: {:?}", online_users_after_bob_left);
+    println!(
+        "Online users after Bob left: {:?}",
+        online_users_after_bob_left
+    );
     assert!(online_users_after_bob_left.contains(&"alice".to_string()));
     assert!(!online_users_after_bob_left.contains(&"bob".to_string()));
 

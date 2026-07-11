@@ -6,11 +6,11 @@ pub mod address;
 pub mod auth;
 pub mod conversations;
 pub mod ffi_stores;
+pub mod group_messages;
 pub mod group_stores;
 pub mod keyvalue;
 pub mod messages;
 pub mod stores;
-pub mod group_messages;
 
 pub async fn setup_pool(url: &str, max_connections: u32) -> Result<sqlx::SqlitePool, sqlx::Error> {
     let pool = SqlitePoolOptions::new()

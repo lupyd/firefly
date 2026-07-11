@@ -167,7 +167,10 @@ async fn test_remove_readd_member() {
         .expect("Alice failed to add Bob");
 
     println!("Bob joining group...");
-    bob_client.check_setup().await.expect("Bob failed to join group");
+    bob_client
+        .check_setup()
+        .await
+        .expect("Bob failed to join group");
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Bob sends a message
@@ -198,16 +201,25 @@ async fn test_remove_readd_member() {
 
     // Alice removes Bob
     println!("Alice kicking Bob...");
-    alice_client.kick_group_member(group_id, "bob".into()).await.expect("Alice failed to kick Bob");
+    alice_client
+        .kick_group_member(group_id, "bob".into())
+        .await
+        .expect("Alice failed to kick Bob");
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Alice re-adds Bob
     println!("Alice re-adding Bob...");
-    alice_client.add_group_member(group_id, "bob".into(), 0).await.expect("Alice failed to re-add Bob");
+    alice_client
+        .add_group_member(group_id, "bob".into(), 0)
+        .await
+        .expect("Alice failed to re-add Bob");
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     println!("Bob joining group again...");
-    bob_client.check_setup().await.expect("Bob failed to join group after re-add");
+    bob_client
+        .check_setup()
+        .await
+        .expect("Bob failed to join group after re-add");
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Bob sends another message

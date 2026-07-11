@@ -76,8 +76,7 @@ impl FfiMlsClient {
                 .unwrap()
                 .as_secs();
 
-            if identity.is_valid_until_secs().unwrap_or_default() > current_timestamp_seconds + 5
-            {
+            if identity.is_valid_until_secs().unwrap_or_default() > current_timestamp_seconds + 5 {
                 identity
             } else if let Some(token) = callbacks.get_access_token().await {
                 let identity = FireflyIdentity::generate(
@@ -108,13 +107,9 @@ impl FfiMlsClient {
                 .await
                 .context("token not found")?;
 
-            let identity = FireflyIdentity::generate(
-                token.clone(),
-                base_url.clone(),
-                device_id,
-                address_id,
-            )
-            .await?;
+            let identity =
+                FireflyIdentity::generate(token.clone(), base_url.clone(), device_id, address_id)
+                    .await?;
 
             let serialized_identity = identity.to_vec()?;
 
@@ -198,19 +193,14 @@ impl FfiMlsClient {
             role: 1,
         });
 
-        let group = self
-            .client
-            .create_group(ext.inner().clone())
-            .await?;
+        let group = self.client.create_group(ext.inner().clone()).await?;
 
         self.group_info_state
             .set(
                 group.group_id(),
                 group_name,
                 String::new(),
-                group
-                    .group_identifier()
-                    .await?,
+                group.group_identifier().await?,
             )
             .await?;
         let group = FfiMlsGroup {
@@ -229,9 +219,7 @@ impl FfiMlsClient {
     }
 
     pub async fn generate_key_package(&self) -> anyhow::Result<Vec<u8>> {
-        self.client
-            .generate_key_package()
-            .await
+        self.client.generate_key_package().await
     }
 
     pub async fn join_group(
@@ -239,10 +227,7 @@ impl FfiMlsClient {
         group_id: u64,
         welcome_message: Vec<u8>,
     ) -> anyhow::Result<Arc<FfiMlsGroup>> {
-        let group = self
-            .client
-            .join_group(group_id, welcome_message)
-            .await?;
+        let group = self.client.join_group(group_id, welcome_message).await?;
 
         let group = Arc::new(FfiMlsGroup {
             group,
@@ -267,10 +252,7 @@ impl FfiMlsClient {
             return Ok(group);
         }
 
-        let group = self
-            .client
-            .load_group(group_id, group_identifier)
-            .await?;
+        let group = self.client.load_group(group_id, group_identifier).await?;
         let group = Arc::new(FfiMlsGroup {
             group,
             base_url: self.base_url.clone(),
@@ -297,9 +279,7 @@ impl FfiMlsClient {
     }
 
     pub async fn is_valid_until_secs(&self) -> anyhow::Result<u64> {
-        self.client
-            .is_valid_until_secs()
-            .await
+        self.client.is_valid_until_secs().await
     }
 }
 
@@ -317,22 +297,15 @@ impl FfiMlsGroup {
     }
 
     pub async fn encrypt(&self, data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-        self.group
-            .encrypt(&data)
-            .await
+        self.group.encrypt(&data).await
     }
 
     pub async fn re_add_member(&self, username: String, address: u64) -> anyhow::Result<u64> {
-        self.group
-            .re_add_member(username, address)
-            .await
+        self.group.re_add_member(username, address).await
     }
 
     pub async fn process(&self, message: Vec<u8>) -> anyhow::Result<FireflyMlsReceivedMessage> {
-        let result = self
-            .group
-            .process(&message)
-            .await?;
+        let result = self.group.process(&message).await?;
         Ok(match result {
             firefly_core::FireflyMlsReceivedMessage::Message(msg) => {
                 FireflyMlsReceivedMessage::Message(EncryptedGroupMessage {
@@ -418,9 +391,7 @@ impl FfiMlsGroup {
     }
 
     pub async fn group_identifier(&self) -> anyhow::Result<Vec<u8>> {
-        self.group
-            .group_identifier()
-            .await
+        self.group.group_identifier().await
     }
 
     pub fn group_id(&self) -> u64 {
@@ -431,7 +402,12 @@ impl FfiMlsGroup {
         self.group.epoch().await
     }
 
-    pub async fn export_secret(&self, label: &str, context: &[u8], key_length: usize) -> anyhow::Result<Vec<u8>> {
+    pub async fn export_secret(
+        &self,
+        label: &str,
+        context: &[u8],
+        key_length: usize,
+    ) -> anyhow::Result<Vec<u8>> {
         self.group.export_secret(label, context, key_length).await
     }
 }

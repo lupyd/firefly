@@ -39,4 +39,3 @@ pub trait FireflyWsClientCallback: Send + Sync {
 
     async fn on_group_meeting_signal(&self, _signal: GroupMeetingSignal) {}
 }
-

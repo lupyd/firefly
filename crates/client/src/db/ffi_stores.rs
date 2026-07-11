@@ -69,7 +69,9 @@ impl FfiKeyStores {
                             ty,
                             reply,
                         } => {
-                            if let Err(err) = reply.send(stores.decrypt(other, cipher_text, ty).await) {
+                            if let Err(err) =
+                                reply.send(stores.decrypt(other, cipher_text, ty).await)
+                            {
                                 log::error!("Error sending reply: {:?}", err);
                             }
                         }
@@ -88,8 +90,8 @@ impl FfiKeyStores {
                             pre_key_bundle,
                             reply,
                         } => {
-                            if let Err(err) =
-                                reply.send(stores.process_pre_key_bundle(other, pre_key_bundle).await)
+                            if let Err(err) = reply
+                                .send(stores.process_pre_key_bundle(other, pre_key_bundle).await)
                             {
                                 log::error!("Error sending reply: {:?}", err);
                             }
@@ -140,8 +142,7 @@ impl FfiKeyStores {
         other: ProtocolAddress,
         plain_text: Vec<u8>,
     ) -> anyhow::Result<EncryptedMessage> {
-        let (reply, receiver) =
-            tokio::sync::oneshot::channel::<anyhow::Result<EncryptedMessage>>();
+        let (reply, receiver) = tokio::sync::oneshot::channel::<anyhow::Result<EncryptedMessage>>();
         self.sender.send(Command::Encrypt {
             other,
             plain_text,
@@ -167,8 +168,7 @@ impl FfiKeyStores {
     }
 
     pub async fn generate_prekey_bundle(&self) -> anyhow::Result<FfiPreKeyBundle> {
-        let (reply, receiver) =
-            tokio::sync::oneshot::channel::<anyhow::Result<FfiPreKeyBundle>>();
+        let (reply, receiver) = tokio::sync::oneshot::channel::<anyhow::Result<FfiPreKeyBundle>>();
         self.sender.send(Command::GeneratePreKeyBundle { reply })?;
         let bundle = receiver.await??;
         Ok(bundle)

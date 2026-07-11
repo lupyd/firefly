@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use bytes::{Bytes};
+use bytes::Bytes;
 use rand::{CryptoRng, SeedableRng};
 
 lazy_static::lazy_static! {

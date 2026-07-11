@@ -313,9 +313,15 @@ impl FireflyMlsGroup {
         group.context().epoch()
     }
 
-    pub async fn export_secret(&self, label: &str, context: &[u8], key_length: usize) -> anyhow::Result<Vec<u8>> {
+    pub async fn export_secret(
+        &self,
+        label: &str,
+        context: &[u8],
+        key_length: usize,
+    ) -> anyhow::Result<Vec<u8>> {
         let group = self.group.lock().await;
-        let secret = group.export_secret(label.as_bytes(), context, key_length)
+        let secret = group
+            .export_secret(label.as_bytes(), context, key_length)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
         Ok(secret.as_bytes().to_vec())
@@ -532,8 +538,8 @@ impl FireflyMlsGroup {
         }
 
         if invitee_addresses.is_empty() {
-             log::info!("No new members to add, skipping commit");
-             return Ok(0);
+            log::info!("No new members to add, skipping commit");
+            return Ok(0);
         }
 
         commit_builder = commit_builder.custom_proposal(

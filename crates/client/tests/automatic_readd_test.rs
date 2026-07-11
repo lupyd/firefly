@@ -101,9 +101,13 @@ async fn test_automatic_readd() {
 
     tokio::spawn({
         let alice = alice_client.clone();
-        async move { let _ = alice.initialize_with_retrying().await; }
+        async move {
+            let _ = alice.initialize_with_retrying().await;
+        }
     });
-    wait_for_init(&alice_client).await.expect("Alice failed to init");
+    wait_for_init(&alice_client)
+        .await
+        .expect("Alice failed to init");
 
     // Bob Device 1 Setup
     let (bob1_msg_tx, _bob1_msg_rx) = mpsc::channel(100);
@@ -132,9 +136,13 @@ async fn test_automatic_readd() {
 
     tokio::spawn({
         let bob1 = bob1_client.clone();
-        async move { let _ = bob1.initialize_with_retrying().await; }
+        async move {
+            let _ = bob1.initialize_with_retrying().await;
+        }
     });
-    wait_for_init(&bob1_client).await.expect("Bob1 failed to init");
+    wait_for_init(&bob1_client)
+        .await
+        .expect("Bob1 failed to init");
 
     // Alice creates group and adds Bob1
     println!("Alice creating group...");
@@ -145,7 +153,10 @@ async fn test_automatic_readd() {
     let group_id = group_info.id;
 
     println!("Alice adding Bob1...");
-    if let Err(e) = alice_client.add_group_member(group_id, "bob".into(), 0).await {
+    if let Err(e) = alice_client
+        .add_group_member(group_id, "bob".into(), 0)
+        .await
+    {
         panic!("Alice failed to add Bob1: {:?}", e);
     }
 
@@ -178,13 +189,20 @@ async fn test_automatic_readd() {
 
     tokio::spawn({
         let bob2 = bob2_client.clone();
-        async move { let _ = bob2.initialize_with_retrying().await; }
+        async move {
+            let _ = bob2.initialize_with_retrying().await;
+        }
     });
-    wait_for_init(&bob2_client).await.expect("Bob2 failed to init");
+    wait_for_init(&bob2_client)
+        .await
+        .expect("Bob2 failed to init");
 
     // Bob2 requests to be re-added to group
     println!("Bob2 requesting re-add...");
-    bob2_client.request_re_add(vec![group_id]).await.expect("Bob2 failed to request re-add");
+    bob2_client
+        .request_re_add(vec![group_id])
+        .await
+        .expect("Bob2 failed to request re-add");
 
     // Alice should receive the notification and automatically re-add Bob2
     println!("Waiting for Alice to automatically re-add Bob2...");
@@ -202,10 +220,10 @@ async fn test_automatic_readd() {
             },
         ),
     };
-    
+
     // Bob2 might need to wait for his own sync or the GroupInvite
     tokio::time::sleep(Duration::from_secs(5)).await;
-    
+
     bob2_client
         .upload_group_message(group_id, group_msg, 0)
         .await

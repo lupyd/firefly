@@ -380,10 +380,7 @@ impl FireflyWsClient {
                 let mut last_err = self.last_connection_error.lock().unwrap();
                 if last_err.as_ref() != Some(&err_str) {
                     log::error!("connection request failed {:?}", err);
-                    log::info!(
-                        "waiting {}ms to reconnect",
-                        self.retry_interval.as_millis()
-                    );
+                    log::info!("waiting {}ms to reconnect", self.retry_interval.as_millis());
                     *last_err = Some(err_str);
                 }
                 return Err(err.into());
@@ -583,7 +580,9 @@ impl FireflyWsClient {
         };
 
         let client_message = firefly_protos::firefly::ClientMessage {
-            message: firefly_protos::firefly::mod_ClientMessage::OneOfmessage::callSignal(call_signal),
+            message: firefly_protos::firefly::mod_ClientMessage::OneOfmessage::callSignal(
+                call_signal,
+            ),
         };
 
         let g = self.connection.read().await;
@@ -631,11 +630,7 @@ impl FireflyWsClient {
         .await
     }
 
-    pub async fn reject_call(
-        &self,
-        call_id: u64,
-        caller_username: String,
-    ) -> anyhow::Result<()> {
+    pub async fn reject_call(&self, call_id: u64, caller_username: String) -> anyhow::Result<()> {
         self.send_call_signal(
             call_id,
             caller_username,
@@ -648,11 +643,7 @@ impl FireflyWsClient {
         .await
     }
 
-    pub async fn cancel_call(
-        &self,
-        call_id: u64,
-        receiver_username: String,
-    ) -> anyhow::Result<()> {
+    pub async fn cancel_call(&self, call_id: u64, receiver_username: String) -> anyhow::Result<()> {
         self.send_call_signal(
             call_id,
             receiver_username,
@@ -665,11 +656,7 @@ impl FireflyWsClient {
         .await
     }
 
-    pub async fn hangup_call(
-        &self,
-        call_id: u64,
-        other_username: String,
-    ) -> anyhow::Result<()> {
+    pub async fn hangup_call(&self, call_id: u64, other_username: String) -> anyhow::Result<()> {
         self.send_call_signal(
             call_id,
             other_username,
@@ -1611,7 +1598,11 @@ impl FireflyWsClient {
     pub fn is_initialized(&self) -> bool {
         self.fully_initialized
             .load(std::sync::atomic::Ordering::Relaxed)
-            && self.connection.try_read().map(|g| g.is_some()).unwrap_or(false)
+            && self
+                .connection
+                .try_read()
+                .map(|g| g.is_some())
+                .unwrap_or(false)
     }
 
     pub async fn upload_group_message(
@@ -2037,7 +2028,9 @@ impl FireflyWsClient {
                     .await
                     .unwrap_or_default();
                 if current_token != val {
-                    log::info!("FCM token changed, resetting fully_initialized to false to force setup update");
+                    log::info!(
+                        "FCM token changed, resetting fully_initialized to false to force setup update"
+                    );
                     self.fully_initialized
                         .store(false, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -2378,15 +2371,17 @@ impl FireflyWsClient {
 
         let bytes = self.request(req).await?;
         let response = deserialize_proto::<firefly::Response<'_>>(&bytes)?;
-        
+
         if let Some(error) = response.error {
-            return Err(anyhow::anyhow!("Server error: {} ({})", error.error, error.errorCode));
+            return Err(anyhow::anyhow!(
+                "Server error: {} ({})",
+                error.error,
+                error.errorCode
+            ));
         }
 
         match response.body {
-            firefly::mod_Response::OneOfbody::createJoinLink(res) => {
-                Ok(res.token.to_string())
-            }
+            firefly::mod_Response::OneOfbody::createJoinLink(res) => Ok(res.token.to_string()),
             _ => Err(anyhow::anyhow!("Unexpected response from server")),
         }
     }
@@ -2394,18 +2389,20 @@ impl FireflyWsClient {
     pub async fn join_via_link(&self, token: &str) -> anyhow::Result<()> {
         let req = firefly::Request {
             id: 0,
-            payload: firefly::mod_Request::OneOfpayload::joinViaLink(
-                firefly::JoinViaLinkRequest {
-                    token: token.into(),
-                },
-            ),
+            payload: firefly::mod_Request::OneOfpayload::joinViaLink(firefly::JoinViaLinkRequest {
+                token: token.into(),
+            }),
         };
 
         let bytes = self.request(req).await?;
         let response = deserialize_proto::<firefly::Response<'_>>(&bytes)?;
-        
+
         if let Some(error) = response.error {
-            return Err(anyhow::anyhow!("Server error: {} ({})", error.error, error.errorCode));
+            return Err(anyhow::anyhow!(
+                "Server error: {} ({})",
+                error.error,
+                error.errorCode
+            ));
         }
 
         match response.body {
@@ -2555,14 +2552,47 @@ async fn on_user_message(
         );
     }
 
-    callbacks
-        .on_message(crate::db::messages::UserMessage {
-            id: msg.id,
-            other: from.into_owned(),
-            message: decrypted,
-            sent_by_other: true,
-        })
-        .await;
+    let mut is_dummy = false;
+    let mut other_username = from.into_owned();
+    let mut final_message = decrypted;
+    let mut sent_by_other = true;
+
+    if let Ok(inner) = deserialize_proto::<firefly::UserMessageInner>(&final_message) {
+        match inner.message {
+            firefly::mod_UserMessageInner::OneOfmessage::None => {
+                is_dummy = true;
+            }
+            firefly::mod_UserMessageInner::OneOfmessage::selfMessage(self_msg) => {
+                if msg.settings == 1 {
+                    other_username = self_msg.to.into_owned();
+                    final_message = self_msg.inner.into_owned();
+                    sent_by_other = false;
+
+                    if let Ok(inner_inner) =
+                        deserialize_proto::<firefly::UserMessageInner>(&final_message)
+                    {
+                        if let firefly::mod_UserMessageInner::OneOfmessage::None =
+                            inner_inner.message
+                        {
+                            is_dummy = true;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !is_dummy {
+        callbacks
+            .on_message(crate::db::messages::UserMessage {
+                id: msg.id,
+                other: other_username,
+                message: final_message,
+                sent_by_other,
+            })
+            .await;
+    }
 
     let ack = firefly::ClientMessage {
         message: firefly::mod_ClientMessage::OneOfmessage::verifiedUserMessage(
@@ -2578,6 +2608,89 @@ async fn on_user_message(
 
     let payload = serialize_proto(&ack)?;
     sender.send(payload).await.ok();
+
+    if msg.type_pb == 3 && !is_dummy {
+        log::info!(
+            "Received prekey message from {} device {}. Replying with a dummy message to accept it.",
+            msg.fromUsername,
+            msg.fromDeviceId
+        );
+
+        let dummy_inner = firefly::UserMessageInner {
+            message: firefly::mod_UserMessageInner::OneOfmessage::None,
+            nonce: rng().next_u32(),
+        };
+
+        match serialize_proto(&dummy_inner) {
+            Ok(dummy_bytes_raw) => {
+                let dummy_bytes = dummy_bytes_raw.to_vec();
+                let recipient_address = ProtocolAddress::new(
+                    msg.fromUsername.clone().into_owned(),
+                    fromDeviceId.try_into()?,
+                );
+
+                match key_stores
+                    .encrypt(recipient_address, dummy_bytes.clone())
+                    .await
+                {
+                    Ok(cipher) => {
+                        let hash_value = twox_hash::XxHash3_64::oneshot(&dummy_bytes);
+
+                        let dummy_msg = firefly::UserMessage {
+                            id: get_current_timestamp_microseconds_since_epoch(),
+                            toId: msg.fromId,
+                            fromId: msg.toId,
+                            text: cipher.cipher_text.into(),
+                            type_pb: cipher.ty as u32,
+                            settings: 0,
+                            fromUsername: Default::default(),
+                            fromDeviceId: Default::default(),
+                            hashValue: hash_value,
+                        };
+
+                        let mut message_entries = firefly::UploadUserMessage::default();
+                        message_entries.messages.push(dummy_msg);
+
+                        let client_msg = firefly::ClientMessage {
+                            message: firefly::mod_ClientMessage::OneOfmessage::request(
+                                firefly::Request {
+                                    id: 0,
+                                    payload: firefly::mod_Request::OneOfpayload::uploadUserMessage(
+                                        message_entries,
+                                    ),
+                                },
+                            ),
+                        };
+
+                        match serialize_proto(&client_msg) {
+                            Ok(payload) => {
+                                if let Err(e) = sender.send(Bytes::from(payload)).await {
+                                    log::error!("failed to send dummy accept message: {}", e);
+                                } else {
+                                    log::info!(
+                                        "successfully sent dummy accept message to {}",
+                                        msg.fromUsername
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                log::error!(
+                                    "failed to serialize client message for dummy reply: {}",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("failed to encrypt dummy accept message: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("failed to serialize dummy accept message: {}", e);
+            }
+        }
+    }
 
     Ok(())
 }
@@ -3084,7 +3197,9 @@ impl FfiFireflyWsClient {
         expires_in_seconds: u64,
         max_uses: u32,
     ) -> anyhow::Result<String> {
-        self.inner.create_join_link(group_id, expires_in_seconds, max_uses).await
+        self.inner
+            .create_join_link(group_id, expires_in_seconds, max_uses)
+            .await
     }
 
     pub async fn join_via_link(&self, token: &str) -> anyhow::Result<()> {
@@ -3104,7 +3219,9 @@ impl FfiFireflyWsClient {
         let name = self.inner.callbacks.name().to_string();
         CURRENT_CLIENT
             .scope(name, async {
-                self.inner.initiate_call(call_id, receiver_username, sdp_offer).await
+                self.inner
+                    .initiate_call(call_id, receiver_username, sdp_offer)
+                    .await
             })
             .await
     }
@@ -3118,16 +3235,14 @@ impl FfiFireflyWsClient {
         let name = self.inner.callbacks.name().to_string();
         CURRENT_CLIENT
             .scope(name, async {
-                self.inner.accept_call(call_id, caller_username, sdp_answer).await
+                self.inner
+                    .accept_call(call_id, caller_username, sdp_answer)
+                    .await
             })
             .await
     }
 
-    pub async fn reject_call(
-        &self,
-        call_id: u64,
-        caller_username: String,
-    ) -> anyhow::Result<()> {
+    pub async fn reject_call(&self, call_id: u64, caller_username: String) -> anyhow::Result<()> {
         let name = self.inner.callbacks.name().to_string();
         CURRENT_CLIENT
             .scope(name, async {
@@ -3136,11 +3251,7 @@ impl FfiFireflyWsClient {
             .await
     }
 
-    pub async fn cancel_call(
-        &self,
-        call_id: u64,
-        receiver_username: String,
-    ) -> anyhow::Result<()> {
+    pub async fn cancel_call(&self, call_id: u64, receiver_username: String) -> anyhow::Result<()> {
         let name = self.inner.callbacks.name().to_string();
         CURRENT_CLIENT
             .scope(name, async {
@@ -3149,11 +3260,7 @@ impl FfiFireflyWsClient {
             .await
     }
 
-    pub async fn hangup_call(
-        &self,
-        call_id: u64,
-        other_username: String,
-    ) -> anyhow::Result<()> {
+    pub async fn hangup_call(&self, call_id: u64, other_username: String) -> anyhow::Result<()> {
         let name = self.inner.callbacks.name().to_string();
         CURRENT_CLIENT
             .scope(name, async {
@@ -3174,7 +3281,13 @@ impl FfiFireflyWsClient {
         CURRENT_CLIENT
             .scope(name, async {
                 self.inner
-                    .send_ice_candidate(call_id, other_username, candidate, sdp_mid, sdp_m_line_index)
+                    .send_ice_candidate(
+                        call_id,
+                        other_username,
+                        candidate,
+                        sdp_mid,
+                        sdp_m_line_index,
+                    )
                     .await
             })
             .await

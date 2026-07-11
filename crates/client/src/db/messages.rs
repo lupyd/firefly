@@ -47,8 +47,7 @@ CREATE TABLE IF NOT EXISTS last_seen_user_timestamps (
 
 impl MessagesStore {
     pub async fn from_path(path: String) -> anyhow::Result<Self> {
-        let pool = setup_pool_from_path(&path, 5)
-            .await?;
+        let pool = setup_pool_from_path(&path, 5).await?;
 
         Ok(Self::new(pool).await?)
     }
@@ -128,16 +127,25 @@ impl MessagesStore {
     }
 
     pub async fn insert_user_message(&self, row: UserMessage) -> anyhow::Result<()> {
-        sqlx::query("INSERT INTO user_messages (id, other, message, sent_by_other) VALUES (?, ?, ?, ?)")
-            .bind(row.id as i64)
-            .bind(row.other)
-            .bind(row.message)
-            .bind(row.sent_by_other)
-            .execute(&self.pool)
-            .await
-          ?;
+        sqlx::query(
+            "INSERT INTO user_messages (id, other, message, sent_by_other) VALUES (?, ?, ?, ?)",
+        )
+        .bind(row.id as i64)
+        .bind(row.other)
+        .bind(row.message)
+        .bind(row.sent_by_other)
+        .execute(&self.pool)
+        .await?;
 
         Ok(())
+    }
+
+    pub async fn has_user_message(&self, id: u64) -> anyhow::Result<bool> {
+        let row = sqlx::query("SELECT 1 FROM user_messages WHERE id = ? LIMIT 1")
+            .bind(id as i64)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.is_some())
     }
 
     pub async fn mark_as_read_until(&self, other: &str, id: i64) -> anyhow::Result<()> {

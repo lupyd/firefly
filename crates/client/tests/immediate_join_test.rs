@@ -107,7 +107,9 @@ async fn test_immediate_group_join() {
         let _ = alice_init.initialize_with_retrying().await;
     });
 
-    wait_for_init(&alice_client).await.expect("Alice failed to init");
+    wait_for_init(&alice_client)
+        .await
+        .expect("Alice failed to init");
 
     // Bob Setup
     let (bob_msg_tx, _bob_msg_rx) = mpsc::channel(100);
@@ -139,7 +141,9 @@ async fn test_immediate_group_join() {
         let _ = bob_init.initialize_with_retrying().await;
     });
 
-    wait_for_init(&bob_client).await.expect("Bob failed to init");
+    wait_for_init(&bob_client)
+        .await
+        .expect("Bob failed to init");
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Alice creates group

@@ -174,7 +174,10 @@ async fn test_client_group_flow() {
     // However, it might pick it up on next reconnect or periodic check.
     // Let's force a sync for Bob if possible, or just wait.
     println!("Bob joining group...");
-    bob_client.check_setup().await.expect("Bob failed to join group");
+    bob_client
+        .check_setup()
+        .await
+        .expect("Bob failed to join group");
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Bob sends a message

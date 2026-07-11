@@ -21,8 +21,11 @@ pub struct TeeLogger {
 impl TeeLogger {
     pub fn new(file_path: impl AsRef<Path>, level: LevelFilter) -> anyhow::Result<Self> {
         let path = PathBuf::from(file_path.as_ref());
-        let log_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-        
+        let log_dir = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+
         std::fs::create_dir_all(&log_dir)?;
 
         let file = std::fs::OpenOptions::new()

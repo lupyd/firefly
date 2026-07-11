@@ -5,8 +5,7 @@ use crate::storage_provider::{FfiGroupStateStorage, FfiKeyPackageStorage, FfiPre
 
 use crate::{
     config::{
-        FireflyIdentityProvider, UpdateChannelProposal, UpdateRoleProposal,
-        UpdateUserProposal,
+        FireflyIdentityProvider, UpdateChannelProposal, UpdateRoleProposal, UpdateUserProposal,
     },
     extension::FireflyGroupExtension,
     rules::FireflyMlsRules,
