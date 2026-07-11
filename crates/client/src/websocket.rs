@@ -2552,6 +2552,9 @@ async fn on_user_message(
         );
     }
 
+    let my_username = callbacks.name();
+    let is_self_msg = msg.settings == 1 || from == my_username;
+
     let mut is_dummy = false;
     let mut other_username = from.into_owned();
     let mut final_message = decrypted;
@@ -2563,7 +2566,7 @@ async fn on_user_message(
                 is_dummy = true;
             }
             firefly::mod_UserMessageInner::OneOfmessage::selfMessage(self_msg) => {
-                if msg.settings == 1 {
+                if is_self_msg {
                     other_username = self_msg.to.into_owned();
                     final_message = self_msg.inner.into_owned();
                     sent_by_other = false;
@@ -2579,8 +2582,14 @@ async fn on_user_message(
                     }
                 }
             }
-            _ => {}
+            _ => {
+                if is_self_msg {
+                    is_dummy = true;
+                }
+            }
         }
+    } else if is_self_msg {
+        is_dummy = true;
     }
 
     if !is_dummy {
@@ -2974,6 +2983,15 @@ pub struct FfiConversation {
     pub settings: u64,
 }
 
+pub struct FfiGroupInfo {
+    pub id: u64,
+    pub name: String,
+    pub description: String,
+    pub pending: bool,
+    pub owner: String,
+    pub has_local_state: bool,
+}
+
 #[derive(Clone)]
 pub struct FfiFireflyWsClient {
     inner: Arc<FireflyWsClient>,
@@ -3289,6 +3307,74 @@ impl FfiFireflyWsClient {
                         sdp_m_line_index,
                     )
                     .await
+            })
+            .await
+    }
+
+    pub async fn get_group_infos(&self) -> anyhow::Result<Vec<FfiGroupInfo>> {
+        let name = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT
+            .scope(name, async {
+                // 1. Fetch server groups
+                let token = self.inner
+                    .callbacks
+                    .get_access_token()
+                    .await
+                    .context("token not found")?;
+
+                let url = format!("{}/groups", self.inner.firefly_base_url);
+                let response = HTTP_CLIENT.get(url).bearer_auth(&token).send().await?;
+
+                if !response.status().is_success() {
+                    return Err(anyhow::anyhow!(
+                        "unexpected status [{}] {}",
+                        response.status(),
+                        response.text().await?
+                    ));
+                }
+
+                let bytes = response.bytes().await?;
+                let groups = deserialize_proto::<firefly::Groups<'_>>(&bytes)?;
+
+                // 2. Fetch local group infos to check which ones we have keys for
+                let local_groups = self.inner.group_info_store.get_all().await.unwrap_or_default();
+                let local_ids: std::collections::HashSet<u64> = local_groups.iter().map(|g| g.id).collect();
+
+                let claims = get_claims_from_token(&token).context("failed to parse claims")?;
+                let username = claims.uname.to_string();
+
+                let mut result = Vec::new();
+                for group in groups.groups {
+                    let has_local_keys = local_ids.contains(&group.id);
+                    let is_pending = group.pending;
+                    let is_owner = group.owner == username;
+
+                    // We include the group if:
+                    // - it is in local_groups (meaning we are a member and have keys)
+                    // - OR it is pending (waiting for approval)
+                    // - OR the current user is the owner (so they can see and delete it)
+                    if has_local_keys || is_pending || is_owner {
+                        result.push(FfiGroupInfo {
+                            id: group.id,
+                            name: group.name.into_owned(),
+                            description: group.description.into_owned(),
+                            pending: is_pending,
+                            owner: group.owner.into_owned(),
+                            has_local_state: has_local_keys,
+                        });
+                    }
+                }
+
+                Ok(result)
+            })
+            .await
+    }
+
+    pub async fn get_online_status(&self, usernames: Vec<String>) -> anyhow::Result<Vec<String>> {
+        let name = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT
+            .scope(name, async {
+                self.inner.get_online_status(usernames).await
             })
             .await
     }

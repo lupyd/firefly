@@ -257,6 +257,8 @@ pub struct Group<'a> {
     pub state: Cow<'a, [u8]>,
     pub settings: u32,
     pub upgraded: bool,
+    pub pending: bool,
+    pub owner: Cow<'a, str>,
 }
 
 impl<'a> MessageRead<'a> for Group<'a> {
@@ -270,6 +272,8 @@ impl<'a> MessageRead<'a> for Group<'a> {
                 Ok(42) => msg.state = r.read_bytes(bytes).map(Cow::Borrowed)?,
                 Ok(48) => msg.settings = r.read_uint32(bytes)?,
                 Ok(56) => msg.upgraded = r.read_bool(bytes)?,
+                Ok(64) => msg.pending = r.read_bool(bytes)?,
+                Ok(74) => msg.owner = r.read_string(bytes).map(Cow::Borrowed)?,
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -287,6 +291,8 @@ impl<'a> MessageWrite for Group<'a> {
         + if self.state == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.state).len()) }
         + if self.settings == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.settings) as u64) }
         + if self.upgraded == false { 0 } else { 1 + sizeof_varint(*(&self.upgraded) as u64) }
+        + if self.pending == false { 0 } else { 1 + sizeof_varint(*(&self.pending) as u64) }
+        + if self.owner == "" { 0 } else { 1 + sizeof_len((&self.owner).len()) }
     }
 
     fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
@@ -296,6 +302,8 @@ impl<'a> MessageWrite for Group<'a> {
         if self.state != Cow::Borrowed(b"") { w.write_with_tag(42, |w| w.write_bytes(&**&self.state))?; }
         if self.settings != 0u32 { w.write_with_tag(48, |w| w.write_uint32(*&self.settings))?; }
         if self.upgraded != false { w.write_with_tag(56, |w| w.write_bool(*&self.upgraded))?; }
+        if self.pending != false { w.write_with_tag(64, |w| w.write_bool(*&self.pending))?; }
+        if self.owner != "" { w.write_with_tag(74, |w| w.write_string(&**&self.owner))?; }
         Ok(())
     }
 }

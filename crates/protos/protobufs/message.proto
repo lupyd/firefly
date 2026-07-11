@@ -23,6 +23,8 @@ message Group {
   bytes state = 5;
   uint32 settings = 6;
   bool upgraded = 7;
+  bool pending = 8;
+  string owner = 9;
 }
 
 message Groups {
