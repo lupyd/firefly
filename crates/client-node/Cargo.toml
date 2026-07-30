@@ -1,0 +1,18 @@
+[package]
+name = "firefly-client-node"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "2.16", features = ["async", "serde-json", "napi4"] }
+napi-derive = "2.16"
+firefly-client = { path = "../client" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+async-trait = { workspace = true }
