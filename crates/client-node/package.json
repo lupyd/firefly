@@ -1,20 +1,35 @@
 {
   "name": "firefly-client-node",
   "version": "0.1.0",
-  "main": "index.js",
-  "types": "index.d.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "napi": {
-    "name": "firefly-client-node",
+    "name": "ffi",
     "triples": {
       "defaults": true,
       "additional": []
     }
   },
   "scripts": {
-    "build": "napi build --platform --release",
-    "build:debug": "napi build --platform"
+    "proto:gen": "mkdir -p src/protos && protoc -I=../protos/protobufs message.proto --plugin=node_modules/ts-proto/protoc-gen-ts_proto --ts_proto_opt=forceLong=bigint --ts_proto_opt=env=node --ts_proto_out=src/protos",
+    "build:ts": "tsc",
+    "build": "napi build --platform --release --js ffi.js --dts ffi.d.ts && tsc",
+    "build:debug": "napi build --platform --js ffi.js --dts ffi.d.ts && tsc"
+  },
+  "files": [
+    "dist/**/*",
+    "ffi.js",
+    "ffi.d.ts",
+    "*.node"
+  ],
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.2.3",
+    "protobufjs": "^7.3.0"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.4"
+    "@napi-rs/cli": "^2.18.4",
+    "@types/node": "^20.11.0",
+    "ts-proto": "^2.7.5",
+    "typescript": "latest"
   }
 }

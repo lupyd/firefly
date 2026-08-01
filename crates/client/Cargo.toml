@@ -11,7 +11,6 @@ path = "src/lib.rs"
 
 [dependencies]
 chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
-android_logger = "0.15.1"
 anyhow = { workspace = true, features = ["backtrace"] }
 async-trait = { workspace = true }
 base64 = { workspace = true }
@@ -27,19 +26,22 @@ log = { workspace = true }
 quick-protobuf = { workspace = true }
 rand = { workspace = true }
 rand_chacha = "0.9.0"
-reqwest = { workspace = true, features = ["rustls-tls", "zstd", "brotli", "gzip"], default-features = false }
+reqwest = { workspace = true, features = ["rustls-tls"], default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
+mls-rs = { workspace = true }
+zeroize = { workspace = true }
+twox-hash = "2.1.2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+android_logger = "0.15.1"
 sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 env_logger = { workspace = true }
-mls-rs = { workspace = true }
-zeroize = { workspace = true }
 shfs = { git = "https://github.com/lupyd/shfs", version = "0.1.0" }
-twox-hash = "2.1.2"
 
-[dev-dependencies]
-firefly-server = { workspace = true }
-dotenv = { workspace = true }
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+wasm-bindgen = "0.2"
 

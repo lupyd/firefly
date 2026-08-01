@@ -105,6 +105,7 @@ impl Log for TeeLogger {
                 let _ = f.write_all(log_line.as_bytes());
             }
         }
+        self.flush();
     }
 
     fn flush(&self) {

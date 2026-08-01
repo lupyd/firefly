@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode, ErrorStrategy, ThreadSafeCallContext};
 use napi_derive::napi;
 use napi::{Env, JsFunction, JsObject, Result, Status};
@@ -9,7 +9,7 @@ use firefly_client::db::group_messages::GroupMessage;
 use firefly_client::websocket::ConnectionState;
 
 #[napi(object)]
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize)]
 pub struct NapiUserMessage {
     pub id: f64,
     pub other: String,
@@ -18,7 +18,7 @@ pub struct NapiUserMessage {
 }
 
 #[napi(object)]
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize)]
 pub struct NapiGroupMessage {
     pub id: f64,
     pub group_id: f64,
@@ -97,7 +97,7 @@ pub struct NapiUpdateRoleProposal {
 
 struct NodeClientCallbacks {
     name: String,
-    get_access_token_fn: ThreadsafeFunction<(), ErrorStrategy::CalleeHandled>,
+    token: Arc<Mutex<Option<String>>>,
     on_message_fn: ThreadsafeFunction<NapiUserMessage, ErrorStrategy::CalleeHandled>,
     on_group_message_fn: ThreadsafeFunction<NapiGroupMessage, ErrorStrategy::CalleeHandled>,
     on_group_joined_fn: ThreadsafeFunction<u64, ErrorStrategy::CalleeHandled>,
@@ -112,13 +112,7 @@ impl FireflyWsClientCallback for NodeClientCallbacks {
     }
 
     async fn get_access_token(&self) -> Option<String> {
-        match self.get_access_token_fn.call_async::<Option<String>>(Ok(())).await {
-            Ok(token) => token,
-            Err(err) => {
-                log::error!("Failed to get access token from JS callback: {}", err);
-                None
-            }
-        }
+        self.token.lock().unwrap().clone()
     }
 
     async fn on_message(&self, message: UserMessage) {
@@ -128,7 +122,10 @@ impl FireflyWsClientCallback for NodeClientCallbacks {
             message: message.message,
             sent_by_other: message.sent_by_other,
         };
-        let _ = self.on_message_fn.call(Ok(msg), ThreadsafeFunctionCallMode::NonBlocking);
+        let status = self.on_message_fn.call(Ok(msg), ThreadsafeFunctionCallMode::NonBlocking);
+        if status != napi::Status::Ok {
+            eprintln!("Failed to call JS onMessage callback: {:?}", status);
+        }
     }
 
     async fn on_group_message(&self, group_message: GroupMessage) {
@@ -140,11 +137,17 @@ impl FireflyWsClientCallback for NodeClientCallbacks {
             channel_id: group_message.channel_id,
             epoch: group_message.epoch,
         };
-        let _ = self.on_group_message_fn.call(Ok(msg), ThreadsafeFunctionCallMode::NonBlocking);
+        let status = self.on_group_message_fn.call(Ok(msg), ThreadsafeFunctionCallMode::NonBlocking);
+        if status != napi::Status::Ok {
+            eprintln!("Failed to call JS onGroupMessage callback: {:?}", status);
+        }
     }
 
     async fn on_group_joined(&self, group_id: u64) {
-        let _ = self.on_group_joined_fn.call(Ok(group_id), ThreadsafeFunctionCallMode::NonBlocking);
+        let status = self.on_group_joined_fn.call(Ok(group_id), ThreadsafeFunctionCallMode::NonBlocking);
+        if status != napi::Status::Ok {
+            eprintln!("Failed to call JS onGroupJoined callback: {:?}", status);
+        }
     }
 
     async fn on_call_signal(&self, signal: CallSignal) {
@@ -175,40 +178,24 @@ impl FireflyWsClientCallback for NodeClientCallbacks {
     }
 }
 
-fn extract_callbacks(callbacks_obj: JsObject) -> Result<NodeClientCallbacks> {
+fn extract_callbacks(callbacks_obj: JsObject, token: Arc<Mutex<Option<String>>>) -> Result<NodeClientCallbacks> {
     let name_js: String = callbacks_obj.get_named_property("name")?;
-    let get_access_token_js: JsFunction = callbacks_obj.get_named_property("getAccessToken")?;
     let on_message_js: JsFunction = callbacks_obj.get_named_property("onMessage")?;
     let on_group_message_js: JsFunction = callbacks_obj.get_named_property("onGroupMessage")?;
     let on_group_joined_js: JsFunction = callbacks_obj.get_named_property("onGroupJoined")?;
     let on_call_signal_js: JsFunction = callbacks_obj.get_named_property("onCallSignal")?;
     let on_group_meeting_signal_js: JsFunction = callbacks_obj.get_named_property("onGroupMeetingSignal")?;
 
-    let get_access_token_fn = get_access_token_js.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<()>| {
-        let res: Vec<napi::JsUnknown> = vec![];
-        Ok(res)
-    })?;
-
     let on_message_fn = on_message_js.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<NapiUserMessage>| {
-        let mut obj = ctx.env.create_object()?;
-        obj.set_named_property("id", ctx.value.id)?;
-        obj.set_named_property("other", ctx.env.create_string(&ctx.value.other)?)?;
-        let buf = ctx.env.create_buffer_with_data(ctx.value.message)?;
-        obj.set_named_property("message", buf.into_raw())?;
-        obj.set_named_property("sentByOther", ctx.value.sent_by_other)?;
-        Ok(vec![obj])
+        let json = serde_json::to_string(&ctx.value).map_err(|e| napi::Error::new(Status::GenericFailure, e.to_string()))?;
+        let js_str = ctx.env.create_string(&json)?;
+        Ok(vec![js_str.into_unknown()])
     })?;
 
     let on_group_message_fn = on_group_message_js.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<NapiGroupMessage>| {
-        let mut obj = ctx.env.create_object()?;
-        obj.set_named_property("id", ctx.value.id)?;
-        obj.set_named_property("groupId", ctx.value.group_id)?;
-        obj.set_named_property("by", ctx.env.create_string(&ctx.value.by)?)?;
-        let buf = ctx.env.create_buffer_with_data(ctx.value.message)?;
-        obj.set_named_property("message", buf.into_raw())?;
-        obj.set_named_property("channelId", ctx.value.channel_id)?;
-        obj.set_named_property("epoch", ctx.value.epoch)?;
-        Ok(vec![obj])
+        let json = serde_json::to_string(&ctx.value).map_err(|e| napi::Error::new(Status::GenericFailure, e.to_string()))?;
+        let js_str = ctx.env.create_string(&json)?;
+        Ok(vec![js_str.into_unknown()])
     })?;
 
     let on_group_joined_fn = on_group_joined_js.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<u64>| {
@@ -242,7 +229,7 @@ fn extract_callbacks(callbacks_obj: JsObject) -> Result<NodeClientCallbacks> {
 
     Ok(NodeClientCallbacks {
         name: name_js,
-        get_access_token_fn,
+        token,
         on_message_fn,
         on_group_message_fn,
         on_group_joined_fn,
@@ -252,8 +239,14 @@ fn extract_callbacks(callbacks_obj: JsObject) -> Result<NodeClientCallbacks> {
 }
 
 #[napi]
+pub fn init_logger(file_path: String) {
+    firefly_client::init_logger(file_path);
+}
+
+#[napi]
 pub struct FireflyClientNode {
     inner: Arc<FfiFireflyWsClient>,
+    token: Arc<Mutex<Option<String>>>,
 }
 
 #[napi]
@@ -268,8 +261,11 @@ impl FireflyClientNode {
         key_stores_pathname: String,
         request_timeout_in_ms: f64,
     ) -> Result<JsObject> {
-        let callbacks = extract_callbacks(callbacks_obj)?;
+        let initial_token: Option<String> = callbacks_obj.get_named_property("initialToken").ok();
+        let token = Arc::new(Mutex::new(initial_token));
+        let callbacks = extract_callbacks(callbacks_obj, token.clone())?;
 
+        let token_clone = token.clone();
         env.execute_tokio_future(
             async move {
                 let inner = FfiFireflyWsClient::create(
@@ -285,10 +281,16 @@ impl FireflyClientNode {
 
                 Ok(FireflyClientNode {
                     inner: Arc::new(inner),
+                    token: token_clone,
                 })
             },
             |&mut _env, client| Ok(client),
         )
+    }
+
+    #[napi]
+    pub fn set_access_token(&self, token: String) {
+        *self.token.lock().unwrap() = Some(token);
     }
 
     #[napi]
@@ -404,12 +406,12 @@ impl FireflyClientNode {
         &self,
         group_id: f64,
         id: u32,
-        delete: bool,
+        is_delete: bool,
         name: String,
         channel_ty: u8,
         default_permissions: u32,
     ) -> Result<f64> {
-        let res = self.inner.update_group_channel(group_id as u64, id, delete, name, channel_ty, default_permissions).await
+        let res = self.inner.update_group_channel(group_id as u64, id, is_delete, name, channel_ty, default_permissions).await
             .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))?;
         Ok(res as f64)
     }

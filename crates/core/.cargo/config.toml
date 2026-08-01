@@ -1,5 +1,5 @@
 
-[build]
+[target.'cfg(not(target_arch = "wasm32"))']
 rustflags = [
   "--cfg", "mls_build_async",
 ]

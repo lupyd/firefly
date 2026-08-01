@@ -421,7 +421,8 @@ impl FireflyIdentityProvider {
     }
 }
 
-#[maybe_async::must_be_async]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl IdentityProvider for FireflyIdentityProvider {
     #[doc = " Error type that this provider returns on internal failure."]
     type Error = FireflyError;

@@ -1,12 +1,48 @@
-# Firefly MLS Example Chatbot
+# Firefly MLS Example Chatbot & Bot Framework (TypeScript + Bun)
 
-This is an example implementation of a client-side chatbot written in Node.js, showing how to integrate with the `firefly-client-node` FFI bindings and use the Firefly MLS network.
+This is a reusable framework and example implementation of a client-side chatbot written in TypeScript and executed natively using Bun, showing how to integrate with the `firefly-client-node` FFI bindings and use the Firefly MLS network.
 
-It demonstrates:
-1. **Interactive CLI Auth0 PKCE Flow:** Spins up a temporary local redirect server to capture credentials from a web browser login, exchanges the authorization code for tokens, and persists the session.
-2. **Emulator Mode (`EMULATOR_MODE=true`):** Bypasses OAuth logins entirely when running tests against the local emulator server.
-3. **Protobuf Encoding/Decoding:** Uses the compiled schema from `firefly-client-js` to deserialize incoming group messages and construct outgoing group message payloads.
-4. **Command Routing:** Triggers actions based on chat command prefixes (e.g. `/hi`, `/joke`, `/help`).
+It provides a clean, class-based framework API similar to popular bot frameworks (like Telegraf or Discord.js) so that anyone can easily build and deploy their own custom commands on the Firefly network.
+
+---
+
+## Features
+
+1. **Native TypeScript execution:** Powered by Bun, meaning TypeScript files run directly (`bun run src/index.ts`) with no separate build/compile step.
+2. **Clean Framework API:** Define commands using `bot.command(name, handler)` and respond using the context-aware `ctx.reply(text)` method.
+3. **Personal (Direct) & Group Chat Support:** Automatically handles command triggers sent via direct messages (personal chats) and replies back in the same personal chat.
+4. **Interactive CLI Auth0 PKCE Flow:** Spins up a temporary local redirect server to capture credentials from a web browser login, exchanges the authorization code for tokens, and persists the session.
+5. **Emulator Mode (`EMULATOR_MODE=true`):** Bypasses OAuth logins entirely when running tests against the local emulator server.
+6. **Dynamic Protobuf Compilation:** Loads [message.proto](file:///home/ash/lupyd-foundation/firefly-mls/examples/chatbot/message.proto) at runtime using `protobufjs` to serialize/deserialize group and direct message payloads.
+
+---
+
+## Reusable API Example
+
+Building a custom bot is simple:
+
+```typescript
+import { FireflyBot, BotContext } from './src/framework';
+
+const bot = new FireflyBot({
+  username: 'my_custom_bot', // Sets bot username
+  dbFile: './bot-store.db',  // Path to local SQLite store
+});
+
+// A greeting command
+bot.command('hi', async (ctx: BotContext) => {
+  // ctx.reply works for both group chats and direct messages (personal chats)
+  await ctx.reply(`Hello, @${ctx.sender}!`);
+});
+
+// A command with arguments
+bot.command('echo', async (ctx: BotContext) => {
+  await ctx.reply(`You said: ${ctx.args.join(' ')}`);
+});
+
+// Launch the bot
+bot.start();
+```
 
 ---
 
@@ -27,7 +63,7 @@ It demonstrates:
 
 From this directory (`examples/chatbot`), install dependencies:
 ```bash
-pnpm install
+bun install
 ```
 
 ---
@@ -37,7 +73,7 @@ pnpm install
 ### 1. Standard Production Mode (Auth0 Flow)
 Run the bot with standard defaults:
 ```bash
-pnpm start
+bun start
 ```
 The bot will:
 * Detect if there's an existing session in `./bot-session.json`.
@@ -52,15 +88,12 @@ export EMULATOR_MODE=true
 export BOT_USERNAME=my_local_bot
 export FIREFLY_BASE_URL=http://127.0.0.1:30000
 export FIREFLY_BASE_WS_URL=ws://127.0.0.1:30000/
-pnpm start
+bun start
 ```
 
----
-
-## Commands Supported
-
-When the bot is added to any group (invite it using its username), you can message the following slash commands in the group chat:
-
-* **`/hi`**: The bot will greet the sender.
-* **`/joke`**: The bot will fetch a funny dad joke from `https://icanhazdadjoke.com/` and post it.
-* **`/help`**: Shows all available commands.
+### 3. Running Unit Tests
+To execute the unit tests for the chatbot and framework:
+```bash
+bun test
+```
+This runs the Jest-compatible unit tests natively in Bun.

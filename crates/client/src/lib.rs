@@ -1,16 +1,29 @@
+#[cfg(not(target_arch = "wasm32"))]
 use log::LevelFilter;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::logger::TeeLogger;
 
 use firefly_protos::firefly;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod callbacks;
+
+#[cfg(not(target_arch = "wasm32"))]
 pub mod db;
+
 pub mod error;
+
+#[cfg(not(target_arch = "wasm32"))]
 pub mod group;
+
+#[cfg(not(target_arch = "wasm32"))]
 pub mod logger;
+
 pub mod schema;
 pub mod utils;
+
+#[cfg(not(target_arch = "wasm32"))]
 pub mod websocket;
 
 #[derive(Debug)]
@@ -70,8 +83,10 @@ impl Into<firefly::PreKeyBundle<'static>> for FfiPreKeyBundle {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 static INIT_LOGGING: std::sync::Once = std::sync::Once::new();
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn init_logger(file_path: String) {
     INIT_LOGGING.call_once(|| {
         init_logging(&file_path);
@@ -80,6 +95,7 @@ pub fn init_logger(file_path: String) {
     });
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn init_logging(file_path: &str) {
     let level = LevelFilter::Info;
     let tee_logger = TeeLogger::new(file_path, level).expect("can't initaite tee logger");
@@ -88,6 +104,7 @@ fn init_logging(file_path: &str) {
     log::set_max_level(level);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn set_panic_handler() {
     std::panic::set_hook(Box::new(|panic_info| {
         let backtrace = std::backtrace::Backtrace::force_capture();
@@ -112,10 +129,12 @@ fn set_panic_handler() {
     }));
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub struct FfiFileServer {
     server: tokio::sync::Mutex<shfs::FileServer>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl FfiFileServer {
     pub fn create(base_path: String, token: String) -> Self {
         let server = tokio::sync::Mutex::new(shfs::FileServer::new(base_path, token));

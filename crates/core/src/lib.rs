@@ -295,6 +295,13 @@ impl FireflyMlsClient {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+#[async_trait::async_trait(?Send)]
+pub trait FireflyAuthTokenCallback {
+    async fn token(&self) -> anyhow::Result<String>;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 pub trait FireflyAuthTokenCallback: Send + Sync {
     async fn token(&self) -> anyhow::Result<String>;

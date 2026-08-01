@@ -1,13 +1,16 @@
 {
   "name": "firefly-example-bot",
   "version": "1.0.0",
-  "description": "Example chat bot for Firefly MLS package",
-  "main": "index.js",
+  "description": "Example chat bot for Firefly MLS package using TypeScript and Bun",
+  "main": "src/index.ts",
   "scripts": {
-    "start": "node index.js"
+    "start": "bun run src/index.ts",
+    "test": "bun test"
   },
   "dependencies": {
-    "firefly-client-node": "file:../../crates/client-node",
-    "protobufjs": "^7.3.0"
+    "firefly-client-js": "file:../../crates/firefly-client-js"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
   }
 }

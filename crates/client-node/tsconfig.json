@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "module": "Node16",
+    "moduleResolution": "node16",
+    "target": "esnext",
+    "skipLibCheck": true,
+    "declaration": true,
+    "esModuleInterop": true,
+    "outDir": "./dist",
+    "rootDir": "src",
+    "strictNullChecks": true,
+    "types": ["node"]
+  },
+  "include": [
+    "src/**/*"
+  ]
+}

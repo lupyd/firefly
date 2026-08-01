@@ -1,1 +1,10 @@
 node_modules/
+alice-test-*
+bob-test-*
+alice-session-*
+bob-session-*
+*.db
+*.db-shm
+*.db-wal
+*.json
+!package.json

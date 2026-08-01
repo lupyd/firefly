@@ -9,20 +9,20 @@ importers:
   .:
     dependencies:
       firefly-client-node:
-        specifier: file:../../crates/client-node
-        version: file:../../crates/client-node
-      protobufjs:
-        specifier: ^7.3.0
-        version: 7.6.5
+        specifier: file:../client-node
+        version: file:../client-node
     devDependencies:
       '@types/node':
         specifier: ^20.11.0
         version: 20.19.43
       typescript:
-        specifier: ^7.0.2
+        specifier: latest
         version: 7.0.2
 
 packages:
+
+  '@bufbuild/protobuf@2.13.0':
+    resolution: {integrity: sha512-acq7c49vxfm1ggJ95P70TX7ABDM0vxr1SYD3BB0o0jnBLB4OAqeHyKuN+cD3w80gXEDQ2zxHpR6CUeA+O/aU9g==}
 
   '@protobufjs/aspromise@1.1.2':
     resolution: {integrity: sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ==}
@@ -53,9 +53,6 @@ packages:
 
   '@types/node@20.19.43':
     resolution: {integrity: sha512-6oYBAi5ikg4Pl+kGsoYtawUMBT2zZMCvPNF7pVLnHZfd1zf38DRiWn/gT01RYCdUqkv7Fhr+C9ot4/tb+2sVvA==}
-
-  '@types/node@26.1.2':
-    resolution: {integrity: sha512-Vu4a5UFA9rIIFJ7rB/Vaafh9lrCQszopTCx6KjFboXTGQbPNasehVR5TEiithSDGyd1DEiUByggTZsg8jukeIg==}
 
   '@typescript/typescript-aix-ppc64@7.0.2':
     resolution: {integrity: sha512-MTKKkWB7p/0E9xi1d1tHtZ5PiLkGEMIq88pK2CubZjOsLtYTLqhgIgi6zepFa+9GHZ6h05NMCkQxGKiPXMxXtQ==}
@@ -177,8 +174,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  firefly-client-node@file:../../crates/client-node:
-    resolution: {directory: ../../crates/client-node, type: directory}
+  firefly-client-node@file:../client-node:
+    resolution: {directory: ../client-node, type: directory}
 
   long@5.3.2:
     resolution: {integrity: sha512-mNAgZ1GmyNhD7AuqnTG3/VQ26o760+ZYBPKjPvugO8+nLbYfX6TVpJPseBvopbdY+qpZ/lKUnmEc1LeZYS3QAA==}
@@ -195,10 +192,9 @@ packages:
   undici-types@6.21.0:
     resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
 
-  undici-types@8.3.0:
-    resolution: {integrity: sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ==}
-
 snapshots:
+
+  '@bufbuild/protobuf@2.13.0': {}
 
   '@protobufjs/aspromise@1.1.2': {}
 
@@ -223,10 +219,6 @@ snapshots:
   '@types/node@20.19.43':
     dependencies:
       undici-types: 6.21.0
-
-  '@types/node@26.1.2':
-    dependencies:
-      undici-types: 8.3.0
 
   '@typescript/typescript-aix-ppc64@7.0.2':
     optional: true
@@ -288,7 +280,10 @@ snapshots:
   '@typescript/typescript-win32-x64@7.0.2':
     optional: true
 
-  firefly-client-node@file:../../crates/client-node: {}
+  firefly-client-node@file:../client-node:
+    dependencies:
+      '@bufbuild/protobuf': 2.13.0
+      protobufjs: 7.6.5
 
   long@5.3.2: {}
 
@@ -303,7 +298,7 @@ snapshots:
       '@protobufjs/path': 1.1.2
       '@protobufjs/pool': 1.1.0
       '@protobufjs/utf8': 1.1.2
-      '@types/node': 26.1.2
+      '@types/node': 20.19.43
       long: 5.3.2
 
   typescript@7.0.2:
@@ -330,5 +325,3 @@ snapshots:
       '@typescript/typescript-win32-x64': 7.0.2
 
   undici-types@6.21.0: {}
-
-  undici-types@8.3.0: {}
