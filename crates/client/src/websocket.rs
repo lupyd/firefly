@@ -3201,6 +3201,11 @@ impl FfiFireflyWsClient {
             .add_group_member(groupId, username, role_id)
             .await
     }
+
+    pub async fn request_re_add(&self, group_ids: Vec<u64>) -> anyhow::Result<()> {
+        self.inner.request_re_add(group_ids).await
+    }
+
     pub async fn kick_group_member(&self, groupId: u64, username: String) -> anyhow::Result<()> {
         self.inner.kick_group_member(groupId, username).await
     }
