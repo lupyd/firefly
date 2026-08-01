@@ -1,0 +1,13 @@
+{
+  "name": "firefly-example-bot",
+  "version": "1.0.0",
+  "description": "Example chat bot for Firefly MLS package",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "firefly-client-node": "file:../../crates/client-node",
+    "protobufjs": "^7.3.0"
+  }
+}

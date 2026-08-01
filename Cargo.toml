@@ -4,6 +4,7 @@ members = [
     "crates/server",
     "crates/protos",
     "crates/client",
+    "crates/client-node",
 ]
 resolver = "2"
 

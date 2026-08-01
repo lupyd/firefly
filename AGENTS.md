@@ -11,6 +11,8 @@ docker compose up -d
 ```
 The database will be initialized using `initdb.sql`.
 
+Any changes to the db schema must be added to end of file only of initdb.sql and marked after a comment # migrations explaining the reason
+
 ### 2. Post-Change Verification
 After making any code changes, always run `cargo check` to verify that the project still compiles and there are no type errors or lint warnings:
 ```bash
