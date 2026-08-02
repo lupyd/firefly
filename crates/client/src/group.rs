@@ -186,6 +186,7 @@ impl FfiMlsClient {
             id: 1,
             name: "owner".into(),
             permissions: u32::MAX,
+            color: Default::default(),
         });
 
         ext.update_member(FireflyGroupMember {
@@ -359,6 +360,7 @@ impl FfiMlsGroup {
                 name: role.name,
                 permissions: role.permissions,
                 delete: role.delete,
+                color: role.color,
             }))
             .await
     }
@@ -385,6 +387,7 @@ impl FfiMlsGroup {
                     role_id: x.role_id,
                     permissions: x.permissions,
                     delete: x.delete,
+                    color: x.color,
                 },
             }))
             .await
@@ -417,6 +420,7 @@ pub struct UpdateRoleProposalFfi {
     pub role_id: u32,
     pub permissions: u32,
     pub delete: bool,
+    pub color: u32,
 }
 
 pub struct UpdateUserProposalFfi {

@@ -127,6 +127,18 @@ message GroupReAddRequests {
   repeated GroupReAddRequest requests = 1;
 }
 
+message GroupMemberOnlineStatus {
+  uint64 address_id = 1;
+  string username = 2;
+  uint32 device_id = 3;
+  uint64 last_connected_at = 4;
+  bool is_online = 5;
+}
+
+message GroupMembersOnlineStatus {
+  repeated GroupMemberOnlineStatus members = 1;
+}
+
 message Error {
   string error = 2;
   uint32 errorCode = 1;
@@ -298,6 +310,7 @@ message FireflyGroupRole {
   uint32 id = 1;
   string name = 2;
   fixed32 permissions = 3;
+  uint32 color = 4;
 }
 
 message FireflyGroupMember {

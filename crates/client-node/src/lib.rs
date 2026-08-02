@@ -93,13 +93,14 @@ pub struct NapiUpdateRoleProposal {
     pub role_id: u32,
     pub permissions: u32,
     pub delete: bool,
+    pub color: u32,
 }
 
 struct NodeClientCallbacks {
     name: String,
     token: Arc<Mutex<Option<String>>>,
-    on_message_fn: ThreadsafeFunction<NapiUserMessage, ErrorStrategy::CalleeHandled>,
-    on_group_message_fn: ThreadsafeFunction<NapiGroupMessage, ErrorStrategy::CalleeHandled>,
+    on_message_fn: ThreadsafeFunction<String, ErrorStrategy::CalleeHandled>,
+    on_group_message_fn: ThreadsafeFunction<String, ErrorStrategy::CalleeHandled>,
     on_group_joined_fn: ThreadsafeFunction<u64, ErrorStrategy::CalleeHandled>,
     on_call_signal_fn: ThreadsafeFunction<NapiCallSignal, ErrorStrategy::CalleeHandled>,
     on_group_meeting_signal_fn: ThreadsafeFunction<NapiGroupMeetingSignal, ErrorStrategy::CalleeHandled>,
@@ -122,7 +123,8 @@ impl FireflyWsClientCallback for NodeClientCallbacks {
             message: message.message,
             sent_by_other: message.sent_by_other,
         };
-        let status = self.on_message_fn.call(Ok(msg), ThreadsafeFunctionCallMode::NonBlocking);
+        let json = serde_json::to_string(&msg).unwrap_or_default();
+        let status = self.on_message_fn.call(Ok(json), ThreadsafeFunctionCallMode::NonBlocking);
         if status != napi::Status::Ok {
             eprintln!("Failed to call JS onMessage callback: {:?}", status);
         }
@@ -137,7 +139,8 @@ impl FireflyWsClientCallback for NodeClientCallbacks {
             channel_id: group_message.channel_id,
             epoch: group_message.epoch,
         };
-        let status = self.on_group_message_fn.call(Ok(msg), ThreadsafeFunctionCallMode::NonBlocking);
+        let json = serde_json::to_string(&msg).unwrap_or_default();
+        let status = self.on_group_message_fn.call(Ok(json), ThreadsafeFunctionCallMode::NonBlocking);
         if status != napi::Status::Ok {
             eprintln!("Failed to call JS onGroupMessage callback: {:?}", status);
         }
@@ -186,15 +189,15 @@ fn extract_callbacks(callbacks_obj: JsObject, token: Arc<Mutex<Option<String>>>)
     let on_call_signal_js: JsFunction = callbacks_obj.get_named_property("onCallSignal")?;
     let on_group_meeting_signal_js: JsFunction = callbacks_obj.get_named_property("onGroupMeetingSignal")?;
 
-    let on_message_fn = on_message_js.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<NapiUserMessage>| {
-        let json = serde_json::to_string(&ctx.value).map_err(|e| napi::Error::new(Status::GenericFailure, e.to_string()))?;
-        let js_str = ctx.env.create_string(&json)?;
+    let on_message_fn = on_message_js.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<String>| {
+        eprintln!("on_message_fn closure value: {}", ctx.value);
+        let js_str = ctx.env.create_string(&ctx.value)?;
         Ok(vec![js_str.into_unknown()])
     })?;
 
-    let on_group_message_fn = on_group_message_js.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<NapiGroupMessage>| {
-        let json = serde_json::to_string(&ctx.value).map_err(|e| napi::Error::new(Status::GenericFailure, e.to_string()))?;
-        let js_str = ctx.env.create_string(&json)?;
+    let on_group_message_fn = on_group_message_js.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<String>| {
+        eprintln!("on_group_message_fn closure value: {}", ctx.value);
+        let js_str = ctx.env.create_string(&ctx.value)?;
         Ok(vec![js_str.into_unknown()])
     })?;
 
@@ -423,6 +426,7 @@ impl FireflyClientNode {
             role_id: r.role_id,
             permissions: r.permissions,
             delete: r.delete,
+            color: r.color,
         }).collect();
         let res = self.inner.update_group_roles(group_id as u64, mapped).await
             .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))?;
@@ -436,6 +440,7 @@ impl FireflyClientNode {
             role_id: r.role_id,
             permissions: r.permissions,
             delete: r.delete,
+            color: r.color,
         }).collect();
         let res = self.inner.update_group_roles_in_channel(group_id as u64, channel_id, mapped).await
             .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))?;

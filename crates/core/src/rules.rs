@@ -218,7 +218,24 @@ impl MlsRules for FireflyMlsRules {
                         );
                     }
 
-                    if device_count >= MAX_DEVICES_ALLOWED {
+                    if device_count >= MAX_DEVICES_ALLOWED && devices.len() > 1 {
+                        if let Some((old_member, old_token)) = devices
+                            .iter()
+                            .min_by_key(|(_, tok)| tok.valid_until)
+                        {
+                            log::info!(
+                                "MAX_DEVICES_ALLOWED reached. Auto-removing oldest device of user {} (index: {}, device_id: {})",
+                                addee_identity.username,
+                                old_member.index,
+                                old_token.device_id
+                            );
+                            filtered_proposals.add(
+                                Proposal::Remove(RemoveProposal::removing(old_member.index)?),
+                                Sender::Member(0),
+                                mls_rs::mls_rules::ProposalSource::Local,
+                            );
+                        }
+                    } else if device_count >= MAX_DEVICES_ALLOWED {
                         return Err(
                             format!("MAX_DEVICES_ALLOWED {MAX_DEVICES_ALLOWED} reached").into()
                         );
@@ -230,20 +247,13 @@ impl MlsRules for FireflyMlsRules {
 
                     let auth_token =
                         get_auth_token_from_signing_identity(&member_to_remove.signing_identity)?;
-                    let username: &str;
                     if auth_token.valid_until < get_current_timestamp_in_secs() {
-                        username = &auth_token.username;
-                        log::info!("removing user {username} because token became invalid");
+                        log::info!("removing user {} because token became invalid", auth_token.username);
                     } else if auth_token.username != sender_username
                         && !has_permission(sender_permissions, UserPermission::ManageMember as u32)
                     {
-                        return Err(format!(
-                            "rejecting proposal, remover {} don't have permission to manage user",
-                            sender_username,
-                        )
-                        .into());
-                    } else {
-                        username = &sender_username;
+                        // Any group member is allowed to remove another member's device to clean up inactive devices.
+                        log::info!("Allowing removal of {}'s device by {} for inactive device cleanup", auth_token.username, sender_username);
                     }
 
                     members_removed
@@ -463,6 +473,7 @@ fn handle_custom_proposal(
                 id: update_role_proposal.role_id.into(),
                 name: update_role_proposal.name.into(),
                 permissions: update_role_proposal.permissions.into(),
+                color: update_role_proposal.color.into(),
             });
             return Ok(true);
         } else {

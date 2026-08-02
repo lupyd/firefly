@@ -159,6 +159,16 @@ export interface GroupReAddRequest {
 export interface GroupReAddRequests {
     requests: GroupReAddRequest[];
 }
+export interface GroupMemberOnlineStatus {
+    addressId: bigint;
+    username: string;
+    deviceId: number;
+    lastConnectedAt: bigint;
+    isOnline: boolean;
+}
+export interface GroupMembersOnlineStatus {
+    members: GroupMemberOnlineStatus[];
+}
 export interface Error {
     error: string;
     errorCode: number;
@@ -292,6 +302,7 @@ export interface FireflyGroupRole {
     id: number;
     name: string;
     permissions: number;
+    color: number;
 }
 export interface FireflyGroupMember {
     username: string;
@@ -492,6 +503,8 @@ export declare const GroupCommits: MessageFns<GroupCommits>;
 export declare const GroupCommitSyncRequest: MessageFns<GroupCommitSyncRequest>;
 export declare const GroupReAddRequest: MessageFns<GroupReAddRequest>;
 export declare const GroupReAddRequests: MessageFns<GroupReAddRequests>;
+export declare const GroupMemberOnlineStatus: MessageFns<GroupMemberOnlineStatus>;
+export declare const GroupMembersOnlineStatus: MessageFns<GroupMembersOnlineStatus>;
 export declare const Error: MessageFns<Error>;
 export declare const Result: MessageFns<Result>;
 export declare const Address: MessageFns<Address>;

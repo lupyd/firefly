@@ -18,6 +18,7 @@ function sleep(ms: number) {
 test('Firefly JS Client Integration Test - DM, Group Invite, and Group Messaging', { timeout: 60000 }, async (t) => {
   process.env.EMULATOR_MODE = 'true';
   process.env.NO_TOKEN_VERIFICATION = 'true';
+  process.env.FIREFLY_BASE_URL = 'http://127.0.0.1:39305';
   const port = 39305;
   const dbSuffix = Math.floor(Math.random() * 100000);
   const aliceDb = path.resolve(process.cwd(), `alice-test-${dbSuffix}.db`);
@@ -38,12 +39,13 @@ test('Firefly JS Client Integration Test - DM, Group Invite, and Group Messaging
   cleanupFiles();
 
   console.log('Spawning Firefly MLS Server on port', port);
-  const serverProcess = spawn('cargo', ['run', '--bin', 'firefly-server'], {
+  const serverProcess = spawn('/home/ash/.cargo/target/debug/firefly-server', [], {
     env: {
       ...process.env,
       EMULATOR_MODE: 'true',
       NO_TOKEN_VERIFICATION: 'true',
       PORT: String(port),
+      FIREFLY_BASE_URL: `http://127.0.0.1:${port}`,
       RUST_LOG: 'info',
     },
   });
@@ -169,6 +171,29 @@ test('Firefly JS Client Integration Test - DM, Group Invite, and Group Messaging
 
     // Wait a bit for both to update group states and epochs
     await sleep(2000);
+
+    // ----------------------------------------------------
+    // TEST 2.5: Group Members Online Status and Last Connected
+    // ----------------------------------------------------
+    console.log('Alice fetching group members online status...');
+    const memberStatus = await alice.getGroupMembersOnlineStatus(Number(groupId));
+    console.log('Group members status received:', JSON.stringify(memberStatus, (k, v) => typeof v === 'bigint' ? v.toString() : v));
+
+    assert.ok(memberStatus.members && memberStatus.members.length >= 2, 'Should have at least 2 members in group');
+    
+    const aliceStatus = memberStatus.members.find((m: any) => m.username === 'alice');
+    const bobStatus = memberStatus.members.find((m: any) => m.username === 'bob');
+
+    assert.ok(aliceStatus, 'Alice should be in the member status list');
+    assert.ok(bobStatus, 'Bob should be in the member status list');
+
+    assert.ok(aliceStatus.isOnline, 'Alice should be online');
+    assert.ok(bobStatus.isOnline, 'Bob should be online');
+
+    assert.ok(aliceStatus.lastConnectedAt > 0n, 'Alice last connected timestamp should be set');
+    assert.ok(bobStatus.lastConnectedAt > 0n, 'Bob last connected timestamp should be set');
+
+    console.log('Group members online status test passed!');
 
     // ----------------------------------------------------
     // TEST 3: Group Messaging

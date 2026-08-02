@@ -62,6 +62,7 @@ export interface NapiUpdateRoleProposal {
   roleId: number
   permissions: number
   delete: boolean
+  color: number
 }
 export declare function initLogger(filePath: string): void
 export declare class FireflyClientNode {

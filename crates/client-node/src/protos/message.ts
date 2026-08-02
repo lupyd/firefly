@@ -362,6 +362,18 @@ export interface GroupReAddRequests {
   requests: GroupReAddRequest[];
 }
 
+export interface GroupMemberOnlineStatus {
+  addressId: bigint;
+  username: string;
+  deviceId: number;
+  lastConnectedAt: bigint;
+  isOnline: boolean;
+}
+
+export interface GroupMembersOnlineStatus {
+  members: GroupMemberOnlineStatus[];
+}
+
 export interface Error {
   error: string;
   errorCode: number;
@@ -514,6 +526,7 @@ export interface FireflyGroupRole {
   id: number;
   name: string;
   permissions: number;
+  color: number;
 }
 
 export interface FireflyGroupMember {
@@ -2746,6 +2759,216 @@ export const GroupReAddRequests: MessageFns<GroupReAddRequests> = {
   fromPartial<I extends Exact<DeepPartial<GroupReAddRequests>, I>>(object: I): GroupReAddRequests {
     const message = createBaseGroupReAddRequests();
     message.requests = object.requests?.map((e) => GroupReAddRequest.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseGroupMemberOnlineStatus(): GroupMemberOnlineStatus {
+  return { addressId: 0n, username: "", deviceId: 0, lastConnectedAt: 0n, isOnline: false };
+}
+
+export const GroupMemberOnlineStatus: MessageFns<GroupMemberOnlineStatus> = {
+  encode(message: GroupMemberOnlineStatus, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.addressId !== 0n) {
+      if (BigInt.asUintN(64, message.addressId) !== message.addressId) {
+        throw new globalThis.Error("value provided for field message.addressId of type uint64 too large");
+      }
+      writer.uint32(8).uint64(message.addressId);
+    }
+    if (message.username !== "") {
+      writer.uint32(18).string(message.username);
+    }
+    if (message.deviceId !== 0) {
+      writer.uint32(24).uint32(message.deviceId);
+    }
+    if (message.lastConnectedAt !== 0n) {
+      if (BigInt.asUintN(64, message.lastConnectedAt) !== message.lastConnectedAt) {
+        throw new globalThis.Error("value provided for field message.lastConnectedAt of type uint64 too large");
+      }
+      writer.uint32(32).uint64(message.lastConnectedAt);
+    }
+    if (message.isOnline !== false) {
+      writer.uint32(40).bool(message.isOnline);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GroupMemberOnlineStatus {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGroupMemberOnlineStatus();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.addressId = reader.uint64() as bigint;
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.username = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.deviceId = reader.uint32();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.lastConnectedAt = reader.uint64() as bigint;
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.isOnline = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GroupMemberOnlineStatus {
+    return {
+      addressId: isSet(object.addressId)
+        ? BigInt(object.addressId)
+        : isSet(object.address_id)
+        ? BigInt(object.address_id)
+        : 0n,
+      username: isSet(object.username) ? globalThis.String(object.username) : "",
+      deviceId: isSet(object.deviceId)
+        ? globalThis.Number(object.deviceId)
+        : isSet(object.device_id)
+        ? globalThis.Number(object.device_id)
+        : 0,
+      lastConnectedAt: isSet(object.lastConnectedAt)
+        ? BigInt(object.lastConnectedAt)
+        : isSet(object.last_connected_at)
+        ? BigInt(object.last_connected_at)
+        : 0n,
+      isOnline: isSet(object.isOnline)
+        ? globalThis.Boolean(object.isOnline)
+        : isSet(object.is_online)
+        ? globalThis.Boolean(object.is_online)
+        : false,
+    };
+  },
+
+  toJSON(message: GroupMemberOnlineStatus): unknown {
+    const obj: any = {};
+    if (message.addressId !== 0n) {
+      obj.addressId = message.addressId.toString();
+    }
+    if (message.username !== "") {
+      obj.username = message.username;
+    }
+    if (message.deviceId !== 0) {
+      obj.deviceId = Math.round(message.deviceId);
+    }
+    if (message.lastConnectedAt !== 0n) {
+      obj.lastConnectedAt = message.lastConnectedAt.toString();
+    }
+    if (message.isOnline !== false) {
+      obj.isOnline = message.isOnline;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GroupMemberOnlineStatus>, I>>(base?: I): GroupMemberOnlineStatus {
+    return GroupMemberOnlineStatus.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GroupMemberOnlineStatus>, I>>(object: I): GroupMemberOnlineStatus {
+    const message = createBaseGroupMemberOnlineStatus();
+    message.addressId = (object.addressId !== undefined && object.addressId !== null) ? BigInt(object.addressId) : 0n;
+    message.username = object.username ?? "";
+    message.deviceId = object.deviceId ?? 0;
+    message.lastConnectedAt = (object.lastConnectedAt !== undefined && object.lastConnectedAt !== null)
+      ? BigInt(object.lastConnectedAt)
+      : 0n;
+    message.isOnline = object.isOnline ?? false;
+    return message;
+  },
+};
+
+function createBaseGroupMembersOnlineStatus(): GroupMembersOnlineStatus {
+  return { members: [] };
+}
+
+export const GroupMembersOnlineStatus: MessageFns<GroupMembersOnlineStatus> = {
+  encode(message: GroupMembersOnlineStatus, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.members) {
+      GroupMemberOnlineStatus.encode(v!, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GroupMembersOnlineStatus {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGroupMembersOnlineStatus();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.members.push(GroupMemberOnlineStatus.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GroupMembersOnlineStatus {
+    return {
+      members: globalThis.Array.isArray(object?.members)
+        ? object.members.map((e: any) => GroupMemberOnlineStatus.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: GroupMembersOnlineStatus): unknown {
+    const obj: any = {};
+    if (message.members?.length) {
+      obj.members = message.members.map((e) => GroupMemberOnlineStatus.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GroupMembersOnlineStatus>, I>>(base?: I): GroupMembersOnlineStatus {
+    return GroupMembersOnlineStatus.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GroupMembersOnlineStatus>, I>>(object: I): GroupMembersOnlineStatus {
+    const message = createBaseGroupMembersOnlineStatus();
+    message.members = object.members?.map((e) => GroupMemberOnlineStatus.fromPartial(e)) || [];
     return message;
   },
 };
@@ -5270,7 +5493,7 @@ export const FireflyGroupExtension: MessageFns<FireflyGroupExtension> = {
 };
 
 function createBaseFireflyGroupRole(): FireflyGroupRole {
-  return { id: 0, name: "", permissions: 0 };
+  return { id: 0, name: "", permissions: 0, color: 0 };
 }
 
 export const FireflyGroupRole: MessageFns<FireflyGroupRole> = {
@@ -5283,6 +5506,9 @@ export const FireflyGroupRole: MessageFns<FireflyGroupRole> = {
     }
     if (message.permissions !== 0) {
       writer.uint32(29).fixed32(message.permissions);
+    }
+    if (message.color !== 0) {
+      writer.uint32(32).uint32(message.color);
     }
     return writer;
   },
@@ -5318,6 +5544,14 @@ export const FireflyGroupRole: MessageFns<FireflyGroupRole> = {
           message.permissions = reader.fixed32();
           continue;
         }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.color = reader.uint32();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5332,6 +5566,7 @@ export const FireflyGroupRole: MessageFns<FireflyGroupRole> = {
       id: isSet(object.id) ? globalThis.Number(object.id) : 0,
       name: isSet(object.name) ? globalThis.String(object.name) : "",
       permissions: isSet(object.permissions) ? globalThis.Number(object.permissions) : 0,
+      color: isSet(object.color) ? globalThis.Number(object.color) : 0,
     };
   },
 
@@ -5346,6 +5581,9 @@ export const FireflyGroupRole: MessageFns<FireflyGroupRole> = {
     if (message.permissions !== 0) {
       obj.permissions = Math.round(message.permissions);
     }
+    if (message.color !== 0) {
+      obj.color = Math.round(message.color);
+    }
     return obj;
   },
 
@@ -5357,6 +5595,7 @@ export const FireflyGroupRole: MessageFns<FireflyGroupRole> = {
     message.id = object.id ?? 0;
     message.name = object.name ?? "";
     message.permissions = object.permissions ?? 0;
+    message.color = object.color ?? 0;
     return message;
   },
 };

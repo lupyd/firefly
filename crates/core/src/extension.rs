@@ -265,6 +265,7 @@ impl<'a> FireflyGroupExtensionWrapper<'a> {
                         id: role_id,
                         name: Default::default(),
                         permissions,
+                        color: Default::default(),
                     },
                 );
             }

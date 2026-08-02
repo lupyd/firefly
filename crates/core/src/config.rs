@@ -129,6 +129,7 @@ pub struct UpdateRoleProposal {
     pub role_id: u32,
     pub permissions: u32,
     pub delete: bool,
+    pub color: u32,
 }
 
 impl MlsCustomProposal for UpdateRoleProposal {

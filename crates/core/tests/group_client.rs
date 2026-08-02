@@ -267,6 +267,7 @@ async fn group_flow() {
         id: 1,
         name: "owner".into(),
         permissions: u32::MAX,
+        color: Default::default(),
     });
     wrapper.update_member(FireflyGroupMember {
         username: "alice".into(),
@@ -374,6 +375,7 @@ async fn group_flow() {
                 permissions: (UserPermission::ManageMember as u32
                     | UserPermission::AddMessage as u32),
                 delete: false,
+                color: Default::default(),
             }]
             .into_iter(),
         )
@@ -474,6 +476,7 @@ async fn group_flow() {
                 role_id: 2,
                 permissions: 0,
                 delete: false,
+                color: Default::default(),
             }]
             .into_iter(),
         )
@@ -495,6 +498,7 @@ async fn group_flow() {
                     | (UserPermission::ManageChannel as u32)
                     | (UserPermission::ManageRole as u32),
                 delete: false,
+                color: Default::default(),
             }]
             .into_iter(),
         )
@@ -523,6 +527,7 @@ async fn group_flow() {
                 role_id: 3,
                 permissions: UserPermission::AddMessage as u32,
                 delete: false,
+                color: Default::default(),
             }]
             .into_iter(),
         )
@@ -537,6 +542,7 @@ async fn group_flow() {
                 role_id: 4,
                 permissions: UserPermission::ManageMember as u32,
                 delete: false,
+                color: Default::default(),
             }]
             .into_iter(),
         )
@@ -587,6 +593,7 @@ async fn group_flow() {
                 role_id: 5,
                 permissions: 0,
                 delete: false,
+                color: Default::default(),
             }]
             .into_iter(),
         )
@@ -630,6 +637,7 @@ async fn group_flow() {
                 permissions: (UserPermission::AddMessage as u32)
                     | (UserPermission::ManageRole as u32),
                 delete: false,
+                color: Default::default(),
             }]
             .into_iter(),
         )
@@ -687,6 +695,7 @@ async fn group_flow() {
                 role_id: 1,
                 permissions: 0,
                 delete: true,
+                color: Default::default(),
             }]
             .into_iter(),
         )
@@ -704,6 +713,7 @@ async fn group_flow() {
                 role_id: 3,
                 permissions: 0,
                 delete: true,
+                color: Default::default(),
             }]
             .into_iter(),
         )

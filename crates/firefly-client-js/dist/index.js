@@ -120,6 +120,22 @@ class FireflyClient {
         const trigger = name.startsWith('/') ? name.toLowerCase() : `/${name.toLowerCase()}`;
         this.commands.set(trigger, handler);
     }
+    // Fetch members' online status and last connected timestamp
+    async getGroupMembersOnlineStatus(groupId) {
+        const token = await this.getOrRenewAccessToken();
+        const response = await fetch(`${this.apiBaseUrl}/group/members/status?groupId=${groupId}`, {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${token}`,
+            },
+        });
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`Failed to fetch group members status: ${errText}`);
+        }
+        const buffer = await response.arrayBuffer();
+        return firefly_client_node_1.protos.GroupMembersOnlineStatus.decode(new Uint8Array(buffer));
+    }
     // Load and save session
     _loadSession() {
         if (fs.existsSync(this.sessionFile)) {
@@ -355,27 +371,31 @@ class FireflyClient {
                 console.log(`[getAccessToken Callback] returning token: ${token}`);
                 return token;
             },
-            onMessage: async (msg) => {
-                try {
-                    console.log("[onMessage] arguments length:", arguments.length, "first argument is null?", arguments[0] === null);
-                    console.log("[onMessage] first argument keys:", arguments[0] ? Object.keys(arguments[0]) : "none");
+            onMessage: async (err, msgJson) => {
+                if (err) {
+                    console.error("onMessage error:", err);
+                    return;
                 }
-                catch (e) {
-                    console.error("[onMessage] log error:", e);
-                }
-                console.log(`[onMessage] raw msg received from: ${msg ? msg.other : "null"}, sentByOther: ${msg ? msg.sentByOther : "null"}`);
-                if (!msg || !msg.sentByOther)
-                    return; // skip outgoing
+                console.log("[onMessage] trigger check, msgJson:", msgJson);
+                if (!msgJson)
+                    return;
                 try {
-                    const decoded = UserMessageInner.decode(new Uint8Array(msg.message));
-                    console.log('[onMessage] decoded inner message:', JSON.stringify(decoded));
+                    const msg = JSON.parse(msgJson);
+                    const other = msg.other;
+                    const sentByOther = msg.sent_by_other;
+                    const message = msg.message;
+                    console.log(`[onMessage] msg received from: ${other}, sentByOther: ${sentByOther}`);
+                    if (!sentByOther)
+                        return; // skip outgoing
+                    const decoded = UserMessageInner.decode(new Uint8Array(message));
+                    console.log('[onMessage] decoded inner message:', JSON.stringify(decoded, (k, v) => typeof v === 'bigint' ? v.toString() : v));
                     const text = decoded.messagePayload?.text;
                     if (!text)
                         return;
-                    console.log(`[Direct Message] From: ${msg.other}, Content: "${text}"`);
+                    console.log(`[Direct Message] From: ${other}, Content: "${text}"`);
                     await this._handleMessage({
                         text,
-                        sender: msg.other,
+                        sender: other,
                         isGroup: false,
                         groupId: null,
                         channelId: null,
@@ -385,27 +405,35 @@ class FireflyClient {
                     console.error('Error handling direct message:', err);
                 }
             },
-            onGroupMessage: async (msg) => {
-                try {
-                    console.log("[onGroupMessage] arguments length:", arguments.length, "first argument is null?", arguments[0] === null);
+            onGroupMessage: async (err, msgJson) => {
+                if (err) {
+                    console.error("onGroupMessage error:", err);
+                    return;
                 }
-                catch (e) { }
-                console.log(`[onGroupMessage] raw msg received from: ${msg ? msg.by : "null"}, group: ${msg ? msg.groupId : "null"}`);
-                if (!msg || msg.by === this.session.username)
-                    return; // skip outgoing
+                console.log("[onGroupMessage] trigger check, msgJson:", msgJson);
+                if (!msgJson)
+                    return;
                 try {
-                    const decoded = GroupMessageInner.decode(new Uint8Array(msg.message));
-                    console.log('[onGroupMessage] decoded inner message:', JSON.stringify(decoded));
+                    const msg = JSON.parse(msgJson);
+                    const by = msg.by;
+                    const groupId = msg.group_id;
+                    const message = msg.message;
+                    const channelId = msg.channel_id;
+                    console.log(`[onGroupMessage] msg received from: ${by}, group: ${groupId}`);
+                    if (by === this.session.username)
+                        return; // skip outgoing
+                    const decoded = GroupMessageInner.decode(new Uint8Array(message));
+                    console.log('[onGroupMessage] decoded inner message:', JSON.stringify(decoded, (k, v) => typeof v === 'bigint' ? v.toString() : v));
                     const text = decoded.messagePayload?.text;
                     if (!text)
                         return;
-                    console.log(`[Group Message] Group ID: ${msg.groupId}, By: ${msg.by}, Content: "${text}"`);
+                    console.log(`[Group Message] Group ID: ${groupId}, By: ${by}, Content: "${text}"`);
                     await this._handleMessage({
                         text,
-                        sender: msg.by,
+                        sender: by,
                         isGroup: true,
-                        groupId: msg.groupId,
-                        channelId: msg.channelId,
+                        groupId: groupId,
+                        channelId: channelId,
                     });
                 }
                 catch (err) {

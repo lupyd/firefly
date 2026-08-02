@@ -994,6 +994,86 @@ impl<'a> MessageWrite for GroupReAddRequests<'a> {
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Default, PartialEq, Clone)]
+pub struct GroupMemberOnlineStatus<'a> {
+    pub address_id: u64,
+    pub username: Cow<'a, str>,
+    pub device_id: u32,
+    pub last_connected_at: u64,
+    pub is_online: bool,
+}
+
+impl<'a> MessageRead<'a> for GroupMemberOnlineStatus<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.address_id = r.read_uint64(bytes)?,
+                Ok(18) => msg.username = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(24) => msg.device_id = r.read_uint32(bytes)?,
+                Ok(32) => msg.last_connected_at = r.read_uint64(bytes)?,
+                Ok(40) => msg.is_online = r.read_bool(bytes)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for GroupMemberOnlineStatus<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.address_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.address_id) as u64) }
+        + if self.username == "" { 0 } else { 1 + sizeof_len((&self.username).len()) }
+        + if self.device_id == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.device_id) as u64) }
+        + if self.last_connected_at == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.last_connected_at) as u64) }
+        + if self.is_online == false { 0 } else { 1 + sizeof_varint(*(&self.is_online) as u64) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.address_id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.address_id))?; }
+        if self.username != "" { w.write_with_tag(18, |w| w.write_string(&**&self.username))?; }
+        if self.device_id != 0u32 { w.write_with_tag(24, |w| w.write_uint32(*&self.device_id))?; }
+        if self.last_connected_at != 0u64 { w.write_with_tag(32, |w| w.write_uint64(*&self.last_connected_at))?; }
+        if self.is_online != false { w.write_with_tag(40, |w| w.write_bool(*&self.is_online))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct GroupMembersOnlineStatus<'a> {
+    pub members: Vec<firefly::GroupMemberOnlineStatus<'a>>,
+}
+
+impl<'a> MessageRead<'a> for GroupMembersOnlineStatus<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(10) => msg.members.push(r.read_message::<firefly::GroupMemberOnlineStatus>(bytes)?),
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for GroupMembersOnlineStatus<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + self.members.iter().map(|s| 1 + sizeof_len((s).get_size())).sum::<usize>()
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        for s in &self.members { w.write_with_tag(10, |w| w.write_message(s))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
 pub struct Error<'a> {
     pub error: Cow<'a, str>,
     pub errorCode: u32,
@@ -1970,6 +2050,7 @@ pub struct FireflyGroupRole<'a> {
     pub id: u32,
     pub name: Cow<'a, str>,
     pub permissions: u32,
+    pub color: u32,
 }
 
 impl<'a> MessageRead<'a> for FireflyGroupRole<'a> {
@@ -1980,6 +2061,7 @@ impl<'a> MessageRead<'a> for FireflyGroupRole<'a> {
                 Ok(8) => msg.id = r.read_uint32(bytes)?,
                 Ok(18) => msg.name = r.read_string(bytes).map(Cow::Borrowed)?,
                 Ok(29) => msg.permissions = r.read_fixed32(bytes)?,
+                Ok(32) => msg.color = r.read_uint32(bytes)?,
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -1994,12 +2076,14 @@ impl<'a> MessageWrite for FireflyGroupRole<'a> {
         + if self.id == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.id) as u64) }
         + if self.name == "" { 0 } else { 1 + sizeof_len((&self.name).len()) }
         + if self.permissions == 0u32 { 0 } else { 1 + 4 }
+        + if self.color == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.color) as u64) }
     }
 
     fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
         if self.id != 0u32 { w.write_with_tag(8, |w| w.write_uint32(*&self.id))?; }
         if self.name != "" { w.write_with_tag(18, |w| w.write_string(&**&self.name))?; }
         if self.permissions != 0u32 { w.write_with_tag(29, |w| w.write_fixed32(*&self.permissions))?; }
+        if self.color != 0u32 { w.write_with_tag(32, |w| w.write_uint32(*&self.color))?; }
         Ok(())
     }
 }
