@@ -1,6 +1,6 @@
 [package]
 name = "firefly-client"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2024"
 
 [lib]
@@ -39,7 +39,7 @@ sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 env_logger = { workspace = true }
-shfs = { git = "https://github.com/lupyd/shfs", version = "0.1.0" }
+shfs = { git = "https://github.com/lupyd/shfs" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
