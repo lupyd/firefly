@@ -1569,6 +1569,7 @@ impl FireflyWsClient {
         &self,
         name: String,
         description: String,
+        settings: u32,
     ) -> anyhow::Result<GroupInfo> {
         let client = self
             .firefly_mls_client
@@ -3072,11 +3073,12 @@ impl FfiFireflyWsClient {
         &self,
         name: String,
         description: String,
+        settings: u32,
     ) -> anyhow::Result<crate::db::group_stores::GroupInfo> {
         let id = self.inner.callbacks.name().to_string();
         CURRENT_CLIENT
             .scope(id, async {
-                self.inner.create_group(name, description).await
+                self.inner.create_group(name, description, settings).await
             })
             .await
     }
