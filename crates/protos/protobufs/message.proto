@@ -27,6 +27,16 @@ message Group {
   string owner = 9;
 }
 
+message GroupDetails {
+  uint64 id = 1;
+  string name = 2;
+  string description = 3;
+  uint32 settings = 4;
+  bool upgraded = 5;
+  string owner = 6;
+  string inviter = 7;
+}
+
 message Groups {
   repeated Group groups = 1;
 }

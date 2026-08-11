@@ -310,6 +310,62 @@ impl<'a> MessageWrite for Group<'a> {
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Default, PartialEq, Clone)]
+pub struct GroupDetails<'a> {
+    pub id: u64,
+    pub name: Cow<'a, str>,
+    pub description: Cow<'a, str>,
+    pub settings: u32,
+    pub upgraded: bool,
+    pub owner: Cow<'a, str>,
+    pub inviter: Cow<'a, str>,
+}
+
+impl<'a> MessageRead<'a> for GroupDetails<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.id = r.read_uint64(bytes)?,
+                Ok(18) => msg.name = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(26) => msg.description = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(32) => msg.settings = r.read_uint32(bytes)?,
+                Ok(40) => msg.upgraded = r.read_bool(bytes)?,
+                Ok(50) => msg.owner = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(58) => msg.inviter = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for GroupDetails<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.id) as u64) }
+        + if self.name == "" { 0 } else { 1 + sizeof_len((&self.name).len()) }
+        + if self.description == "" { 0 } else { 1 + sizeof_len((&self.description).len()) }
+        + if self.settings == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.settings) as u64) }
+        + if self.upgraded == false { 0 } else { 1 + sizeof_varint(*(&self.upgraded) as u64) }
+        + if self.owner == "" { 0 } else { 1 + sizeof_len((&self.owner).len()) }
+        + if self.inviter == "" { 0 } else { 1 + sizeof_len((&self.inviter).len()) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.id))?; }
+        if self.name != "" { w.write_with_tag(18, |w| w.write_string(&**&self.name))?; }
+        if self.description != "" { w.write_with_tag(26, |w| w.write_string(&**&self.description))?; }
+        if self.settings != 0u32 { w.write_with_tag(32, |w| w.write_uint32(*&self.settings))?; }
+        if self.upgraded != false { w.write_with_tag(40, |w| w.write_bool(*&self.upgraded))?; }
+        if self.owner != "" { w.write_with_tag(50, |w| w.write_string(&**&self.owner))?; }
+        if self.inviter != "" { w.write_with_tag(58, |w| w.write_string(&**&self.inviter))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
 pub struct Groups<'a> {
     pub groups: Vec<firefly::Group<'a>>,
 }
