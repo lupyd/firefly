@@ -149,7 +149,7 @@ async fn test_immediate_group_join() {
     // Alice creates group
     println!("Alice creating group...");
     let group_info = alice_client
-        .create_group("Immediate Group".into(), "Description".into())
+        .create_group("Immediate Group".into(), "Description".into(), 0)
         .await
         .expect("Alice failed to create group");
     let group_id = group_info.id;

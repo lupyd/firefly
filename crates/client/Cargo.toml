@@ -45,3 +45,8 @@ shfs = { git = "https://github.com/lupyd/shfs" }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 wasm-bindgen = "0.2"
 
+[dev-dependencies]
+dotenv = { workspace = true }
+firefly-server = { workspace = true }
+
+

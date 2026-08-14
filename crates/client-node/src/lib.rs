@@ -358,8 +358,8 @@ impl FireflyClientNode {
     }
 
     #[napi]
-    pub async fn create_group(&self, name: String, description: String) -> Result<NapiGroupInfoDB> {
-        let group = self.inner.create_group(name, description).await
+    pub async fn create_group(&self, name: String, description: String, settings: Option<u32>) -> Result<NapiGroupInfoDB> {
+        let group = self.inner.create_group(name, description, settings.unwrap_or(0)).await
             .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))?;
         Ok(NapiGroupInfoDB {
             id: group.id as f64,

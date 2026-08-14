@@ -160,7 +160,7 @@ async fn test_offline_group_operations() {
 
     // Alice creates group
     let group_info = alice_client
-        .create_group("Offline Test Group".into(), "Description".into())
+        .create_group("Offline Test Group".into(), "Description".into(), 0)
         .await
         .expect("Alice failed to create group");
     let group_id = group_info.id;

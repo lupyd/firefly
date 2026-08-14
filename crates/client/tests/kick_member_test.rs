@@ -189,7 +189,7 @@ async fn test_kick_member() {
     // Alice creates group
     println!("Alice creating group...");
     let group_info = alice_client
-        .create_group("Test Kick Group".into(), "Description".into())
+        .create_group("Test Kick Group".into(), "Description".into(), 0)
         .await
         .expect("Alice failed to create group");
     let group_id = group_info.id;

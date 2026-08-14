@@ -142,7 +142,7 @@ async fn test_public_link_flow() {
 
     // 1. Alice creates a group
     let group = alice_client
-        .create_group("Public Group".into(), "Description".into())
+        .create_group("Public Group".into(), "Description".into(), 0)
         .await
         .expect("Failed to create group");
 

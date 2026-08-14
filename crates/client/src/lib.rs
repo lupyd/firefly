@@ -97,6 +97,9 @@ pub fn init_logger(file_path: String) {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn init_logging(file_path: &str) {
+    if let Some(parent) = std::path::Path::new(file_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let level = LevelFilter::Info;
     let tee_logger = TeeLogger::new(file_path, level).expect("can't initaite tee logger");
 

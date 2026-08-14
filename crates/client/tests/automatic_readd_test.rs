@@ -147,7 +147,7 @@ async fn test_automatic_readd() {
     // Alice creates group and adds Bob1
     println!("Alice creating group...");
     let group_info = alice_client
-        .create_group("ReAdd Group".into(), "Description".into())
+        .create_group("ReAdd Group".into(), "Description".into(), 0)
         .await
         .expect("Alice failed to create group");
     let group_id = group_info.id;
