@@ -232,21 +232,22 @@ async fn new_test_user(
     (client, address)
 }
 
-async fn setup_server() {
+async fn setup_server() -> bool {
     dotenv::from_filename(".env.test").ok();
-    let port = std::env::var("PORT")
-        .map(|x| x.parse::<u16>().unwrap_or(39206))
-        .unwrap_or(39206);
-    tokio::spawn(async move {
-        firefly_server::start_http_server(port).await.unwrap();
-    });
-    // Give some time for server to start
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    dotenv::dotenv().ok();
+    if std::env::var("FIREFLY_BASE_URL").is_err() {
+        println!("Skipping server integration test: FIREFLY_BASE_URL is not set.");
+        false
+    } else {
+        true
+    }
 }
 
 #[tokio::test]
 async fn group_flow() {
-    setup_server().await;
+    if !setup_server().await {
+        return;
+    }
     env_logger::Builder::from_default_env()
         .format(|buf, record| {
             use std::io::Write;

@@ -11,7 +11,6 @@ resolver = "2"
 [workspace.dependencies]
 firefly-protos = { path = "crates/protos" }
 firefly-core = { path = "crates/core" }
-firefly-server = { path = "../firefly-mls-server/crates/server" }
 firefly-client = { path = "crates/client" }
 
 anyhow = "1.0.100"

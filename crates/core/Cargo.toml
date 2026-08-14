@@ -42,5 +42,4 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mls_build_async)'] }
 env_logger = { workspace = true }
 sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
 rand = { workspace = true }
-firefly-server = { workspace = true }
 dotenv = { workspace = true }

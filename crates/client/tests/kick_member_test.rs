@@ -3,7 +3,6 @@ use firefly_client::callbacks::FireflyWsClientCallback;
 use firefly_client::db::{group_messages::GroupMessage, messages::UserMessage};
 use firefly_client::websocket::FireflyWsClient;
 use firefly_protos::{deserialize_proto, firefly};
-use firefly_server::start_http_server;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -34,28 +33,21 @@ impl FireflyWsClientCallback for TestCallbacks {
     }
 }
 
-async fn setup_server() -> u16 {
+async fn setup_server() -> Option<(String, String)> {
     dotenv::from_filename(".env.test").ok();
-    // Use a random port to avoid conflicts
-    let port = 30000 + (rand::random::<u16>() % 10000);
-    let base_url = format!("http://127.0.0.1:{}", port);
-
-    unsafe {
-        std::env::set_var("EMULATOR_MODE", "true");
-        std::env::set_var("NO_TOKEN_VERIFICATION", "true");
-        std::env::set_var("PORT", port.to_string());
-        std::env::set_var("FIREFLY_BASE_URL", base_url);
+    dotenv::dotenv().ok();
+    if let Ok(base_url) = std::env::var("FIREFLY_BASE_URL") {
+        let ws_url = std::env::var("FIREFLY_WS_URL").unwrap_or_else(|_| {
+            base_url
+                .replace("http://", "ws://")
+                .replace("https://", "wss://")
+        });
+        firefly_client::init_logger("/tmp/firefly/test_kick.log".to_string());
+        Some((base_url, ws_url))
+    } else {
+        println!("Skipping integration test: FIREFLY_BASE_URL is not set.");
+        None
     }
-    firefly_client::init_logger(format!("/tmp/firefly/test_kick_{}.log", port));
-
-    tokio::spawn(async move {
-        if let Err(e) = start_http_server(port).await {
-            eprintln!("Server failed to start: {}", e);
-        }
-    });
-    // Give some time for server to start
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    port
 }
 
 async fn wait_for_init(client: &FireflyWsClient) -> anyhow::Result<()> {
@@ -70,9 +62,10 @@ async fn wait_for_init(client: &FireflyWsClient) -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_kick_member() {
-    let port = setup_server().await;
-    let base_url = format!("http://127.0.0.1:{}", port);
-    let ws_url = format!("ws://127.0.0.1:{}/", port);
+    let (base_url, ws_url) = match setup_server().await {
+        Some(urls) => urls,
+        None => return,
+    };
 
     let test_run_id = rand::random::<u32>();
 
