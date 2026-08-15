@@ -58,6 +58,7 @@ export declare class FireflyClient {
     constructor(options?: ClientConfig);
     command(name: string, handler: CommandHandler): void;
     getGroupMembersOnlineStatus(groupId: number): Promise<any>;
+    readUserMessagesUpto(other: string, uptoMessageId: bigint | number): Promise<void>;
     private _loadSession;
     private _saveSession;
     private _exchangeCodeForTokens;

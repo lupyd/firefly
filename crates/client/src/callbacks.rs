@@ -23,6 +23,12 @@ pub struct GroupMeetingSignal {
     pub cf_meeting_id: String,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ReadUserMessagesUpto {
+    pub other: String,
+    pub upto_message_id: u64,
+}
+
 #[async_trait::async_trait]
 pub trait FireflyWsClientCallback: Send + Sync {
     fn name(&self) -> &str;
@@ -38,4 +44,6 @@ pub trait FireflyWsClientCallback: Send + Sync {
     async fn on_call_signal(&self, _signal: CallSignal) {}
 
     async fn on_group_meeting_signal(&self, _signal: GroupMeetingSignal) {}
+
+    async fn on_read_user_messages_upto(&self, _read: ReadUserMessagesUpto) {}
 }

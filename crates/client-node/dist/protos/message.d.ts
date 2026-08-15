@@ -78,6 +78,15 @@ export interface Group {
     pending: boolean;
     owner: string;
 }
+export interface GroupDetails {
+    id: bigint;
+    name: string;
+    description: string;
+    settings: number;
+    upgraded: boolean;
+    owner: string;
+    inviter: string;
+}
 export interface Groups {
     groups: Group[];
 }
@@ -243,6 +252,7 @@ export interface ServerMessage {
     response?: Response | undefined;
     ping?: Buffer | undefined;
     pong?: Buffer | undefined;
+    readUserMessagesUpto?: ReadUserMessagesUpto | undefined;
     groupInvite?: GroupInvite | undefined;
     groupCommits?: GroupCommits | undefined;
     groupReAddRequests?: GroupReAddRequests | undefined;
@@ -257,8 +267,13 @@ export interface ClientMessage {
     request?: Request | undefined;
     ping?: Buffer | undefined;
     pong?: Buffer | undefined;
+    readUserMessagesUpto?: ReadUserMessagesUpto | undefined;
     callSignal?: CallSignal | undefined;
     groupMeetingSignal?: GroupMeetingSignal | undefined;
+}
+export interface ReadUserMessagesUpto {
+    other: string;
+    uptoMessageId: bigint;
 }
 export interface CallSignal {
     callId: bigint;
@@ -366,8 +381,10 @@ export interface EncryptedFiles {
 }
 export interface MessagePayload {
     text: string;
-    replyingTo: bigint;
     files: EncryptedFiles | undefined;
+    editedOf?: bigint | undefined;
+    replyingTo?: bigint | undefined;
+    deleted?: bigint | undefined;
 }
 export interface CallMessage {
     message: Buffer;
@@ -485,6 +502,7 @@ export interface GroupMeetingSignal {
 }
 export declare const UserMessage: MessageFns<UserMessage>;
 export declare const Group: MessageFns<Group>;
+export declare const GroupDetails: MessageFns<GroupDetails>;
 export declare const Groups: MessageFns<Groups>;
 export declare const UserMessages: MessageFns<UserMessages>;
 export declare const GroupInvite: MessageFns<GroupInvite>;
@@ -518,6 +536,7 @@ export declare const Request: MessageFns<Request>;
 export declare const Response: MessageFns<Response>;
 export declare const ServerMessage: MessageFns<ServerMessage>;
 export declare const ClientMessage: MessageFns<ClientMessage>;
+export declare const ReadUserMessagesUpto: MessageFns<ReadUserMessagesUpto>;
 export declare const CallSignal: MessageFns<CallSignal>;
 export declare const GroupId: MessageFns<GroupId>;
 export declare const AuthToken: MessageFns<AuthToken>;

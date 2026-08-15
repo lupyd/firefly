@@ -755,6 +755,31 @@ impl FireflyWsClient {
         Ok(ConversationSettings::new(settings))
     }
 
+    pub async fn read_user_messages_upto(
+        &self,
+        other: String,
+        upto_message_id: u64,
+    ) -> anyhow::Result<()> {
+        let read_msg = firefly_protos::firefly::ReadUserMessagesUpto {
+            other: std::borrow::Cow::Owned(other),
+            uptoMessageId: upto_message_id,
+        };
+
+        let client_message = firefly_protos::firefly::ClientMessage {
+            message: firefly_protos::firefly::mod_ClientMessage::OneOfmessage::readUserMessagesUpto(
+                read_msg,
+            ),
+        };
+
+        let g = self.connection.read().await;
+        if let Some(conn) = &*g {
+            conn.sender.send(serialize_proto(&client_message)?).await?;
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Websocket connection is offline"))
+        }
+    }
+
     pub async fn encrypt_and_send(
         &self,
         to: String,
@@ -2972,6 +2997,18 @@ async fn on_server_message(
             };
             callbacks.on_group_meeting_signal(ffi_signal).await;
         }
+        firefly::mod_ServerMessage::OneOfmessage::readUserMessagesUpto(read_upto) => {
+            log::info!(
+                "received readUserMessagesUpto: other: {}, upto: {}",
+                read_upto.other,
+                read_upto.uptoMessageId
+            );
+            let ffi_read = crate::callbacks::ReadUserMessagesUpto {
+                other: read_upto.other.to_string(),
+                upto_message_id: read_upto.uptoMessageId,
+            };
+            callbacks.on_read_user_messages_upto(ffi_read).await;
+        }
         firefly::mod_ServerMessage::OneOfmessage::pong(_pong_bytes) => {}
         firefly::mod_ServerMessage::OneOfmessage::ping(_ping_bytes) => {}
         _ => return Err(anyhow::anyhow!("unhandled server message")),
@@ -3031,6 +3068,19 @@ impl FfiFireflyWsClient {
 
     pub async fn dispose(&self) {
         self.inner.dispose().await;
+    }
+
+    pub async fn read_user_messages_upto(
+        &self,
+        other: String,
+        upto_message_id: u64,
+    ) -> anyhow::Result<()> {
+        let name = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT
+            .scope(name, async {
+                self.inner.read_user_messages_upto(other, upto_message_id).await
+            })
+            .await
     }
 
     pub async fn encrypt_and_send(

@@ -239,6 +239,9 @@ message ServerMessage {
     bytes ping = 11;
     bytes pong = 12;
 
+    ReadUserMessagesUpto readUserMessagesUpto = 13;
+    
+
     GroupInvite groupInvite = 15;
     GroupCommits groupCommits = 16;
     GroupReAddRequests groupReAddRequests = 17;
@@ -257,10 +260,20 @@ message ClientMessage {
     Request request = 10;
     bytes ping = 11;
     bytes pong = 12;
+
+    ReadUserMessagesUpto readUserMessagesUpto = 13;
+
     CallSignal callSignal = 20;
     GroupMeetingSignal groupMeetingSignal = 21;
+    
   }
 }
+
+message ReadUserMessagesUpto {
+  string other = 1;
+  fixed64 uptoMessageId = 2;
+}
+
 
 enum CallSignalType {
   CALL_REQUEST = 0;      // Call invitation (contains SDP Offer)
@@ -397,8 +410,12 @@ message EncryptedFiles {
 
 message MessagePayload {
   string text = 1;
-  fixed64 replyingTo = 2;
   EncryptedFiles files = 3;
+  oneof ext {
+    fixed64 editedOf = 4;
+    fixed64 replyingTo = 5;
+    fixed64 deleted = 6;
+  }
 }
 
 enum CallMessageType {

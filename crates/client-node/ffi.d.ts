@@ -36,6 +36,10 @@ export interface NapiGroupMeetingSignal {
   username: string
   cfMeetingId: string
 }
+export interface NapiReadUserMessagesUpto {
+  other: string
+  uptoMessageId: number
+}
 export interface NapiConversation {
   other: string
   settings: number
@@ -71,12 +75,13 @@ export declare class FireflyClientNode {
   initializeWithRetrying(): Promise<void>
   checkSetup(): Promise<void>
   dispose(): Promise<void>
+  readUserMessagesUpto(other: string, uptoMessageId: number): Promise<void>
   encryptAndSend(to: string, payload: Array<number>): Promise<NapiUserMessage>
   uploadFcmToken(token?: string | undefined | null): Promise<void>
   getConnectionState(): string
   isInitialized(): boolean
   getConversations(token: string): Promise<Array<NapiConversation>>
-  createGroup(name: string, description: string): Promise<NapiGroupInfoDb>
+  createGroup(name: string, description: string, settings?: number | undefined | null): Promise<NapiGroupInfoDb>
   encryptAndSendGroup(groupId: number, payload: Array<number>): Promise<number>
   getGroupExtension(groupId: number): Promise<Array<number>>
   exportGroupMeetingKey(groupId: number): Promise<Array<number>>

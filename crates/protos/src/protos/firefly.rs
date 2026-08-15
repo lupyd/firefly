@@ -1664,6 +1664,7 @@ impl<'a> MessageRead<'a> for ServerMessage<'a> {
                 Ok(82) => msg.message = firefly::mod_ServerMessage::OneOfmessage::response(r.read_message::<firefly::Response>(bytes)?),
                 Ok(90) => msg.message = firefly::mod_ServerMessage::OneOfmessage::ping(r.read_bytes(bytes).map(Cow::Borrowed)?),
                 Ok(98) => msg.message = firefly::mod_ServerMessage::OneOfmessage::pong(r.read_bytes(bytes).map(Cow::Borrowed)?),
+                Ok(106) => msg.message = firefly::mod_ServerMessage::OneOfmessage::readUserMessagesUpto(r.read_message::<firefly::ReadUserMessagesUpto>(bytes)?),
                 Ok(122) => msg.message = firefly::mod_ServerMessage::OneOfmessage::groupInvite(r.read_message::<firefly::GroupInvite>(bytes)?),
                 Ok(130) => msg.message = firefly::mod_ServerMessage::OneOfmessage::groupCommits(r.read_message::<firefly::GroupCommits>(bytes)?),
                 Ok(138) => msg.message = firefly::mod_ServerMessage::OneOfmessage::groupReAddRequests(r.read_message::<firefly::GroupReAddRequests>(bytes)?),
@@ -1689,6 +1690,7 @@ impl<'a> MessageWrite for ServerMessage<'a> {
             firefly::mod_ServerMessage::OneOfmessage::response(ref m) => 1 + sizeof_len((m).get_size()),
             firefly::mod_ServerMessage::OneOfmessage::ping(ref m) => 1 + sizeof_len((m).len()),
             firefly::mod_ServerMessage::OneOfmessage::pong(ref m) => 1 + sizeof_len((m).len()),
+            firefly::mod_ServerMessage::OneOfmessage::readUserMessagesUpto(ref m) => 1 + sizeof_len((m).get_size()),
             firefly::mod_ServerMessage::OneOfmessage::groupInvite(ref m) => 1 + sizeof_len((m).get_size()),
             firefly::mod_ServerMessage::OneOfmessage::groupCommits(ref m) => 2 + sizeof_len((m).get_size()),
             firefly::mod_ServerMessage::OneOfmessage::groupReAddRequests(ref m) => 2 + sizeof_len((m).get_size()),
@@ -1706,6 +1708,7 @@ impl<'a> MessageWrite for ServerMessage<'a> {
             firefly::mod_ServerMessage::OneOfmessage::response(ref m) => { w.write_with_tag(82, |w| w.write_message(m))? },
             firefly::mod_ServerMessage::OneOfmessage::ping(ref m) => { w.write_with_tag(90, |w| w.write_bytes(&**m))? },
             firefly::mod_ServerMessage::OneOfmessage::pong(ref m) => { w.write_with_tag(98, |w| w.write_bytes(&**m))? },
+            firefly::mod_ServerMessage::OneOfmessage::readUserMessagesUpto(ref m) => { w.write_with_tag(106, |w| w.write_message(m))? },
             firefly::mod_ServerMessage::OneOfmessage::groupInvite(ref m) => { w.write_with_tag(122, |w| w.write_message(m))? },
             firefly::mod_ServerMessage::OneOfmessage::groupCommits(ref m) => { w.write_with_tag(130, |w| w.write_message(m))? },
             firefly::mod_ServerMessage::OneOfmessage::groupReAddRequests(ref m) => { w.write_with_tag(138, |w| w.write_message(m))? },
@@ -1730,6 +1733,7 @@ pub enum OneOfmessage<'a> {
     response(firefly::Response<'a>),
     ping(Cow<'a, [u8]>),
     pong(Cow<'a, [u8]>),
+    readUserMessagesUpto(firefly::ReadUserMessagesUpto<'a>),
     groupInvite(firefly::GroupInvite<'a>),
     groupCommits(firefly::GroupCommits<'a>),
     groupReAddRequests(firefly::GroupReAddRequests<'a>),
@@ -1764,6 +1768,7 @@ impl<'a> MessageRead<'a> for ClientMessage<'a> {
                 Ok(82) => msg.message = firefly::mod_ClientMessage::OneOfmessage::request(r.read_message::<firefly::Request>(bytes)?),
                 Ok(90) => msg.message = firefly::mod_ClientMessage::OneOfmessage::ping(r.read_bytes(bytes).map(Cow::Borrowed)?),
                 Ok(98) => msg.message = firefly::mod_ClientMessage::OneOfmessage::pong(r.read_bytes(bytes).map(Cow::Borrowed)?),
+                Ok(106) => msg.message = firefly::mod_ClientMessage::OneOfmessage::readUserMessagesUpto(r.read_message::<firefly::ReadUserMessagesUpto>(bytes)?),
                 Ok(162) => msg.message = firefly::mod_ClientMessage::OneOfmessage::callSignal(r.read_message::<firefly::CallSignal>(bytes)?),
                 Ok(170) => msg.message = firefly::mod_ClientMessage::OneOfmessage::groupMeetingSignal(r.read_message::<firefly::GroupMeetingSignal>(bytes)?),
                 Ok(t) => { r.read_unknown(bytes, t)?; }
@@ -1784,6 +1789,7 @@ impl<'a> MessageWrite for ClientMessage<'a> {
             firefly::mod_ClientMessage::OneOfmessage::request(ref m) => 1 + sizeof_len((m).get_size()),
             firefly::mod_ClientMessage::OneOfmessage::ping(ref m) => 1 + sizeof_len((m).len()),
             firefly::mod_ClientMessage::OneOfmessage::pong(ref m) => 1 + sizeof_len((m).len()),
+            firefly::mod_ClientMessage::OneOfmessage::readUserMessagesUpto(ref m) => 1 + sizeof_len((m).get_size()),
             firefly::mod_ClientMessage::OneOfmessage::callSignal(ref m) => 2 + sizeof_len((m).get_size()),
             firefly::mod_ClientMessage::OneOfmessage::groupMeetingSignal(ref m) => 2 + sizeof_len((m).get_size()),
             firefly::mod_ClientMessage::OneOfmessage::None => 0,
@@ -1796,6 +1802,7 @@ impl<'a> MessageWrite for ClientMessage<'a> {
             firefly::mod_ClientMessage::OneOfmessage::request(ref m) => { w.write_with_tag(82, |w| w.write_message(m))? },
             firefly::mod_ClientMessage::OneOfmessage::ping(ref m) => { w.write_with_tag(90, |w| w.write_bytes(&**m))? },
             firefly::mod_ClientMessage::OneOfmessage::pong(ref m) => { w.write_with_tag(98, |w| w.write_bytes(&**m))? },
+            firefly::mod_ClientMessage::OneOfmessage::readUserMessagesUpto(ref m) => { w.write_with_tag(106, |w| w.write_message(m))? },
             firefly::mod_ClientMessage::OneOfmessage::callSignal(ref m) => { w.write_with_tag(162, |w| w.write_message(m))? },
             firefly::mod_ClientMessage::OneOfmessage::groupMeetingSignal(ref m) => { w.write_with_tag(170, |w| w.write_message(m))? },
             firefly::mod_ClientMessage::OneOfmessage::None => {},
@@ -1815,6 +1822,7 @@ pub enum OneOfmessage<'a> {
     request(firefly::Request<'a>),
     ping(Cow<'a, [u8]>),
     pong(Cow<'a, [u8]>),
+    readUserMessagesUpto(firefly::ReadUserMessagesUpto<'a>),
     callSignal(firefly::CallSignal<'a>),
     groupMeetingSignal(firefly::GroupMeetingSignal<'a>),
     None,
@@ -1826,6 +1834,42 @@ impl<'a> Default for OneOfmessage<'a> {
     }
 }
 
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct ReadUserMessagesUpto<'a> {
+    pub other: Cow<'a, str>,
+    pub uptoMessageId: u64,
+}
+
+impl<'a> MessageRead<'a> for ReadUserMessagesUpto<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(10) => msg.other = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(17) => msg.uptoMessageId = r.read_fixed64(bytes)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for ReadUserMessagesUpto<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.other == "" { 0 } else { 1 + sizeof_len((&self.other).len()) }
+        + if self.uptoMessageId == 0u64 { 0 } else { 1 + 8 }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.other != "" { w.write_with_tag(10, |w| w.write_string(&**&self.other))?; }
+        if self.uptoMessageId != 0u64 { w.write_with_tag(17, |w| w.write_fixed64(*&self.uptoMessageId))?; }
+        Ok(())
+    }
 }
 
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -2608,8 +2652,8 @@ impl<'a> MessageWrite for EncryptedFiles<'a> {
 #[derive(Debug, Default, PartialEq, Clone)]
 pub struct MessagePayload<'a> {
     pub text: Cow<'a, str>,
-    pub replyingTo: u64,
     pub files: Option<firefly::EncryptedFiles<'a>>,
+    pub ext: firefly::mod_MessagePayload::OneOfext,
 }
 
 impl<'a> MessageRead<'a> for MessagePayload<'a> {
@@ -2618,8 +2662,10 @@ impl<'a> MessageRead<'a> for MessagePayload<'a> {
         while !r.is_eof() {
             match r.next_tag(bytes) {
                 Ok(10) => msg.text = r.read_string(bytes).map(Cow::Borrowed)?,
-                Ok(17) => msg.replyingTo = r.read_fixed64(bytes)?,
                 Ok(26) => msg.files = Some(r.read_message::<firefly::EncryptedFiles>(bytes)?),
+                Ok(33) => msg.ext = firefly::mod_MessagePayload::OneOfext::editedOf(r.read_fixed64(bytes)?),
+                Ok(41) => msg.ext = firefly::mod_MessagePayload::OneOfext::replyingTo(r.read_fixed64(bytes)?),
+                Ok(49) => msg.ext = firefly::mod_MessagePayload::OneOfext::deleted(r.read_fixed64(bytes)?),
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -2632,16 +2678,43 @@ impl<'a> MessageWrite for MessagePayload<'a> {
     fn get_size(&self) -> usize {
         0
         + if self.text == "" { 0 } else { 1 + sizeof_len((&self.text).len()) }
-        + if self.replyingTo == 0u64 { 0 } else { 1 + 8 }
         + self.files.as_ref().map_or(0, |m| 1 + sizeof_len((m).get_size()))
-    }
+        + match self.ext {
+            firefly::mod_MessagePayload::OneOfext::editedOf(_) => 1 + 8,
+            firefly::mod_MessagePayload::OneOfext::replyingTo(_) => 1 + 8,
+            firefly::mod_MessagePayload::OneOfext::deleted(_) => 1 + 8,
+            firefly::mod_MessagePayload::OneOfext::None => 0,
+    }    }
 
     fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
         if self.text != "" { w.write_with_tag(10, |w| w.write_string(&**&self.text))?; }
-        if self.replyingTo != 0u64 { w.write_with_tag(17, |w| w.write_fixed64(*&self.replyingTo))?; }
         if let Some(ref s) = self.files { w.write_with_tag(26, |w| w.write_message(s))?; }
-        Ok(())
+        match self.ext {            firefly::mod_MessagePayload::OneOfext::editedOf(ref m) => { w.write_with_tag(33, |w| w.write_fixed64(*m))? },
+            firefly::mod_MessagePayload::OneOfext::replyingTo(ref m) => { w.write_with_tag(41, |w| w.write_fixed64(*m))? },
+            firefly::mod_MessagePayload::OneOfext::deleted(ref m) => { w.write_with_tag(49, |w| w.write_fixed64(*m))? },
+            firefly::mod_MessagePayload::OneOfext::None => {},
+    }        Ok(())
     }
+}
+
+pub mod mod_MessagePayload {
+
+use super::*;
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum OneOfext {
+    editedOf(u64),
+    replyingTo(u64),
+    deleted(u64),
+    None,
+}
+
+impl Default for OneOfext {
+    fn default() -> Self {
+        OneOfext::None
+    }
+}
+
 }
 
 #[allow(clippy::derive_partial_eq_without_eq)]

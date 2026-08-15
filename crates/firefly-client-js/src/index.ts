@@ -161,6 +161,14 @@ export class FireflyClient {
     return protos.GroupMembersOnlineStatus.decode(new Uint8Array(buffer));
   }
 
+  // Send read receipt up to a specific message ID
+  async readUserMessagesUpto(other: string, uptoMessageId: bigint | number): Promise<void> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    await this.client.readUserMessagesUpto(other, Number(uptoMessageId));
+  }
+
   // Load and save session
   private _loadSession(): void {
     if (fs.existsSync(this.sessionFile)) {
@@ -508,6 +516,7 @@ export class FireflyClient {
 
       onCallSignal: () => {},
       onGroupMeetingSignal: () => {},
+      onReadUserMessagesUpto: () => {},
     };
 
     this.client = await FireflyClientNode.create(

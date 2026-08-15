@@ -161,8 +161,7 @@ async fn test_public_link_flow() {
         message: firefly_protos::firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(
             firefly_protos::firefly::MessagePayload {
                 text: std::borrow::Cow::Borrowed("Hello from Alice to the public group!"),
-                replyingTo: 0,
-                files: None,
+                ..Default::default()
             },
         ),
     };
@@ -196,8 +195,7 @@ async fn test_public_link_flow() {
         message: firefly_protos::firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(
             firefly_protos::firefly::MessagePayload {
                 text: std::borrow::Cow::Borrowed("Hello from Bob!"),
-                replyingTo: 0,
-                files: None,
+                ..Default::default()
             },
         ),
     };

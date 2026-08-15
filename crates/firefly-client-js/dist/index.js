@@ -136,6 +136,13 @@ class FireflyClient {
         const buffer = await response.arrayBuffer();
         return firefly_client_node_1.protos.GroupMembersOnlineStatus.decode(new Uint8Array(buffer));
     }
+    // Send read receipt up to a specific message ID
+    async readUserMessagesUpto(other, uptoMessageId) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        await this.client.readUserMessagesUpto(other, Number(uptoMessageId));
+    }
     // Load and save session
     _loadSession() {
         if (fs.existsSync(this.sessionFile)) {
@@ -451,6 +458,7 @@ class FireflyClient {
             },
             onCallSignal: () => { },
             onGroupMeetingSignal: () => { },
+            onReadUserMessagesUpto: () => { },
         };
         this.client = await firefly_client_node_1.FireflyClientNode.create(this.apiBaseUrl, this.wsUrl, 2000, callbacks, this.dbFile, 15000);
         console.log('Connecting to Firefly MLS network...');

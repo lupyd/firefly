@@ -54,6 +54,13 @@ pub struct NapiGroupMeetingSignal {
 }
 
 #[napi(object)]
+#[derive(Clone, serde::Serialize)]
+pub struct NapiReadUserMessagesUpto {
+    pub other: String,
+    pub upto_message_id: f64,
+}
+
+#[napi(object)]
 #[derive(Clone)]
 pub struct NapiConversation {
     pub other: String,
@@ -104,6 +111,7 @@ struct NodeClientCallbacks {
     on_group_joined_fn: ThreadsafeFunction<u64, ErrorStrategy::CalleeHandled>,
     on_call_signal_fn: ThreadsafeFunction<NapiCallSignal, ErrorStrategy::CalleeHandled>,
     on_group_meeting_signal_fn: ThreadsafeFunction<NapiGroupMeetingSignal, ErrorStrategy::CalleeHandled>,
+    on_read_user_messages_upto_fn: Option<ThreadsafeFunction<NapiReadUserMessagesUpto, ErrorStrategy::CalleeHandled>>,
 }
 
 #[async_trait::async_trait]
@@ -179,6 +187,16 @@ impl FireflyWsClientCallback for NodeClientCallbacks {
         };
         let _ = self.on_group_meeting_signal_fn.call(Ok(sig), ThreadsafeFunctionCallMode::NonBlocking);
     }
+
+    async fn on_read_user_messages_upto(&self, read: firefly_client::callbacks::ReadUserMessagesUpto) {
+        if let Some(ref f) = self.on_read_user_messages_upto_fn {
+            let msg = NapiReadUserMessagesUpto {
+                other: read.other,
+                upto_message_id: read.upto_message_id as f64,
+            };
+            let _ = f.call(Ok(msg), ThreadsafeFunctionCallMode::NonBlocking);
+        }
+    }
 }
 
 fn extract_callbacks(callbacks_obj: JsObject, token: Arc<Mutex<Option<String>>>) -> Result<NodeClientCallbacks> {
@@ -188,6 +206,7 @@ fn extract_callbacks(callbacks_obj: JsObject, token: Arc<Mutex<Option<String>>>)
     let on_group_joined_js: JsFunction = callbacks_obj.get_named_property("onGroupJoined")?;
     let on_call_signal_js: JsFunction = callbacks_obj.get_named_property("onCallSignal")?;
     let on_group_meeting_signal_js: JsFunction = callbacks_obj.get_named_property("onGroupMeetingSignal")?;
+    let on_read_user_messages_upto_js: Option<JsFunction> = callbacks_obj.get_named_property("onReadUserMessagesUpto").ok();
 
     let on_message_fn = on_message_js.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<String>| {
         eprintln!("on_message_fn closure value: {}", ctx.value);
@@ -230,6 +249,16 @@ fn extract_callbacks(callbacks_obj: JsObject, token: Arc<Mutex<Option<String>>>)
         Ok(vec![obj])
     })?;
 
+    let on_read_user_messages_upto_fn = match on_read_user_messages_upto_js {
+        Some(cb) => Some(cb.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<NapiReadUserMessagesUpto>| {
+            let mut obj = ctx.env.create_object()?;
+            obj.set_named_property("other", ctx.env.create_string(&ctx.value.other)?)?;
+            obj.set_named_property("uptoMessageId", ctx.value.upto_message_id)?;
+            Ok(vec![obj])
+        })?),
+        None => None,
+    };
+
     Ok(NodeClientCallbacks {
         name: name_js,
         token,
@@ -238,6 +267,7 @@ fn extract_callbacks(callbacks_obj: JsObject, token: Arc<Mutex<Option<String>>>)
         on_group_joined_fn,
         on_call_signal_fn,
         on_group_meeting_signal_fn,
+        on_read_user_messages_upto_fn,
     })
 }
 
@@ -311,6 +341,12 @@ impl FireflyClientNode {
     #[napi]
     pub async fn dispose(&self) {
         self.inner.dispose().await;
+    }
+
+    #[napi]
+    pub async fn read_user_messages_upto(&self, other: String, upto_message_id: f64) -> Result<()> {
+        self.inner.read_user_messages_upto(other, upto_message_id as u64).await
+            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))
     }
 
     #[napi]

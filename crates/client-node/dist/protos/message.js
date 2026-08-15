@@ -5,8 +5,8 @@
 //   protoc               v7.35.1
 // source: message.proto
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.PreKeyBundle = exports.FireflyGroupChannel = exports.FireflyGroupMember = exports.FireflyGroupRole = exports.FireflyGroupExtension = exports.FireflyIdentity = exports.SignedToken = exports.AuthToken = exports.GroupId = exports.CallSignal = exports.ClientMessage = exports.ServerMessage = exports.Response = exports.Request = exports.UserOnlineStatusResponse = exports.UserOnlineStatusRequest = exports.UserMessageUploaded = exports.MessageIdAndTo = exports.UploadUserMessage = exports.Addresses = exports.Address = exports.Result = exports.Error = exports.GroupMembersOnlineStatus = exports.GroupMemberOnlineStatus = exports.GroupReAddRequests = exports.GroupReAddRequest = exports.GroupCommitSyncRequest = exports.GroupCommits = exports.GroupCommit = exports.GroupMemberUpdates = exports.GroupMemberUpdate = exports.GroupSyncRequests = exports.GroupSyncRequest = exports.GroupMessages = exports.GroupKeyPackages = exports.GroupKeyPackage = exports.GroupMessage = exports.GroupInvites = exports.GroupCommitAndWelcome = exports.GroupInvite = exports.UserMessages = exports.Groups = exports.Group = exports.UserMessage = exports.MeetingSignalType = exports.MeetingSessionStatus = exports.CallMessageType = exports.CallSignalType = exports.protobufPackage = void 0;
-exports.GroupMeetingSignal = exports.GetActiveSessionResponse = exports.GetActiveSessionRequest = exports.EndMeetingRequest = exports.LeaveMeetingRequest = exports.JoinMeetingResponse = exports.JoinMeetingRequest = exports.CreateMeetingResponse = exports.CreateMeetingRequest = exports.GroupMeetingSession = exports.GroupJoinRequests = exports.GroupJoinRequest = exports.JoinViaLinkSuccess = exports.JoinViaLinkRequest = exports.CreateJoinLinkResponse = exports.CreateJoinLinkRequest = exports.GroupReAddRequestSuccess = exports.RequestGroupSync = exports.RequestGroupReAdds = exports.GroupMessageInner = exports.UserMessageInner = exports.SelfUserMessage = exports.CallMessage = exports.MessagePayload = exports.EncryptedFiles = exports.EncryptedFile = exports.Conversations = exports.Conversation = exports.PreKeyBundles = exports.ConversationStart = exports.PreKeyBundleEntries = exports.PreKeyBundleEntry = void 0;
+exports.FireflyGroupMember = exports.FireflyGroupRole = exports.FireflyGroupExtension = exports.FireflyIdentity = exports.SignedToken = exports.AuthToken = exports.GroupId = exports.CallSignal = exports.ReadUserMessagesUpto = exports.ClientMessage = exports.ServerMessage = exports.Response = exports.Request = exports.UserOnlineStatusResponse = exports.UserOnlineStatusRequest = exports.UserMessageUploaded = exports.MessageIdAndTo = exports.UploadUserMessage = exports.Addresses = exports.Address = exports.Result = exports.Error = exports.GroupMembersOnlineStatus = exports.GroupMemberOnlineStatus = exports.GroupReAddRequests = exports.GroupReAddRequest = exports.GroupCommitSyncRequest = exports.GroupCommits = exports.GroupCommit = exports.GroupMemberUpdates = exports.GroupMemberUpdate = exports.GroupSyncRequests = exports.GroupSyncRequest = exports.GroupMessages = exports.GroupKeyPackages = exports.GroupKeyPackage = exports.GroupMessage = exports.GroupInvites = exports.GroupCommitAndWelcome = exports.GroupInvite = exports.UserMessages = exports.Groups = exports.GroupDetails = exports.Group = exports.UserMessage = exports.MeetingSignalType = exports.MeetingSessionStatus = exports.CallMessageType = exports.CallSignalType = exports.protobufPackage = void 0;
+exports.GroupMeetingSignal = exports.GetActiveSessionResponse = exports.GetActiveSessionRequest = exports.EndMeetingRequest = exports.LeaveMeetingRequest = exports.JoinMeetingResponse = exports.JoinMeetingRequest = exports.CreateMeetingResponse = exports.CreateMeetingRequest = exports.GroupMeetingSession = exports.GroupJoinRequests = exports.GroupJoinRequest = exports.JoinViaLinkSuccess = exports.JoinViaLinkRequest = exports.CreateJoinLinkResponse = exports.CreateJoinLinkRequest = exports.GroupReAddRequestSuccess = exports.RequestGroupSync = exports.RequestGroupReAdds = exports.GroupMessageInner = exports.UserMessageInner = exports.SelfUserMessage = exports.CallMessage = exports.MessagePayload = exports.EncryptedFiles = exports.EncryptedFile = exports.Conversations = exports.Conversation = exports.PreKeyBundles = exports.ConversationStart = exports.PreKeyBundleEntries = exports.PreKeyBundleEntry = exports.PreKeyBundle = exports.FireflyGroupChannel = void 0;
 exports.callSignalTypeFromJSON = callSignalTypeFromJSON;
 exports.callSignalTypeToJSON = callSignalTypeToJSON;
 exports.callMessageTypeFromJSON = callMessageTypeFromJSON;
@@ -601,6 +601,152 @@ exports.Group = {
         message.upgraded = object.upgraded ?? false;
         message.pending = object.pending ?? false;
         message.owner = object.owner ?? "";
+        return message;
+    },
+};
+function createBaseGroupDetails() {
+    return { id: 0n, name: "", description: "", settings: 0, upgraded: false, owner: "", inviter: "" };
+}
+exports.GroupDetails = {
+    encode(message, writer = new wire_1.BinaryWriter()) {
+        if (message.id !== 0n) {
+            if (BigInt.asUintN(64, message.id) !== message.id) {
+                throw new globalThis.Error("value provided for field message.id of type uint64 too large");
+            }
+            writer.uint32(8).uint64(message.id);
+        }
+        if (message.name !== "") {
+            writer.uint32(18).string(message.name);
+        }
+        if (message.description !== "") {
+            writer.uint32(26).string(message.description);
+        }
+        if (message.settings !== 0) {
+            writer.uint32(32).uint32(message.settings);
+        }
+        if (message.upgraded !== false) {
+            writer.uint32(40).bool(message.upgraded);
+        }
+        if (message.owner !== "") {
+            writer.uint32(50).string(message.owner);
+        }
+        if (message.inviter !== "") {
+            writer.uint32(58).string(message.inviter);
+        }
+        return writer;
+    },
+    decode(input, length) {
+        const reader = input instanceof wire_1.BinaryReader ? input : new wire_1.BinaryReader(input);
+        const end = length === undefined ? reader.len : reader.pos + length;
+        const message = createBaseGroupDetails();
+        while (reader.pos < end) {
+            const tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1: {
+                    if (tag !== 8) {
+                        break;
+                    }
+                    message.id = reader.uint64();
+                    continue;
+                }
+                case 2: {
+                    if (tag !== 18) {
+                        break;
+                    }
+                    message.name = reader.string();
+                    continue;
+                }
+                case 3: {
+                    if (tag !== 26) {
+                        break;
+                    }
+                    message.description = reader.string();
+                    continue;
+                }
+                case 4: {
+                    if (tag !== 32) {
+                        break;
+                    }
+                    message.settings = reader.uint32();
+                    continue;
+                }
+                case 5: {
+                    if (tag !== 40) {
+                        break;
+                    }
+                    message.upgraded = reader.bool();
+                    continue;
+                }
+                case 6: {
+                    if (tag !== 50) {
+                        break;
+                    }
+                    message.owner = reader.string();
+                    continue;
+                }
+                case 7: {
+                    if (tag !== 58) {
+                        break;
+                    }
+                    message.inviter = reader.string();
+                    continue;
+                }
+            }
+            if ((tag & 7) === 4 || tag === 0) {
+                break;
+            }
+            reader.skip(tag & 7);
+        }
+        return message;
+    },
+    fromJSON(object) {
+        return {
+            id: isSet(object.id) ? BigInt(object.id) : 0n,
+            name: isSet(object.name) ? globalThis.String(object.name) : "",
+            description: isSet(object.description) ? globalThis.String(object.description) : "",
+            settings: isSet(object.settings) ? globalThis.Number(object.settings) : 0,
+            upgraded: isSet(object.upgraded) ? globalThis.Boolean(object.upgraded) : false,
+            owner: isSet(object.owner) ? globalThis.String(object.owner) : "",
+            inviter: isSet(object.inviter) ? globalThis.String(object.inviter) : "",
+        };
+    },
+    toJSON(message) {
+        const obj = {};
+        if (message.id !== 0n) {
+            obj.id = message.id.toString();
+        }
+        if (message.name !== "") {
+            obj.name = message.name;
+        }
+        if (message.description !== "") {
+            obj.description = message.description;
+        }
+        if (message.settings !== 0) {
+            obj.settings = Math.round(message.settings);
+        }
+        if (message.upgraded !== false) {
+            obj.upgraded = message.upgraded;
+        }
+        if (message.owner !== "") {
+            obj.owner = message.owner;
+        }
+        if (message.inviter !== "") {
+            obj.inviter = message.inviter;
+        }
+        return obj;
+    },
+    create(base) {
+        return exports.GroupDetails.fromPartial(base ?? {});
+    },
+    fromPartial(object) {
+        const message = createBaseGroupDetails();
+        message.id = (object.id !== undefined && object.id !== null) ? BigInt(object.id) : 0n;
+        message.name = object.name ?? "";
+        message.description = object.description ?? "";
+        message.settings = object.settings ?? 0;
+        message.upgraded = object.upgraded ?? false;
+        message.owner = object.owner ?? "";
+        message.inviter = object.inviter ?? "";
         return message;
     },
 };
@@ -3449,6 +3595,7 @@ function createBaseServerMessage() {
         response: undefined,
         ping: undefined,
         pong: undefined,
+        readUserMessagesUpto: undefined,
         groupInvite: undefined,
         groupCommits: undefined,
         groupReAddRequests: undefined,
@@ -3479,6 +3626,9 @@ exports.ServerMessage = {
         }
         if (message.pong !== undefined) {
             writer.uint32(98).bytes(message.pong);
+        }
+        if (message.readUserMessagesUpto !== undefined) {
+            exports.ReadUserMessagesUpto.encode(message.readUserMessagesUpto, writer.uint32(106).fork()).join();
         }
         if (message.groupInvite !== undefined) {
             exports.GroupInvite.encode(message.groupInvite, writer.uint32(122).fork()).join();
@@ -3556,6 +3706,13 @@ exports.ServerMessage = {
                     message.pong = Buffer.from(reader.bytes());
                     continue;
                 }
+                case 13: {
+                    if (tag !== 106) {
+                        break;
+                    }
+                    message.readUserMessagesUpto = exports.ReadUserMessagesUpto.decode(reader, reader.uint32());
+                    continue;
+                }
                 case 15: {
                     if (tag !== 122) {
                         break;
@@ -3615,6 +3772,9 @@ exports.ServerMessage = {
             response: isSet(object.response) ? exports.Response.fromJSON(object.response) : undefined,
             ping: isSet(object.ping) ? Buffer.from(bytesFromBase64(object.ping)) : undefined,
             pong: isSet(object.pong) ? Buffer.from(bytesFromBase64(object.pong)) : undefined,
+            readUserMessagesUpto: isSet(object.readUserMessagesUpto)
+                ? exports.ReadUserMessagesUpto.fromJSON(object.readUserMessagesUpto)
+                : undefined,
             groupInvite: isSet(object.groupInvite) ? exports.GroupInvite.fromJSON(object.groupInvite) : undefined,
             groupCommits: isSet(object.groupCommits) ? exports.GroupCommits.fromJSON(object.groupCommits) : undefined,
             groupReAddRequests: isSet(object.groupReAddRequests)
@@ -3651,6 +3811,9 @@ exports.ServerMessage = {
         }
         if (message.pong !== undefined) {
             obj.pong = base64FromBytes(message.pong);
+        }
+        if (message.readUserMessagesUpto !== undefined) {
+            obj.readUserMessagesUpto = exports.ReadUserMessagesUpto.toJSON(message.readUserMessagesUpto);
         }
         if (message.groupInvite !== undefined) {
             obj.groupInvite = exports.GroupInvite.toJSON(message.groupInvite);
@@ -3694,6 +3857,9 @@ exports.ServerMessage = {
             : undefined;
         message.ping = object.ping ?? undefined;
         message.pong = object.pong ?? undefined;
+        message.readUserMessagesUpto = (object.readUserMessagesUpto !== undefined && object.readUserMessagesUpto !== null)
+            ? exports.ReadUserMessagesUpto.fromPartial(object.readUserMessagesUpto)
+            : undefined;
         message.groupInvite = (object.groupInvite !== undefined && object.groupInvite !== null)
             ? exports.GroupInvite.fromPartial(object.groupInvite)
             : undefined;
@@ -3723,6 +3889,7 @@ function createBaseClientMessage() {
         request: undefined,
         ping: undefined,
         pong: undefined,
+        readUserMessagesUpto: undefined,
         callSignal: undefined,
         groupMeetingSignal: undefined,
     };
@@ -3746,6 +3913,9 @@ exports.ClientMessage = {
         }
         if (message.pong !== undefined) {
             writer.uint32(98).bytes(message.pong);
+        }
+        if (message.readUserMessagesUpto !== undefined) {
+            exports.ReadUserMessagesUpto.encode(message.readUserMessagesUpto, writer.uint32(106).fork()).join();
         }
         if (message.callSignal !== undefined) {
             exports.CallSignal.encode(message.callSignal, writer.uint32(162).fork()).join();
@@ -3804,6 +3974,13 @@ exports.ClientMessage = {
                     message.pong = Buffer.from(reader.bytes());
                     continue;
                 }
+                case 13: {
+                    if (tag !== 106) {
+                        break;
+                    }
+                    message.readUserMessagesUpto = exports.ReadUserMessagesUpto.decode(reader, reader.uint32());
+                    continue;
+                }
                 case 20: {
                     if (tag !== 162) {
                         break;
@@ -3836,6 +4013,9 @@ exports.ClientMessage = {
             request: isSet(object.request) ? exports.Request.fromJSON(object.request) : undefined,
             ping: isSet(object.ping) ? Buffer.from(bytesFromBase64(object.ping)) : undefined,
             pong: isSet(object.pong) ? Buffer.from(bytesFromBase64(object.pong)) : undefined,
+            readUserMessagesUpto: isSet(object.readUserMessagesUpto)
+                ? exports.ReadUserMessagesUpto.fromJSON(object.readUserMessagesUpto)
+                : undefined,
             callSignal: isSet(object.callSignal) ? exports.CallSignal.fromJSON(object.callSignal) : undefined,
             groupMeetingSignal: isSet(object.groupMeetingSignal)
                 ? exports.GroupMeetingSignal.fromJSON(object.groupMeetingSignal)
@@ -3861,6 +4041,9 @@ exports.ClientMessage = {
         }
         if (message.pong !== undefined) {
             obj.pong = base64FromBytes(message.pong);
+        }
+        if (message.readUserMessagesUpto !== undefined) {
+            obj.readUserMessagesUpto = exports.ReadUserMessagesUpto.toJSON(message.readUserMessagesUpto);
         }
         if (message.callSignal !== undefined) {
             obj.callSignal = exports.CallSignal.toJSON(message.callSignal);
@@ -3889,12 +4072,88 @@ exports.ClientMessage = {
             : undefined;
         message.ping = object.ping ?? undefined;
         message.pong = object.pong ?? undefined;
+        message.readUserMessagesUpto = (object.readUserMessagesUpto !== undefined && object.readUserMessagesUpto !== null)
+            ? exports.ReadUserMessagesUpto.fromPartial(object.readUserMessagesUpto)
+            : undefined;
         message.callSignal = (object.callSignal !== undefined && object.callSignal !== null)
             ? exports.CallSignal.fromPartial(object.callSignal)
             : undefined;
         message.groupMeetingSignal = (object.groupMeetingSignal !== undefined && object.groupMeetingSignal !== null)
             ? exports.GroupMeetingSignal.fromPartial(object.groupMeetingSignal)
             : undefined;
+        return message;
+    },
+};
+function createBaseReadUserMessagesUpto() {
+    return { other: "", uptoMessageId: 0n };
+}
+exports.ReadUserMessagesUpto = {
+    encode(message, writer = new wire_1.BinaryWriter()) {
+        if (message.other !== "") {
+            writer.uint32(10).string(message.other);
+        }
+        if (message.uptoMessageId !== 0n) {
+            if (BigInt.asUintN(64, message.uptoMessageId) !== message.uptoMessageId) {
+                throw new globalThis.Error("value provided for field message.uptoMessageId of type fixed64 too large");
+            }
+            writer.uint32(17).fixed64(message.uptoMessageId);
+        }
+        return writer;
+    },
+    decode(input, length) {
+        const reader = input instanceof wire_1.BinaryReader ? input : new wire_1.BinaryReader(input);
+        const end = length === undefined ? reader.len : reader.pos + length;
+        const message = createBaseReadUserMessagesUpto();
+        while (reader.pos < end) {
+            const tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1: {
+                    if (tag !== 10) {
+                        break;
+                    }
+                    message.other = reader.string();
+                    continue;
+                }
+                case 2: {
+                    if (tag !== 17) {
+                        break;
+                    }
+                    message.uptoMessageId = reader.fixed64();
+                    continue;
+                }
+            }
+            if ((tag & 7) === 4 || tag === 0) {
+                break;
+            }
+            reader.skip(tag & 7);
+        }
+        return message;
+    },
+    fromJSON(object) {
+        return {
+            other: isSet(object.other) ? globalThis.String(object.other) : "",
+            uptoMessageId: isSet(object.uptoMessageId) ? BigInt(object.uptoMessageId) : 0n,
+        };
+    },
+    toJSON(message) {
+        const obj = {};
+        if (message.other !== "") {
+            obj.other = message.other;
+        }
+        if (message.uptoMessageId !== 0n) {
+            obj.uptoMessageId = message.uptoMessageId.toString();
+        }
+        return obj;
+    },
+    create(base) {
+        return exports.ReadUserMessagesUpto.fromPartial(base ?? {});
+    },
+    fromPartial(object) {
+        const message = createBaseReadUserMessagesUpto();
+        message.other = object.other ?? "";
+        message.uptoMessageId = (object.uptoMessageId !== undefined && object.uptoMessageId !== null)
+            ? BigInt(object.uptoMessageId)
+            : 0n;
         return message;
     },
 };
@@ -5720,21 +5979,33 @@ exports.EncryptedFiles = {
     },
 };
 function createBaseMessagePayload() {
-    return { text: "", replyingTo: 0n, files: undefined };
+    return { text: "", files: undefined, editedOf: undefined, replyingTo: undefined, deleted: undefined };
 }
 exports.MessagePayload = {
     encode(message, writer = new wire_1.BinaryWriter()) {
         if (message.text !== "") {
             writer.uint32(10).string(message.text);
         }
-        if (message.replyingTo !== 0n) {
+        if (message.files !== undefined) {
+            exports.EncryptedFiles.encode(message.files, writer.uint32(26).fork()).join();
+        }
+        if (message.editedOf !== undefined) {
+            if (BigInt.asUintN(64, message.editedOf) !== message.editedOf) {
+                throw new globalThis.Error("value provided for field message.editedOf of type fixed64 too large");
+            }
+            writer.uint32(33).fixed64(message.editedOf);
+        }
+        if (message.replyingTo !== undefined) {
             if (BigInt.asUintN(64, message.replyingTo) !== message.replyingTo) {
                 throw new globalThis.Error("value provided for field message.replyingTo of type fixed64 too large");
             }
-            writer.uint32(17).fixed64(message.replyingTo);
+            writer.uint32(41).fixed64(message.replyingTo);
         }
-        if (message.files !== undefined) {
-            exports.EncryptedFiles.encode(message.files, writer.uint32(26).fork()).join();
+        if (message.deleted !== undefined) {
+            if (BigInt.asUintN(64, message.deleted) !== message.deleted) {
+                throw new globalThis.Error("value provided for field message.deleted of type fixed64 too large");
+            }
+            writer.uint32(49).fixed64(message.deleted);
         }
         return writer;
     },
@@ -5752,18 +6023,32 @@ exports.MessagePayload = {
                     message.text = reader.string();
                     continue;
                 }
-                case 2: {
-                    if (tag !== 17) {
-                        break;
-                    }
-                    message.replyingTo = reader.fixed64();
-                    continue;
-                }
                 case 3: {
                     if (tag !== 26) {
                         break;
                     }
                     message.files = exports.EncryptedFiles.decode(reader, reader.uint32());
+                    continue;
+                }
+                case 4: {
+                    if (tag !== 33) {
+                        break;
+                    }
+                    message.editedOf = reader.fixed64();
+                    continue;
+                }
+                case 5: {
+                    if (tag !== 41) {
+                        break;
+                    }
+                    message.replyingTo = reader.fixed64();
+                    continue;
+                }
+                case 6: {
+                    if (tag !== 49) {
+                        break;
+                    }
+                    message.deleted = reader.fixed64();
                     continue;
                 }
             }
@@ -5777,8 +6062,10 @@ exports.MessagePayload = {
     fromJSON(object) {
         return {
             text: isSet(object.text) ? globalThis.String(object.text) : "",
-            replyingTo: isSet(object.replyingTo) ? BigInt(object.replyingTo) : 0n,
             files: isSet(object.files) ? exports.EncryptedFiles.fromJSON(object.files) : undefined,
+            editedOf: isSet(object.editedOf) ? BigInt(object.editedOf) : undefined,
+            replyingTo: isSet(object.replyingTo) ? BigInt(object.replyingTo) : undefined,
+            deleted: isSet(object.deleted) ? BigInt(object.deleted) : undefined,
         };
     },
     toJSON(message) {
@@ -5786,11 +6073,17 @@ exports.MessagePayload = {
         if (message.text !== "") {
             obj.text = message.text;
         }
-        if (message.replyingTo !== 0n) {
-            obj.replyingTo = message.replyingTo.toString();
-        }
         if (message.files !== undefined) {
             obj.files = exports.EncryptedFiles.toJSON(message.files);
+        }
+        if (message.editedOf !== undefined) {
+            obj.editedOf = message.editedOf.toString();
+        }
+        if (message.replyingTo !== undefined) {
+            obj.replyingTo = message.replyingTo.toString();
+        }
+        if (message.deleted !== undefined) {
+            obj.deleted = message.deleted.toString();
         }
         return obj;
     },
@@ -5800,12 +6093,16 @@ exports.MessagePayload = {
     fromPartial(object) {
         const message = createBaseMessagePayload();
         message.text = object.text ?? "";
-        message.replyingTo = (object.replyingTo !== undefined && object.replyingTo !== null)
-            ? BigInt(object.replyingTo)
-            : 0n;
         message.files = (object.files !== undefined && object.files !== null)
             ? exports.EncryptedFiles.fromPartial(object.files)
             : undefined;
+        message.editedOf = (object.editedOf !== undefined && object.editedOf !== null)
+            ? BigInt(object.editedOf)
+            : undefined;
+        message.replyingTo = (object.replyingTo !== undefined && object.replyingTo !== null)
+            ? BigInt(object.replyingTo)
+            : undefined;
+        message.deleted = (object.deleted !== undefined && object.deleted !== null) ? BigInt(object.deleted) : undefined;
         return message;
     },
 };
