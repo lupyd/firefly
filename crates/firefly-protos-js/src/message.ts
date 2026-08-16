@@ -242,7 +242,7 @@ export interface UserMessage {
   id: bigint;
   toId: bigint;
   fromId: bigint;
-  text: Buffer;
+  text: Uint8Array;
   type: number;
   /** flags for server to notify or just send or don't send */
   settings: number;
@@ -256,7 +256,7 @@ export interface Group {
   id: bigint;
   name: string;
   description: string;
-  state: Buffer;
+  state: Uint8Array;
   settings: number;
   upgraded: boolean;
   pending: boolean;
@@ -285,17 +285,17 @@ export interface GroupInvite {
   groupId: bigint;
   inviter: string;
   invitee: string;
-  welcomeMessage: Buffer;
+  welcomeMessage: Uint8Array;
   commitId: bigint;
 }
 
 export interface GroupCommitAndWelcome {
   id: bigint;
   groupId: bigint;
-  commitMessage: Buffer;
+  commitMessage: Uint8Array;
   inviter: string;
   invitee: string;
-  welcomeMessages: Buffer[];
+  welcomeMessages: Uint8Array[];
   inviteeAddresses: bigint[];
 }
 
@@ -306,13 +306,13 @@ export interface GroupInvites {
 export interface GroupMessage {
   id: bigint;
   groupId: bigint;
-  message: Buffer;
+  message: Uint8Array;
   epoch: number;
 }
 
 export interface GroupKeyPackage {
   address: bigint;
-  package: Buffer;
+  package: Uint8Array;
   username: string;
   id: number;
 }
@@ -349,7 +349,7 @@ export interface GroupMemberUpdates {
 export interface GroupCommit {
   id: bigint;
   groupId: bigint;
-  commit: Buffer;
+  commit: Uint8Array;
   epoch: number;
 }
 
@@ -390,7 +390,7 @@ export interface Error {
 }
 
 export interface Result {
-  body: Buffer;
+  body: Uint8Array;
   resultCode: number;
 }
 
@@ -467,8 +467,8 @@ export interface ServerMessage {
   userMessages?: UserMessages | undefined;
   groupMessages?: GroupMessages | undefined;
   response?: Response | undefined;
-  ping?: Buffer | undefined;
-  pong?: Buffer | undefined;
+  ping?: Uint8Array | undefined;
+  pong?: Uint8Array | undefined;
   readUserMessagesUpto?: ReadUserMessagesUpto | undefined;
   groupInvite?: GroupInvite | undefined;
   groupCommits?: GroupCommits | undefined;
@@ -483,8 +483,8 @@ export interface ClientMessage {
   groupMessage?: GroupMessage | undefined;
   verifiedUserMessage?: UserMessage | undefined;
   request?: Request | undefined;
-  ping?: Buffer | undefined;
-  pong?: Buffer | undefined;
+  ping?: Uint8Array | undefined;
+  pong?: Uint8Array | undefined;
   readUserMessagesUpto?: ReadUserMessagesUpto | undefined;
   callSignal?: CallSignal | undefined;
   groupMeetingSignal?: GroupMeetingSignal | undefined;
@@ -514,21 +514,21 @@ export interface GroupId {
 export interface AuthToken {
   username: string;
   validUntil: bigint;
-  credential: Buffer;
+  credential: Uint8Array;
   addressId: bigint;
   deviceId: number;
 }
 
 export interface SignedToken {
   kid: string;
-  payload: Buffer;
-  signature: Buffer;
+  payload: Uint8Array;
+  signature: Uint8Array;
 }
 
 export interface FireflyIdentity {
-  secret: Buffer;
-  public: Buffer;
-  credential: Buffer;
+  secret: Uint8Array;
+  public: Uint8Array;
+  credential: Uint8Array;
 }
 
 export interface FireflyGroupExtension {
@@ -563,14 +563,14 @@ export interface PreKeyBundle {
   registrationId: number;
   deviceId: number;
   preKeyId: number;
-  prePublicKey: Buffer;
+  prePublicKey: Uint8Array;
   signedPreKeyId: number;
-  signedPrePublicKey: Buffer;
-  signedPreKeySignature: Buffer;
-  identityPublicKey: Buffer;
+  signedPrePublicKey: Uint8Array;
+  signedPreKeySignature: Uint8Array;
+  identityPublicKey: Uint8Array;
   KEMPreKeyId: number;
-  KEMPrePublicKey: Buffer;
-  KEMPreKeySignature: Buffer;
+  KEMPrePublicKey: Uint8Array;
+  KEMPreKeySignature: Uint8Array;
 }
 
 export interface PreKeyBundleEntry {
@@ -608,7 +608,7 @@ export interface Conversations {
 
 export interface EncryptedFile {
   url: string;
-  secretKey: Buffer;
+  secretKey: Uint8Array;
   contentType: number;
   contentLength: number;
 }
@@ -626,7 +626,7 @@ export interface MessagePayload {
 }
 
 export interface CallMessage {
-  message: Buffer;
+  message: Uint8Array;
   type: CallMessageType;
   jsonBody: string;
   sessionId: number;
@@ -635,11 +635,11 @@ export interface CallMessage {
 export interface SelfUserMessage {
   to: string;
   /** UserMessageInner encrypted */
-  inner: Buffer;
+  inner: Uint8Array;
 }
 
 export interface UserMessageInner {
-  plainText?: Buffer | undefined;
+  plainText?: Uint8Array | undefined;
   callMessage?: CallMessage | undefined;
   messagePayload?: MessagePayload | undefined;
   selfMessage?: SelfUserMessage | undefined;
@@ -771,7 +771,7 @@ function createBaseUserMessage(): UserMessage {
     id: 0n,
     toId: 0n,
     fromId: 0n,
-    text: Buffer.alloc(0),
+    text: new Uint8Array(0),
     type: 0,
     settings: 0,
     hashValue: 0n,
@@ -860,7 +860,7 @@ export const UserMessage: MessageFns<UserMessage> = {
             break;
           }
 
-          message.text = Buffer.from(reader.bytes());
+          message.text = reader.bytes();
           continue;
         }
         case 6: {
@@ -917,7 +917,7 @@ export const UserMessage: MessageFns<UserMessage> = {
       id: isSet(object.id) ? BigInt(object.id) : 0n,
       toId: isSet(object.toId) ? BigInt(object.toId) : 0n,
       fromId: isSet(object.fromId) ? BigInt(object.fromId) : 0n,
-      text: isSet(object.text) ? Buffer.from(bytesFromBase64(object.text)) : Buffer.alloc(0),
+      text: isSet(object.text) ? bytesFromBase64(object.text) : new Uint8Array(0),
       type: isSet(object.type) ? globalThis.Number(object.type) : 0,
       settings: isSet(object.settings) ? globalThis.Number(object.settings) : 0,
       hashValue: isSet(object.hashValue) ? BigInt(object.hashValue) : 0n,
@@ -966,7 +966,7 @@ export const UserMessage: MessageFns<UserMessage> = {
     message.id = (object.id !== undefined && object.id !== null) ? BigInt(object.id) : 0n;
     message.toId = (object.toId !== undefined && object.toId !== null) ? BigInt(object.toId) : 0n;
     message.fromId = (object.fromId !== undefined && object.fromId !== null) ? BigInt(object.fromId) : 0n;
-    message.text = object.text ?? Buffer.alloc(0);
+    message.text = object.text ?? new Uint8Array(0);
     message.type = object.type ?? 0;
     message.settings = object.settings ?? 0;
     message.hashValue = (object.hashValue !== undefined && object.hashValue !== null) ? BigInt(object.hashValue) : 0n;
@@ -981,7 +981,7 @@ function createBaseGroup(): Group {
     id: 0n,
     name: "",
     description: "",
-    state: Buffer.alloc(0),
+    state: new Uint8Array(0),
     settings: 0,
     upgraded: false,
     pending: false,
@@ -1057,7 +1057,7 @@ export const Group: MessageFns<Group> = {
             break;
           }
 
-          message.state = Buffer.from(reader.bytes());
+          message.state = reader.bytes();
           continue;
         }
         case 6: {
@@ -1106,7 +1106,7 @@ export const Group: MessageFns<Group> = {
       id: isSet(object.id) ? BigInt(object.id) : 0n,
       name: isSet(object.name) ? globalThis.String(object.name) : "",
       description: isSet(object.description) ? globalThis.String(object.description) : "",
-      state: isSet(object.state) ? Buffer.from(bytesFromBase64(object.state)) : Buffer.alloc(0),
+      state: isSet(object.state) ? bytesFromBase64(object.state) : new Uint8Array(0),
       settings: isSet(object.settings) ? globalThis.Number(object.settings) : 0,
       upgraded: isSet(object.upgraded) ? globalThis.Boolean(object.upgraded) : false,
       pending: isSet(object.pending) ? globalThis.Boolean(object.pending) : false,
@@ -1151,7 +1151,7 @@ export const Group: MessageFns<Group> = {
     message.id = (object.id !== undefined && object.id !== null) ? BigInt(object.id) : 0n;
     message.name = object.name ?? "";
     message.description = object.description ?? "";
-    message.state = object.state ?? Buffer.alloc(0);
+    message.state = object.state ?? new Uint8Array(0);
     message.settings = object.settings ?? 0;
     message.upgraded = object.upgraded ?? false;
     message.pending = object.pending ?? false;
@@ -1440,7 +1440,7 @@ export const UserMessages: MessageFns<UserMessages> = {
 };
 
 function createBaseGroupInvite(): GroupInvite {
-  return { groupId: 0n, inviter: "", invitee: "", welcomeMessage: Buffer.alloc(0), commitId: 0n };
+  return { groupId: 0n, inviter: "", invitee: "", welcomeMessage: new Uint8Array(0), commitId: 0n };
 }
 
 export const GroupInvite: MessageFns<GroupInvite> = {
@@ -1505,7 +1505,7 @@ export const GroupInvite: MessageFns<GroupInvite> = {
             break;
           }
 
-          message.welcomeMessage = Buffer.from(reader.bytes());
+          message.welcomeMessage = reader.bytes();
           continue;
         }
         case 5: {
@@ -1530,9 +1530,7 @@ export const GroupInvite: MessageFns<GroupInvite> = {
       groupId: isSet(object.groupId) ? BigInt(object.groupId) : 0n,
       inviter: isSet(object.inviter) ? globalThis.String(object.inviter) : "",
       invitee: isSet(object.invitee) ? globalThis.String(object.invitee) : "",
-      welcomeMessage: isSet(object.welcomeMessage)
-        ? Buffer.from(bytesFromBase64(object.welcomeMessage))
-        : Buffer.alloc(0),
+      welcomeMessage: isSet(object.welcomeMessage) ? bytesFromBase64(object.welcomeMessage) : new Uint8Array(0),
       commitId: isSet(object.commitId) ? BigInt(object.commitId) : 0n,
     };
   },
@@ -1565,7 +1563,7 @@ export const GroupInvite: MessageFns<GroupInvite> = {
     message.groupId = (object.groupId !== undefined && object.groupId !== null) ? BigInt(object.groupId) : 0n;
     message.inviter = object.inviter ?? "";
     message.invitee = object.invitee ?? "";
-    message.welcomeMessage = object.welcomeMessage ?? Buffer.alloc(0);
+    message.welcomeMessage = object.welcomeMessage ?? new Uint8Array(0);
     message.commitId = (object.commitId !== undefined && object.commitId !== null) ? BigInt(object.commitId) : 0n;
     return message;
   },
@@ -1575,7 +1573,7 @@ function createBaseGroupCommitAndWelcome(): GroupCommitAndWelcome {
   return {
     id: 0n,
     groupId: 0n,
-    commitMessage: Buffer.alloc(0),
+    commitMessage: new Uint8Array(0),
     inviter: "",
     invitee: "",
     welcomeMessages: [],
@@ -1648,7 +1646,7 @@ export const GroupCommitAndWelcome: MessageFns<GroupCommitAndWelcome> = {
             break;
           }
 
-          message.commitMessage = Buffer.from(reader.bytes());
+          message.commitMessage = reader.bytes();
           continue;
         }
         case 4: {
@@ -1672,7 +1670,7 @@ export const GroupCommitAndWelcome: MessageFns<GroupCommitAndWelcome> = {
             break;
           }
 
-          message.welcomeMessages.push(Buffer.from(reader.bytes()));
+          message.welcomeMessages.push(reader.bytes());
           continue;
         }
         case 7: {
@@ -1706,11 +1704,11 @@ export const GroupCommitAndWelcome: MessageFns<GroupCommitAndWelcome> = {
     return {
       id: isSet(object.id) ? BigInt(object.id) : 0n,
       groupId: isSet(object.groupId) ? BigInt(object.groupId) : 0n,
-      commitMessage: isSet(object.commitMessage) ? Buffer.from(bytesFromBase64(object.commitMessage)) : Buffer.alloc(0),
+      commitMessage: isSet(object.commitMessage) ? bytesFromBase64(object.commitMessage) : new Uint8Array(0),
       inviter: isSet(object.inviter) ? globalThis.String(object.inviter) : "",
       invitee: isSet(object.invitee) ? globalThis.String(object.invitee) : "",
       welcomeMessages: globalThis.Array.isArray(object?.welcomeMessages)
-        ? object.welcomeMessages.map((e: any) => Buffer.from(bytesFromBase64(e)))
+        ? object.welcomeMessages.map((e: any) => bytesFromBase64(e))
         : [],
       inviteeAddresses: globalThis.Array.isArray(object?.inviteeAddresses)
         ? object.inviteeAddresses.map((e: any) => BigInt(e))
@@ -1751,7 +1749,7 @@ export const GroupCommitAndWelcome: MessageFns<GroupCommitAndWelcome> = {
     const message = createBaseGroupCommitAndWelcome();
     message.id = (object.id !== undefined && object.id !== null) ? BigInt(object.id) : 0n;
     message.groupId = (object.groupId !== undefined && object.groupId !== null) ? BigInt(object.groupId) : 0n;
-    message.commitMessage = object.commitMessage ?? Buffer.alloc(0);
+    message.commitMessage = object.commitMessage ?? new Uint8Array(0);
     message.inviter = object.inviter ?? "";
     message.invitee = object.invitee ?? "";
     message.welcomeMessages = object.welcomeMessages?.map((e) => e) || [];
@@ -1821,7 +1819,7 @@ export const GroupInvites: MessageFns<GroupInvites> = {
 };
 
 function createBaseGroupMessage(): GroupMessage {
-  return { id: 0n, groupId: 0n, message: Buffer.alloc(0), epoch: 0 };
+  return { id: 0n, groupId: 0n, message: new Uint8Array(0), epoch: 0 };
 }
 
 export const GroupMessage: MessageFns<GroupMessage> = {
@@ -1875,7 +1873,7 @@ export const GroupMessage: MessageFns<GroupMessage> = {
             break;
           }
 
-          message.message = Buffer.from(reader.bytes());
+          message.message = reader.bytes();
           continue;
         }
         case 4: {
@@ -1899,7 +1897,7 @@ export const GroupMessage: MessageFns<GroupMessage> = {
     return {
       id: isSet(object.id) ? BigInt(object.id) : 0n,
       groupId: isSet(object.groupId) ? BigInt(object.groupId) : 0n,
-      message: isSet(object.message) ? Buffer.from(bytesFromBase64(object.message)) : Buffer.alloc(0),
+      message: isSet(object.message) ? bytesFromBase64(object.message) : new Uint8Array(0),
       epoch: isSet(object.epoch) ? globalThis.Number(object.epoch) : 0,
     };
   },
@@ -1928,14 +1926,14 @@ export const GroupMessage: MessageFns<GroupMessage> = {
     const message = createBaseGroupMessage();
     message.id = (object.id !== undefined && object.id !== null) ? BigInt(object.id) : 0n;
     message.groupId = (object.groupId !== undefined && object.groupId !== null) ? BigInt(object.groupId) : 0n;
-    message.message = object.message ?? Buffer.alloc(0);
+    message.message = object.message ?? new Uint8Array(0);
     message.epoch = object.epoch ?? 0;
     return message;
   },
 };
 
 function createBaseGroupKeyPackage(): GroupKeyPackage {
-  return { address: 0n, package: Buffer.alloc(0), username: "", id: 0 };
+  return { address: 0n, package: new Uint8Array(0), username: "", id: 0 };
 }
 
 export const GroupKeyPackage: MessageFns<GroupKeyPackage> = {
@@ -1978,7 +1976,7 @@ export const GroupKeyPackage: MessageFns<GroupKeyPackage> = {
             break;
           }
 
-          message.package = Buffer.from(reader.bytes());
+          message.package = reader.bytes();
           continue;
         }
         case 4: {
@@ -2009,7 +2007,7 @@ export const GroupKeyPackage: MessageFns<GroupKeyPackage> = {
   fromJSON(object: any): GroupKeyPackage {
     return {
       address: isSet(object.address) ? BigInt(object.address) : 0n,
-      package: isSet(object.package) ? Buffer.from(bytesFromBase64(object.package)) : Buffer.alloc(0),
+      package: isSet(object.package) ? bytesFromBase64(object.package) : new Uint8Array(0),
       username: isSet(object.username) ? globalThis.String(object.username) : "",
       id: isSet(object.id) ? globalThis.Number(object.id) : 0,
     };
@@ -2038,7 +2036,7 @@ export const GroupKeyPackage: MessageFns<GroupKeyPackage> = {
   fromPartial<I extends Exact<DeepPartial<GroupKeyPackage>, I>>(object: I): GroupKeyPackage {
     const message = createBaseGroupKeyPackage();
     message.address = (object.address !== undefined && object.address !== null) ? BigInt(object.address) : 0n;
-    message.package = object.package ?? Buffer.alloc(0);
+    message.package = object.package ?? new Uint8Array(0);
     message.username = object.username ?? "";
     message.id = object.id ?? 0;
     return message;
@@ -2525,7 +2523,7 @@ export const GroupMemberUpdates: MessageFns<GroupMemberUpdates> = {
 };
 
 function createBaseGroupCommit(): GroupCommit {
-  return { id: 0n, groupId: 0n, commit: Buffer.alloc(0), epoch: 0 };
+  return { id: 0n, groupId: 0n, commit: new Uint8Array(0), epoch: 0 };
 }
 
 export const GroupCommit: MessageFns<GroupCommit> = {
@@ -2579,7 +2577,7 @@ export const GroupCommit: MessageFns<GroupCommit> = {
             break;
           }
 
-          message.commit = Buffer.from(reader.bytes());
+          message.commit = reader.bytes();
           continue;
         }
         case 3: {
@@ -2603,7 +2601,7 @@ export const GroupCommit: MessageFns<GroupCommit> = {
     return {
       id: isSet(object.id) ? BigInt(object.id) : 0n,
       groupId: isSet(object.groupId) ? BigInt(object.groupId) : 0n,
-      commit: isSet(object.commit) ? Buffer.from(bytesFromBase64(object.commit)) : Buffer.alloc(0),
+      commit: isSet(object.commit) ? bytesFromBase64(object.commit) : new Uint8Array(0),
       epoch: isSet(object.epoch) ? globalThis.Number(object.epoch) : 0,
     };
   },
@@ -2632,7 +2630,7 @@ export const GroupCommit: MessageFns<GroupCommit> = {
     const message = createBaseGroupCommit();
     message.id = (object.id !== undefined && object.id !== null) ? BigInt(object.id) : 0n;
     message.groupId = (object.groupId !== undefined && object.groupId !== null) ? BigInt(object.groupId) : 0n;
-    message.commit = object.commit ?? Buffer.alloc(0);
+    message.commit = object.commit ?? new Uint8Array(0);
     message.epoch = object.epoch ?? 0;
     return message;
   },
@@ -3228,7 +3226,7 @@ export const Error: MessageFns<Error> = {
 };
 
 function createBaseResult(): Result {
-  return { body: Buffer.alloc(0), resultCode: 0 };
+  return { body: new Uint8Array(0), resultCode: 0 };
 }
 
 export const Result: MessageFns<Result> = {
@@ -3254,7 +3252,7 @@ export const Result: MessageFns<Result> = {
             break;
           }
 
-          message.body = Buffer.from(reader.bytes());
+          message.body = reader.bytes();
           continue;
         }
         case 1: {
@@ -3276,7 +3274,7 @@ export const Result: MessageFns<Result> = {
 
   fromJSON(object: any): Result {
     return {
-      body: isSet(object.body) ? Buffer.from(bytesFromBase64(object.body)) : Buffer.alloc(0),
+      body: isSet(object.body) ? bytesFromBase64(object.body) : new Uint8Array(0),
       resultCode: isSet(object.resultCode) ? globalThis.Number(object.resultCode) : 0,
     };
   },
@@ -3297,7 +3295,7 @@ export const Result: MessageFns<Result> = {
   },
   fromPartial<I extends Exact<DeepPartial<Result>, I>>(object: I): Result {
     const message = createBaseResult();
-    message.body = object.body ?? Buffer.alloc(0);
+    message.body = object.body ?? new Uint8Array(0);
     message.resultCode = object.resultCode ?? 0;
     return message;
   },
@@ -4555,7 +4553,7 @@ export const ServerMessage: MessageFns<ServerMessage> = {
             break;
           }
 
-          message.ping = Buffer.from(reader.bytes());
+          message.ping = reader.bytes();
           continue;
         }
         case 12: {
@@ -4563,7 +4561,7 @@ export const ServerMessage: MessageFns<ServerMessage> = {
             break;
           }
 
-          message.pong = Buffer.from(reader.bytes());
+          message.pong = reader.bytes();
           continue;
         }
         case 13: {
@@ -4638,8 +4636,8 @@ export const ServerMessage: MessageFns<ServerMessage> = {
       userMessages: isSet(object.userMessages) ? UserMessages.fromJSON(object.userMessages) : undefined,
       groupMessages: isSet(object.groupMessages) ? GroupMessages.fromJSON(object.groupMessages) : undefined,
       response: isSet(object.response) ? Response.fromJSON(object.response) : undefined,
-      ping: isSet(object.ping) ? Buffer.from(bytesFromBase64(object.ping)) : undefined,
-      pong: isSet(object.pong) ? Buffer.from(bytesFromBase64(object.pong)) : undefined,
+      ping: isSet(object.ping) ? bytesFromBase64(object.ping) : undefined,
+      pong: isSet(object.pong) ? bytesFromBase64(object.pong) : undefined,
       readUserMessagesUpto: isSet(object.readUserMessagesUpto)
         ? ReadUserMessagesUpto.fromJSON(object.readUserMessagesUpto)
         : undefined,
@@ -4842,7 +4840,7 @@ export const ClientMessage: MessageFns<ClientMessage> = {
             break;
           }
 
-          message.ping = Buffer.from(reader.bytes());
+          message.ping = reader.bytes();
           continue;
         }
         case 12: {
@@ -4850,7 +4848,7 @@ export const ClientMessage: MessageFns<ClientMessage> = {
             break;
           }
 
-          message.pong = Buffer.from(reader.bytes());
+          message.pong = reader.bytes();
           continue;
         }
         case 13: {
@@ -4894,8 +4892,8 @@ export const ClientMessage: MessageFns<ClientMessage> = {
         ? UserMessage.fromJSON(object.verifiedUserMessage)
         : undefined,
       request: isSet(object.request) ? Request.fromJSON(object.request) : undefined,
-      ping: isSet(object.ping) ? Buffer.from(bytesFromBase64(object.ping)) : undefined,
-      pong: isSet(object.pong) ? Buffer.from(bytesFromBase64(object.pong)) : undefined,
+      ping: isSet(object.ping) ? bytesFromBase64(object.ping) : undefined,
+      pong: isSet(object.pong) ? bytesFromBase64(object.pong) : undefined,
       readUserMessagesUpto: isSet(object.readUserMessagesUpto)
         ? ReadUserMessagesUpto.fromJSON(object.readUserMessagesUpto)
         : undefined,
@@ -5334,7 +5332,7 @@ export const GroupId: MessageFns<GroupId> = {
 };
 
 function createBaseAuthToken(): AuthToken {
-  return { username: "", validUntil: 0n, credential: Buffer.alloc(0), addressId: 0n, deviceId: 0 };
+  return { username: "", validUntil: 0n, credential: new Uint8Array(0), addressId: 0n, deviceId: 0 };
 }
 
 export const AuthToken: MessageFns<AuthToken> = {
@@ -5391,7 +5389,7 @@ export const AuthToken: MessageFns<AuthToken> = {
             break;
           }
 
-          message.credential = Buffer.from(reader.bytes());
+          message.credential = reader.bytes();
           continue;
         }
         case 6: {
@@ -5427,7 +5425,7 @@ export const AuthToken: MessageFns<AuthToken> = {
         : isSet(object.valid_until)
         ? BigInt(object.valid_until)
         : 0n,
-      credential: isSet(object.credential) ? Buffer.from(bytesFromBase64(object.credential)) : Buffer.alloc(0),
+      credential: isSet(object.credential) ? bytesFromBase64(object.credential) : new Uint8Array(0),
       addressId: isSet(object.addressId)
         ? BigInt(object.addressId)
         : isSet(object.address_id)
@@ -5470,7 +5468,7 @@ export const AuthToken: MessageFns<AuthToken> = {
     message.validUntil = (object.validUntil !== undefined && object.validUntil !== null)
       ? BigInt(object.validUntil)
       : 0n;
-    message.credential = object.credential ?? Buffer.alloc(0);
+    message.credential = object.credential ?? new Uint8Array(0);
     message.addressId = (object.addressId !== undefined && object.addressId !== null) ? BigInt(object.addressId) : 0n;
     message.deviceId = object.deviceId ?? 0;
     return message;
@@ -5478,7 +5476,7 @@ export const AuthToken: MessageFns<AuthToken> = {
 };
 
 function createBaseSignedToken(): SignedToken {
-  return { kid: "", payload: Buffer.alloc(0), signature: Buffer.alloc(0) };
+  return { kid: "", payload: new Uint8Array(0), signature: new Uint8Array(0) };
 }
 
 export const SignedToken: MessageFns<SignedToken> = {
@@ -5515,7 +5513,7 @@ export const SignedToken: MessageFns<SignedToken> = {
             break;
           }
 
-          message.payload = Buffer.from(reader.bytes());
+          message.payload = reader.bytes();
           continue;
         }
         case 3: {
@@ -5523,7 +5521,7 @@ export const SignedToken: MessageFns<SignedToken> = {
             break;
           }
 
-          message.signature = Buffer.from(reader.bytes());
+          message.signature = reader.bytes();
           continue;
         }
       }
@@ -5538,8 +5536,8 @@ export const SignedToken: MessageFns<SignedToken> = {
   fromJSON(object: any): SignedToken {
     return {
       kid: isSet(object.kid) ? globalThis.String(object.kid) : "",
-      payload: isSet(object.payload) ? Buffer.from(bytesFromBase64(object.payload)) : Buffer.alloc(0),
-      signature: isSet(object.signature) ? Buffer.from(bytesFromBase64(object.signature)) : Buffer.alloc(0),
+      payload: isSet(object.payload) ? bytesFromBase64(object.payload) : new Uint8Array(0),
+      signature: isSet(object.signature) ? bytesFromBase64(object.signature) : new Uint8Array(0),
     };
   },
 
@@ -5563,14 +5561,14 @@ export const SignedToken: MessageFns<SignedToken> = {
   fromPartial<I extends Exact<DeepPartial<SignedToken>, I>>(object: I): SignedToken {
     const message = createBaseSignedToken();
     message.kid = object.kid ?? "";
-    message.payload = object.payload ?? Buffer.alloc(0);
-    message.signature = object.signature ?? Buffer.alloc(0);
+    message.payload = object.payload ?? new Uint8Array(0);
+    message.signature = object.signature ?? new Uint8Array(0);
     return message;
   },
 };
 
 function createBaseFireflyIdentity(): FireflyIdentity {
-  return { secret: Buffer.alloc(0), public: Buffer.alloc(0), credential: Buffer.alloc(0) };
+  return { secret: new Uint8Array(0), public: new Uint8Array(0), credential: new Uint8Array(0) };
 }
 
 export const FireflyIdentity: MessageFns<FireflyIdentity> = {
@@ -5599,7 +5597,7 @@ export const FireflyIdentity: MessageFns<FireflyIdentity> = {
             break;
           }
 
-          message.secret = Buffer.from(reader.bytes());
+          message.secret = reader.bytes();
           continue;
         }
         case 3: {
@@ -5607,7 +5605,7 @@ export const FireflyIdentity: MessageFns<FireflyIdentity> = {
             break;
           }
 
-          message.public = Buffer.from(reader.bytes());
+          message.public = reader.bytes();
           continue;
         }
         case 4: {
@@ -5615,7 +5613,7 @@ export const FireflyIdentity: MessageFns<FireflyIdentity> = {
             break;
           }
 
-          message.credential = Buffer.from(reader.bytes());
+          message.credential = reader.bytes();
           continue;
         }
       }
@@ -5629,9 +5627,9 @@ export const FireflyIdentity: MessageFns<FireflyIdentity> = {
 
   fromJSON(object: any): FireflyIdentity {
     return {
-      secret: isSet(object.secret) ? Buffer.from(bytesFromBase64(object.secret)) : Buffer.alloc(0),
-      public: isSet(object.public) ? Buffer.from(bytesFromBase64(object.public)) : Buffer.alloc(0),
-      credential: isSet(object.credential) ? Buffer.from(bytesFromBase64(object.credential)) : Buffer.alloc(0),
+      secret: isSet(object.secret) ? bytesFromBase64(object.secret) : new Uint8Array(0),
+      public: isSet(object.public) ? bytesFromBase64(object.public) : new Uint8Array(0),
+      credential: isSet(object.credential) ? bytesFromBase64(object.credential) : new Uint8Array(0),
     };
   },
 
@@ -5654,9 +5652,9 @@ export const FireflyIdentity: MessageFns<FireflyIdentity> = {
   },
   fromPartial<I extends Exact<DeepPartial<FireflyIdentity>, I>>(object: I): FireflyIdentity {
     const message = createBaseFireflyIdentity();
-    message.secret = object.secret ?? Buffer.alloc(0);
-    message.public = object.public ?? Buffer.alloc(0);
-    message.credential = object.credential ?? Buffer.alloc(0);
+    message.secret = object.secret ?? new Uint8Array(0);
+    message.public = object.public ?? new Uint8Array(0);
+    message.credential = object.credential ?? new Uint8Array(0);
     return message;
   },
 };
@@ -6110,14 +6108,14 @@ function createBasePreKeyBundle(): PreKeyBundle {
     registrationId: 0,
     deviceId: 0,
     preKeyId: 0,
-    prePublicKey: Buffer.alloc(0),
+    prePublicKey: new Uint8Array(0),
     signedPreKeyId: 0,
-    signedPrePublicKey: Buffer.alloc(0),
-    signedPreKeySignature: Buffer.alloc(0),
-    identityPublicKey: Buffer.alloc(0),
+    signedPrePublicKey: new Uint8Array(0),
+    signedPreKeySignature: new Uint8Array(0),
+    identityPublicKey: new Uint8Array(0),
     KEMPreKeyId: 0,
-    KEMPrePublicKey: Buffer.alloc(0),
-    KEMPreKeySignature: Buffer.alloc(0),
+    KEMPrePublicKey: new Uint8Array(0),
+    KEMPreKeySignature: new Uint8Array(0),
   };
 }
 
@@ -6195,7 +6193,7 @@ export const PreKeyBundle: MessageFns<PreKeyBundle> = {
             break;
           }
 
-          message.prePublicKey = Buffer.from(reader.bytes());
+          message.prePublicKey = reader.bytes();
           continue;
         }
         case 5: {
@@ -6211,7 +6209,7 @@ export const PreKeyBundle: MessageFns<PreKeyBundle> = {
             break;
           }
 
-          message.signedPrePublicKey = Buffer.from(reader.bytes());
+          message.signedPrePublicKey = reader.bytes();
           continue;
         }
         case 7: {
@@ -6219,7 +6217,7 @@ export const PreKeyBundle: MessageFns<PreKeyBundle> = {
             break;
           }
 
-          message.signedPreKeySignature = Buffer.from(reader.bytes());
+          message.signedPreKeySignature = reader.bytes();
           continue;
         }
         case 8: {
@@ -6227,7 +6225,7 @@ export const PreKeyBundle: MessageFns<PreKeyBundle> = {
             break;
           }
 
-          message.identityPublicKey = Buffer.from(reader.bytes());
+          message.identityPublicKey = reader.bytes();
           continue;
         }
         case 9: {
@@ -6243,7 +6241,7 @@ export const PreKeyBundle: MessageFns<PreKeyBundle> = {
             break;
           }
 
-          message.KEMPrePublicKey = Buffer.from(reader.bytes());
+          message.KEMPrePublicKey = reader.bytes();
           continue;
         }
         case 11: {
@@ -6251,7 +6249,7 @@ export const PreKeyBundle: MessageFns<PreKeyBundle> = {
             break;
           }
 
-          message.KEMPreKeySignature = Buffer.from(reader.bytes());
+          message.KEMPreKeySignature = reader.bytes();
           continue;
         }
       }
@@ -6268,24 +6266,22 @@ export const PreKeyBundle: MessageFns<PreKeyBundle> = {
       registrationId: isSet(object.registrationId) ? globalThis.Number(object.registrationId) : 0,
       deviceId: isSet(object.deviceId) ? globalThis.Number(object.deviceId) : 0,
       preKeyId: isSet(object.preKeyId) ? globalThis.Number(object.preKeyId) : 0,
-      prePublicKey: isSet(object.prePublicKey) ? Buffer.from(bytesFromBase64(object.prePublicKey)) : Buffer.alloc(0),
+      prePublicKey: isSet(object.prePublicKey) ? bytesFromBase64(object.prePublicKey) : new Uint8Array(0),
       signedPreKeyId: isSet(object.signedPreKeyId) ? globalThis.Number(object.signedPreKeyId) : 0,
       signedPrePublicKey: isSet(object.signedPrePublicKey)
-        ? Buffer.from(bytesFromBase64(object.signedPrePublicKey))
-        : Buffer.alloc(0),
+        ? bytesFromBase64(object.signedPrePublicKey)
+        : new Uint8Array(0),
       signedPreKeySignature: isSet(object.signedPreKeySignature)
-        ? Buffer.from(bytesFromBase64(object.signedPreKeySignature))
-        : Buffer.alloc(0),
+        ? bytesFromBase64(object.signedPreKeySignature)
+        : new Uint8Array(0),
       identityPublicKey: isSet(object.identityPublicKey)
-        ? Buffer.from(bytesFromBase64(object.identityPublicKey))
-        : Buffer.alloc(0),
+        ? bytesFromBase64(object.identityPublicKey)
+        : new Uint8Array(0),
       KEMPreKeyId: isSet(object.KEMPreKeyId) ? globalThis.Number(object.KEMPreKeyId) : 0,
-      KEMPrePublicKey: isSet(object.KEMPrePublicKey)
-        ? Buffer.from(bytesFromBase64(object.KEMPrePublicKey))
-        : Buffer.alloc(0),
+      KEMPrePublicKey: isSet(object.KEMPrePublicKey) ? bytesFromBase64(object.KEMPrePublicKey) : new Uint8Array(0),
       KEMPreKeySignature: isSet(object.KEMPreKeySignature)
-        ? Buffer.from(bytesFromBase64(object.KEMPreKeySignature))
-        : Buffer.alloc(0),
+        ? bytesFromBase64(object.KEMPreKeySignature)
+        : new Uint8Array(0),
     };
   },
 
@@ -6335,14 +6331,14 @@ export const PreKeyBundle: MessageFns<PreKeyBundle> = {
     message.registrationId = object.registrationId ?? 0;
     message.deviceId = object.deviceId ?? 0;
     message.preKeyId = object.preKeyId ?? 0;
-    message.prePublicKey = object.prePublicKey ?? Buffer.alloc(0);
+    message.prePublicKey = object.prePublicKey ?? new Uint8Array(0);
     message.signedPreKeyId = object.signedPreKeyId ?? 0;
-    message.signedPrePublicKey = object.signedPrePublicKey ?? Buffer.alloc(0);
-    message.signedPreKeySignature = object.signedPreKeySignature ?? Buffer.alloc(0);
-    message.identityPublicKey = object.identityPublicKey ?? Buffer.alloc(0);
+    message.signedPrePublicKey = object.signedPrePublicKey ?? new Uint8Array(0);
+    message.signedPreKeySignature = object.signedPreKeySignature ?? new Uint8Array(0);
+    message.identityPublicKey = object.identityPublicKey ?? new Uint8Array(0);
     message.KEMPreKeyId = object.KEMPreKeyId ?? 0;
-    message.KEMPrePublicKey = object.KEMPrePublicKey ?? Buffer.alloc(0);
-    message.KEMPreKeySignature = object.KEMPreKeySignature ?? Buffer.alloc(0);
+    message.KEMPrePublicKey = object.KEMPrePublicKey ?? new Uint8Array(0);
+    message.KEMPreKeySignature = object.KEMPreKeySignature ?? new Uint8Array(0);
     return message;
   },
 };
@@ -6881,7 +6877,7 @@ export const Conversations: MessageFns<Conversations> = {
 };
 
 function createBaseEncryptedFile(): EncryptedFile {
-  return { url: "", secretKey: Buffer.alloc(0), contentType: 0, contentLength: 0 };
+  return { url: "", secretKey: new Uint8Array(0), contentType: 0, contentLength: 0 };
 }
 
 export const EncryptedFile: MessageFns<EncryptedFile> = {
@@ -6921,7 +6917,7 @@ export const EncryptedFile: MessageFns<EncryptedFile> = {
             break;
           }
 
-          message.secretKey = Buffer.from(reader.bytes());
+          message.secretKey = reader.bytes();
           continue;
         }
         case 2: {
@@ -6952,7 +6948,7 @@ export const EncryptedFile: MessageFns<EncryptedFile> = {
   fromJSON(object: any): EncryptedFile {
     return {
       url: isSet(object.url) ? globalThis.String(object.url) : "",
-      secretKey: isSet(object.secretKey) ? Buffer.from(bytesFromBase64(object.secretKey)) : Buffer.alloc(0),
+      secretKey: isSet(object.secretKey) ? bytesFromBase64(object.secretKey) : new Uint8Array(0),
       contentType: isSet(object.contentType) ? globalThis.Number(object.contentType) : 0,
       contentLength: isSet(object.contentLength) ? globalThis.Number(object.contentLength) : 0,
     };
@@ -6981,7 +6977,7 @@ export const EncryptedFile: MessageFns<EncryptedFile> = {
   fromPartial<I extends Exact<DeepPartial<EncryptedFile>, I>>(object: I): EncryptedFile {
     const message = createBaseEncryptedFile();
     message.url = object.url ?? "";
-    message.secretKey = object.secretKey ?? Buffer.alloc(0);
+    message.secretKey = object.secretKey ?? new Uint8Array(0);
     message.contentType = object.contentType ?? 0;
     message.contentLength = object.contentLength ?? 0;
     return message;
@@ -7188,7 +7184,7 @@ export const MessagePayload: MessageFns<MessagePayload> = {
 };
 
 function createBaseCallMessage(): CallMessage {
-  return { message: Buffer.alloc(0), type: 0, jsonBody: "", sessionId: 0 };
+  return { message: new Uint8Array(0), type: 0, jsonBody: "", sessionId: 0 };
 }
 
 export const CallMessage: MessageFns<CallMessage> = {
@@ -7220,7 +7216,7 @@ export const CallMessage: MessageFns<CallMessage> = {
             break;
           }
 
-          message.message = Buffer.from(reader.bytes());
+          message.message = reader.bytes();
           continue;
         }
         case 3: {
@@ -7258,7 +7254,7 @@ export const CallMessage: MessageFns<CallMessage> = {
 
   fromJSON(object: any): CallMessage {
     return {
-      message: isSet(object.message) ? Buffer.from(bytesFromBase64(object.message)) : Buffer.alloc(0),
+      message: isSet(object.message) ? bytesFromBase64(object.message) : new Uint8Array(0),
       type: isSet(object.type) ? callMessageTypeFromJSON(object.type) : 0,
       jsonBody: isSet(object.jsonBody) ? globalThis.String(object.jsonBody) : "",
       sessionId: isSet(object.sessionId) ? globalThis.Number(object.sessionId) : 0,
@@ -7287,7 +7283,7 @@ export const CallMessage: MessageFns<CallMessage> = {
   },
   fromPartial<I extends Exact<DeepPartial<CallMessage>, I>>(object: I): CallMessage {
     const message = createBaseCallMessage();
-    message.message = object.message ?? Buffer.alloc(0);
+    message.message = object.message ?? new Uint8Array(0);
     message.type = object.type ?? 0;
     message.jsonBody = object.jsonBody ?? "";
     message.sessionId = object.sessionId ?? 0;
@@ -7296,7 +7292,7 @@ export const CallMessage: MessageFns<CallMessage> = {
 };
 
 function createBaseSelfUserMessage(): SelfUserMessage {
-  return { to: "", inner: Buffer.alloc(0) };
+  return { to: "", inner: new Uint8Array(0) };
 }
 
 export const SelfUserMessage: MessageFns<SelfUserMessage> = {
@@ -7330,7 +7326,7 @@ export const SelfUserMessage: MessageFns<SelfUserMessage> = {
             break;
           }
 
-          message.inner = Buffer.from(reader.bytes());
+          message.inner = reader.bytes();
           continue;
         }
       }
@@ -7345,7 +7341,7 @@ export const SelfUserMessage: MessageFns<SelfUserMessage> = {
   fromJSON(object: any): SelfUserMessage {
     return {
       to: isSet(object.to) ? globalThis.String(object.to) : "",
-      inner: isSet(object.inner) ? Buffer.from(bytesFromBase64(object.inner)) : Buffer.alloc(0),
+      inner: isSet(object.inner) ? bytesFromBase64(object.inner) : new Uint8Array(0),
     };
   },
 
@@ -7366,7 +7362,7 @@ export const SelfUserMessage: MessageFns<SelfUserMessage> = {
   fromPartial<I extends Exact<DeepPartial<SelfUserMessage>, I>>(object: I): SelfUserMessage {
     const message = createBaseSelfUserMessage();
     message.to = object.to ?? "";
-    message.inner = object.inner ?? Buffer.alloc(0);
+    message.inner = object.inner ?? new Uint8Array(0);
     return message;
   },
 };
@@ -7407,7 +7403,7 @@ export const UserMessageInner: MessageFns<UserMessageInner> = {
             break;
           }
 
-          message.plainText = Buffer.from(reader.bytes());
+          message.plainText = reader.bytes();
           continue;
         }
         case 2: {
@@ -7453,7 +7449,7 @@ export const UserMessageInner: MessageFns<UserMessageInner> = {
 
   fromJSON(object: any): UserMessageInner {
     return {
-      plainText: isSet(object.plainText) ? Buffer.from(bytesFromBase64(object.plainText)) : undefined,
+      plainText: isSet(object.plainText) ? bytesFromBase64(object.plainText) : undefined,
       callMessage: isSet(object.callMessage) ? CallMessage.fromJSON(object.callMessage) : undefined,
       messagePayload: isSet(object.messagePayload) ? MessagePayload.fromJSON(object.messagePayload) : undefined,
       selfMessage: isSet(object.selfMessage) ? SelfUserMessage.fromJSON(object.selfMessage) : undefined,
@@ -9291,11 +9287,20 @@ export const GroupMeetingSignal: MessageFns<GroupMeetingSignal> = {
 };
 
 function bytesFromBase64(b64: string): Uint8Array {
-  return Uint8Array.from(globalThis.Buffer.from(b64, "base64"));
+  const bin = globalThis.atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; ++i) {
+    arr[i] = bin.charCodeAt(i);
+  }
+  return arr;
 }
 
 function base64FromBytes(arr: Uint8Array): string {
-  return globalThis.Buffer.from(arr).toString("base64");
+  const bin: string[] = [];
+  arr.forEach((byte) => {
+    bin.push(globalThis.String.fromCharCode(byte));
+  });
+  return globalThis.btoa(bin.join(""));
 }
 
 type Builtin = Date | Function | Uint8Array | string | number | boolean | bigint | undefined;

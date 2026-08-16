@@ -1,6 +1,6 @@
 {
   "name": "firefly-protos-js",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "Generated protobuf definitions and codecs for the Firefly MLS network",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -14,7 +14,7 @@
   },
   
   "scripts": {
-    "proto:gen": "mkdir -p src && protoc -I=../protos/protobufs message.proto --plugin=node_modules/ts-proto/protoc-gen-ts_proto --ts_proto_opt=forceLong=bigint --ts_proto_opt=env=node --ts_proto_opt=esModuleInterop=true --ts_proto_out=src",
+    "proto:gen": "mkdir -p src && protoc -I=../protos/protobufs message.proto --plugin=node_modules/ts-proto/protoc-gen-ts_proto --ts_proto_opt=forceLong=bigint --ts_proto_opt=env=browser --ts_proto_opt=esModuleInterop=true --ts_proto_out=src",
     "build": "pnpm run proto:gen && tsc",
     "prepublishOnly": "pnpm run build"
   },
@@ -22,12 +22,12 @@
     "dist/**/*"
   ],
   "dependencies": {
-    "@bufbuild/protobuf": "^2.2.3",
-    "protobufjs": "^7.3.0"
+    "@bufbuild/protobuf": "^2.14.0",
+    "protobufjs": "^8.7.2"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
-    "ts-proto": "^2.7.5",
+    "ts-proto": "^2.12.0",
     "typescript": "^7.0.2"
   }
 }

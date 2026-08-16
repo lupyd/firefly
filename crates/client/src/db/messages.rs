@@ -158,6 +158,42 @@ impl MessagesStore {
 
         Ok(())
     }
+
+    pub async fn delete_user_message(&self, other: &str, id: u64) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM user_messages WHERE other = ? AND id = ?")
+            .bind(other)
+            .bind(id as i64)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_user_conversation(&self, other: &str) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM user_messages WHERE other = ?")
+            .bind(other)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM last_seen_user_timestamps WHERE other = ?")
+            .bind(other)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_user_message_text(
+        &self,
+        other: &str,
+        id: u64,
+        message: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        sqlx::query("UPDATE user_messages SET message = ? WHERE other = ? AND id = ?")
+            .bind(message)
+            .bind(other)
+            .bind(id as i64)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
