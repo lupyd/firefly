@@ -1470,23 +1470,37 @@ impl FireflyWsClient {
 
         let mut url = format!(
             "{}/group/reAdds?address={}&groupIds=",
-            addressId, self.firefly_base_url
+            self.firefly_base_url, addressId
         );
 
         write_url_comma_seperated(&mut url, groups.iter().map(|x| x.id))?;
 
-        let response = HTTP_CLIENT.get(url).bearer_auth(&token).send().await?;
+        log::info!(
+            "[add_requested_re_add_group_members] Querying reAdds: url={}, group_count={}",
+            url,
+            groups.len()
+        );
+
+        let response = HTTP_CLIENT.get(&url).bearer_auth(&token).send().await?;
 
         if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            log::error!("[add_requested_re_add_group_members] Failed status [{}] {}", status, body);
             return Err(anyhow::anyhow!(
                 "unexpected status [{}] {}",
-                response.status(),
-                response.text().await?
+                status,
+                body
             ));
         }
 
         let bytes = response.bytes().await?;
         let requests = deserialize_proto::<firefly::GroupReAddRequests<'_>>(&bytes)?;
+
+        log::info!(
+            "[add_requested_re_add_group_members] Received {} pending re-add/join requests",
+            requests.requests.len()
+        );
 
         let firefly_mls_client = self
             .firefly_mls_client
@@ -1494,15 +1508,21 @@ impl FireflyWsClient {
             .context("firefly_mls_client is not initialized")?;
 
         for request in requests.requests {
+            log::info!(
+                "[add_requested_re_add_group_members] Processing request: group={}, user={}, address={}",
+                request.group_id,
+                request.username,
+                request.address_id
+            );
             match self
                 .re_add_member(token, &firefly_mls_client, &request, addressId)
                 .await
             {
                 Ok(_) => {
-                    log::info!("readded member: {:?}", request);
+                    log::info!("[add_requested_re_add_group_members] Successfully processed readd/join member: {:?}", request);
                 }
                 Err(err) => {
-                    log::error!("failed to readd member {:?}", err);
+                    log::error!("[add_requested_re_add_group_members] Failed to process readd/join member {:?}: {:?}", request, err);
                 }
             }
         }
@@ -1518,12 +1538,14 @@ impl FireflyWsClient {
         addressId: u64,
     ) -> anyhow::Result<()> {
         let groupId = request.group_id;
+        log::info!("[re_add_member] Loading group {} for re-adding user {}", groupId, request.username);
         let group_info = self.group_info_store.get(groupId).await?;
 
         let group = firefly_mls_client
             .load_group(groupId, group_info.identifier.clone())
             .await?;
 
+        log::info!("[re_add_member] Calling group.re_add_member for user {} (address {}) in group {}", request.username, request.address_id, groupId);
         let id = group
             .re_add_member(request.username.to_string(), request.address_id)
             .await?;
@@ -1532,6 +1554,7 @@ impl FireflyWsClient {
             .update_cursor(id, groupId, group.epoch().await as u32)
             .await?;
 
+        log::info!("[re_add_member] Successfully committed re-add. Notifying server to delete reAdd request...");
         let response = HTTP_CLIENT
             .post(format!(
                 "{}/group/reAdd?groupId={}&other_address_id={}&address={}",
@@ -1542,9 +1565,9 @@ impl FireflyWsClient {
             .await?;
 
         log::info!(
-            "delete reAdd result: [{}] {}",
+            "[re_add_member] delete reAdd result: [{}] {}",
             response.status(),
-            response.text().await?
+            response.text().await.unwrap_or_default()
         );
 
         Ok(())
@@ -1556,7 +1579,7 @@ impl FireflyWsClient {
             self.firefly_base_url, addressId, device_id
         );
 
-        let response = HTTP_CLIENT.get(url).bearer_auth(token).send().await?;
+        let response = HTTP_CLIENT.get(&url).bearer_auth(token).send().await?;
 
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
@@ -1588,7 +1611,7 @@ impl FireflyWsClient {
             if !invites.invites.is_empty() {
                 let mut url = format!(
                     "{}/group/invites?address={}&groupIds=",
-                    addressId, self.firefly_base_url
+                    self.firefly_base_url, addressId
                 );
                 write_url_comma_seperated(&mut url, invites.invites.iter().map(|x| x.groupId))?;
                 let response = HTTP_CLIENT.delete(&url).bearer_auth(token).send().await?;
