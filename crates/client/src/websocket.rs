@@ -445,6 +445,23 @@ impl FireflyWsClient {
             log::error!("sync group messages failed: {:?}", err);
         }
 
+        if let Some(token) = self.callbacks.get_access_token().await {
+            let address_id = self.addressId.load(std::sync::atomic::Ordering::Relaxed);
+            let device_id = self
+                .key_stores
+                .store()
+                .identity_store
+                .get_full_identity_key_pair()
+                .await
+                .map(|i| i.device_id)
+                .unwrap_or(0) as u8;
+
+            let _ = self.join_groups(&token, address_id, device_id).await;
+            let _ = self
+                .add_requested_re_add_group_members(&token, address_id, device_id)
+                .await;
+        }
+
         on_connection_closed_rx.await?;
         Ok(())
     }
@@ -2436,6 +2453,30 @@ impl FireflyWsClient {
             _ => Err(anyhow::anyhow!("Unexpected response from server")),
         }
     }
+
+    pub async fn sync_group_joins_and_readds(&self) -> anyhow::Result<()> {
+        let token = self
+            .callbacks
+            .get_access_token()
+            .await
+            .context("token not found")?;
+        let address_id = self.addressId.load(std::sync::atomic::Ordering::Relaxed);
+        let device_id = self
+            .key_stores
+            .store()
+            .identity_store
+            .get_full_identity_key_pair()
+            .await
+            .map(|i| i.device_id)
+            .unwrap_or(0) as u8;
+
+        let _ = self.join_groups(&token, address_id, device_id).await;
+        let _ = self
+            .add_requested_re_add_group_members(&token, address_id, device_id)
+            .await;
+
+        Ok(())
+    }
 }
 
 async fn on_group_message(
@@ -3432,6 +3473,15 @@ impl FfiFireflyWsClient {
         CURRENT_CLIENT
             .scope(name, async {
                 self.inner.get_online_status(usernames).await
+            })
+            .await
+    }
+
+    pub async fn sync_group_joins_and_readds(&self) -> anyhow::Result<()> {
+        let name = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT
+            .scope(name, async {
+                self.inner.sync_group_joins_and_readds().await
             })
             .await
     }
