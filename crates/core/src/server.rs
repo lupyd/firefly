@@ -11,7 +11,7 @@ use mls_rs_crypto_rustcrypto::RustCryptoProvider;
 use crate::{
     config::{
         FireflyIdentityProvider, UpdateChannelProposal, UpdateRoleInChannelProposal,
-        UpdateRoleProposal, UpdateUserProposal,
+        UpdateRoleProposal, UpdateUserInChannelProposal, UpdateUserProposal,
     },
     extension::FireflyGroupExtension,
     rules::FireflyMlsRules,
@@ -39,6 +39,7 @@ pub fn make_server() -> ExternalClient<FireflyServerConfig> {
             UpdateRoleProposal::proposal_type(),
             UpdateChannelProposal::proposal_type(),
             UpdateRoleInChannelProposal::proposal_type(),
+            UpdateUserInChannelProposal::proposal_type(),
         ])
         .extension_type(FireflyGroupExtension::extension_type())
         .build();

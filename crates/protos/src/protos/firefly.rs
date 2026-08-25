@@ -2232,6 +2232,7 @@ pub struct FireflyGroupChannel<'a> {
     pub type_pb: u32,
     pub roles: Vec<firefly::FireflyGroupRole<'a>>,
     pub default_permissions: u32,
+    pub members: Vec<firefly::FireflyGroupChannelMember<'a>>,
 }
 
 impl<'a> MessageRead<'a> for FireflyGroupChannel<'a> {
@@ -2244,6 +2245,7 @@ impl<'a> MessageRead<'a> for FireflyGroupChannel<'a> {
                 Ok(24) => msg.type_pb = r.read_uint32(bytes)?,
                 Ok(34) => msg.roles.push(r.read_message::<firefly::FireflyGroupRole>(bytes)?),
                 Ok(45) => msg.default_permissions = r.read_fixed32(bytes)?,
+                Ok(50) => msg.members.push(r.read_message::<firefly::FireflyGroupChannelMember>(bytes)?),
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -2260,6 +2262,7 @@ impl<'a> MessageWrite for FireflyGroupChannel<'a> {
         + if self.type_pb == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.type_pb) as u64) }
         + self.roles.iter().map(|s| 1 + sizeof_len((s).get_size())).sum::<usize>()
         + if self.default_permissions == 0u32 { 0 } else { 1 + 4 }
+        + self.members.iter().map(|s| 1 + sizeof_len((s).get_size())).sum::<usize>()
     }
 
     fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
@@ -2268,6 +2271,43 @@ impl<'a> MessageWrite for FireflyGroupChannel<'a> {
         if self.type_pb != 0u32 { w.write_with_tag(24, |w| w.write_uint32(*&self.type_pb))?; }
         for s in &self.roles { w.write_with_tag(34, |w| w.write_message(s))?; }
         if self.default_permissions != 0u32 { w.write_with_tag(45, |w| w.write_fixed32(*&self.default_permissions))?; }
+        for s in &self.members { w.write_with_tag(50, |w| w.write_message(s))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct FireflyGroupChannelMember<'a> {
+    pub username: Cow<'a, str>,
+    pub role: u32,
+}
+
+impl<'a> MessageRead<'a> for FireflyGroupChannelMember<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(10) => msg.username = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(16) => msg.role = r.read_uint32(bytes)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for FireflyGroupChannelMember<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.username == "" { 0 } else { 1 + sizeof_len((&self.username).len()) }
+        + if self.role == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.role) as u64) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.username != "" { w.write_with_tag(10, |w| w.write_string(&**&self.username))?; }
+        if self.role != 0u32 { w.write_with_tag(16, |w| w.write_uint32(*&self.role))?; }
         Ok(())
     }
 }

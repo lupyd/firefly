@@ -2317,6 +2317,34 @@ impl FireflyWsClient {
         Ok(id)
     }
 
+    pub async fn update_group_users_in_channel(
+        &self,
+        groupId: u64,
+        channel_id: u32,
+        users: Vec<crate::group::UpdateUserInChannelProposalFfi>,
+    ) -> anyhow::Result<u64> {
+        let client = self
+            .firefly_mls_client
+            .get()
+            .context("firefly_mls_client is unitialized")?;
+
+        let group_info = self.group_info_store.get(groupId).await?;
+        let group = client
+            .load_group(groupId, group_info.identifier)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        let id = group
+            .update_users_in_channel(channel_id, users)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        self.group_messages_store
+            .update_cursor(id, groupId, group.epoch().await as u32)
+            .await?;
+        Ok(id)
+    }
+
     pub async fn add_group_member(
         &self,
         group_id: u64,
@@ -3304,6 +3332,17 @@ impl FfiFireflyWsClient {
     ) -> anyhow::Result<u64> {
         self.inner
             .update_group_roles_in_channel(groupId, channel_id, roles)
+            .await
+    }
+
+    pub async fn update_group_users_in_channel(
+        &self,
+        groupId: u64,
+        channel_id: u32,
+        users: Vec<crate::group::UpdateUserInChannelProposalFfi>,
+    ) -> anyhow::Result<u64> {
+        self.inner
+            .update_group_users_in_channel(groupId, channel_id, users)
             .await
     }
 

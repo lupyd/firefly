@@ -347,6 +347,12 @@ message FireflyGroupChannel {
   uint32 type = 3;
   repeated FireflyGroupRole roles = 4;
   fixed32 default_permissions = 5;
+  repeated FireflyGroupChannelMember members = 6;
+}
+
+message FireflyGroupChannelMember {
+  string username = 1;
+  uint32 role = 2;
 }
 
 message PreKeyBundle {
