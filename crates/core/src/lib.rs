@@ -4,7 +4,8 @@ use crate::client::FireflyClient;
 use crate::client::{FireflyClientMlsConfig, load_client};
 use crate::config::{
     CIPHERSUITE, FireflyCredential, FireflyError, FireflyIdentityProvider, UpdateChannelProposal,
-    UpdateRoleInChannelProposal, UpdateRoleProposal, UpdateUserProposal,
+    UpdateRoleInChannelProposal, UpdateRoleProposal, UpdateUserInChannelProposal,
+    UpdateUserProposal,
 };
 use crate::extension::{FireflyGroupExtension, FireflyGroupExtensionWrapper};
 use crate::rules::{
@@ -647,6 +648,13 @@ impl FireflyMlsGroup {
     pub async fn update_roles_in_channel(
         &self,
         proposals: impl Iterator<Item = UpdateRoleInChannelProposal>,
+    ) -> anyhow::Result<u64> {
+        self.commit_custom_proposals(proposals).await
+    }
+
+    pub async fn update_users_in_channel(
+        &self,
+        proposals: impl Iterator<Item = UpdateUserInChannelProposal>,
     ) -> anyhow::Result<u64> {
         self.commit_custom_proposals(proposals).await
     }

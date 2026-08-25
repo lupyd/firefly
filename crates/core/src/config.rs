@@ -112,6 +112,7 @@ const UPDATE_ROLE_PROPOSAL_TYPE: ProposalType = ProposalType::new(30006);
 const UPDATE_USER_PROPOSAL_TYPE: ProposalType = ProposalType::new(30007);
 const UPDATE_CHANNEL_PROPOSAL_TYPE: ProposalType = ProposalType::new(30008);
 const UPDATE_ROLE_IN_CHANNEL_PROPOSAL_TYPE: ProposalType = ProposalType::new(30009);
+const UPDATE_USER_IN_CHANNEL_PROPOSAL_TYPE: ProposalType = ProposalType::new(30010);
 
 #[derive(Copy, Clone, Debug)]
 #[repr(u32)]
@@ -168,6 +169,20 @@ pub struct UpdateRoleInChannelProposal {
 impl MlsCustomProposal for UpdateRoleInChannelProposal {
     fn proposal_type() -> ProposalType {
         UPDATE_ROLE_IN_CHANNEL_PROPOSAL_TYPE
+    }
+}
+
+#[derive(MlsSize, MlsDecode, MlsEncode)]
+pub struct UpdateUserInChannelProposal {
+    pub channel_id: u32,
+    pub username: String,
+    pub role_id: u32,
+    pub delete: bool,
+}
+
+impl MlsCustomProposal for UpdateUserInChannelProposal {
+    fn proposal_type() -> ProposalType {
+        UPDATE_USER_IN_CHANNEL_PROPOSAL_TYPE
     }
 }
 

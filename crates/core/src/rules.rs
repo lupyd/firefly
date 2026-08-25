@@ -19,7 +19,8 @@ use mls_rs::{
 use crate::{
     config::{
         FireflyCredential, FireflyError, UpdateChannelProposal, UpdateRoleInChannelProposal,
-        UpdateRoleProposal, UpdateUserProposal, UserPermission, is_valid_name,
+        UpdateRoleProposal, UpdateUserInChannelProposal, UpdateUserProposal, UserPermission,
+        is_valid_name,
     },
     extension::{FireflyGroupExtension, FireflyGroupExtensionWrapper},
     utils::get_current_timestamp_in_secs,
@@ -522,6 +523,7 @@ fn handle_custom_proposal(
                     name: update_channel_proposal.name.into(),
                     type_pb: update_channel_proposal.channel_ty as u32,
                     roles: Vec::new(),
+                    members: Vec::new(),
                     default_permissions: update_channel_proposal.default_permissions,
                 };
 
@@ -553,6 +555,7 @@ fn handle_custom_proposal(
                 name: update_channel_proposal.name.into(),
                 type_pb: update_channel_proposal.channel_ty as u32,
                 roles: Vec::new(),
+                members: Vec::new(),
                 default_permissions: update_channel_proposal.default_permissions,
             };
 
@@ -648,6 +651,48 @@ fn handle_custom_proposal(
                 return Err(anyhow::anyhow!("sender does not have permissions"));
             }
         }
+    } else if proposal_type == UpdateUserInChannelProposal::proposal_type() {
+        let update = UpdateUserInChannelProposal::from_custom_proposal(proposal)?;
+
+        // FIX: previously this only checked `sender_permissions_in_channel` (and hard
+        // failed if the sender had no resolvable channel permissions at all, e.g. no
+        // explicit role/override yet). Every sibling proposal type (UpdateChannel,
+        // UpdateRoleInChannel) allows root-level ManageChannel OR channel-level
+        // ManageChannel — this now matches that pattern, so a group owner (or anyone
+        // with root ManageChannel) can manage channel members even with no channel-level
+        // override in place.
+        let sender_permissions_in_channel = current_extension
+            .get_permissions_of_user_in_channel(sender_username, update.channel_id)
+            .unwrap_or(0);
+
+        if !has_permission(sender_permissions, UserPermission::ManageChannel as u32)
+            && !has_permission(
+                sender_permissions_in_channel,
+                UserPermission::ManageChannel as u32,
+            )
+        {
+            return Err(anyhow::anyhow!("ManageChannel permission required"));
+        }
+        if !current_extension.has_member(&update.username) {
+            return Err(anyhow::anyhow!("user is not a group member"));
+        }
+        if update.role_id != 0
+            && current_extension
+                .get_permissions_from_role_id_in_channel(update.role_id, update.channel_id)
+                .is_none()
+        {
+            return Err(anyhow::anyhow!("channel role does not exist"));
+        }
+
+        current_extension
+            .update_channel_member(
+                update.channel_id,
+                update.username,
+                update.role_id,
+                update.delete,
+            )
+            .ok_or(anyhow::anyhow!("channel member does not exist"))?;
+        Ok(true)
     } else {
         return Err(anyhow::anyhow!("invalid custom proposal type"));
     }

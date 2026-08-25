@@ -147,9 +147,25 @@ impl<'a> FireflyGroupExtensionWrapper<'a> {
 
         let channel = &channels[channel_idx];
 
+        if !channel.members.is_empty() {
+            let member_idx = channel
+                .members
+                .search_by_key(&username, |x| &x.username)
+                .ok()?;
+            let member_role = channel.members[member_idx].role;
+            return self.get_permissions_from_role_id_in_channel(member_role, channel_id);
+        }
+
+        // FIX: the previous version computed the role-based permissions here but
+        // never returned them (a dangling `Some(...)` expression with no `return`),
+        // so it always fell through to `channel.default_permissions` even when the
+        // user's group role had an explicit channel-role override. That silently
+        // dropped role-derived channel permissions down to whatever the channel's
+        // bare default was (often 0), causing otherwise-permitted actions
+        // (e.g. an owner managing channel members) to be rejected.
         let roles = &channel.roles;
         if let Ok(role_idx) = roles.search_by_key(&member_role, |x| x.id) {
-            Some(roles[role_idx].permissions);
+            return Some(roles[role_idx].permissions);
         }
 
         return Some(channel.default_permissions);
@@ -269,6 +285,40 @@ impl<'a> FireflyGroupExtensionWrapper<'a> {
                     },
                 );
             }
+        }
+        Some(())
+    }
+
+    pub fn update_channel_member(
+        &mut self,
+        channel_id: u32,
+        username: String,
+        role_id: u32,
+        delete: bool,
+    ) -> Option<()> {
+        let channels = &mut self.inner.channels;
+        let channel_idx = channels.search_by_key(&channel_id, |x| x.id).ok()?;
+        let channel = &mut channels[channel_idx];
+
+        if delete {
+            let member_idx = channel
+                .members
+                .search_by_key(&username.as_str(), |x| x.username.as_ref())
+                .ok()?;
+            channel.members.remove(member_idx);
+            return Some(());
+        }
+
+        let member = protos::firefly::FireflyGroupChannelMember {
+            username: username.into(),
+            role: role_id,
+        };
+        match channel
+            .members
+            .search_by_key(&member.username.as_ref(), |x| x.username.as_ref())
+        {
+            Ok(idx) => channel.members[idx] = member,
+            Err(idx) => channel.members.insert(idx, member),
         }
         Some(())
     }

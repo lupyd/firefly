@@ -44,7 +44,7 @@ pub fn load_client(
     psk_store: FfiPreSharedKeyStorage,
     identity_provider: FireflyIdentityProvider,
 ) -> anyhow::Result<FireflyClient> {
-    use crate::config::{CIPHERSUITE, UpdateRoleInChannelProposal};
+    use crate::config::{CIPHERSUITE, UpdateRoleInChannelProposal, UpdateUserInChannelProposal};
 
     let crypto_provider = mls_rs_crypto_rustcrypto::RustCryptoProvider::default();
 
@@ -60,6 +60,7 @@ pub fn load_client(
         .custom_proposal_type(UpdateRoleProposal::proposal_type())
         .custom_proposal_type(UpdateChannelProposal::proposal_type())
         .custom_proposal_type(UpdateRoleInChannelProposal::proposal_type())
+        .custom_proposal_type(UpdateUserInChannelProposal::proposal_type())
         .group_state_storage(group_state_storage)
         .key_package_repo(key_package_repo)
         .psk_store(psk_store)

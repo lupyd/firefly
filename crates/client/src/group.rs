@@ -8,7 +8,7 @@ use anyhow::Context;
 use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
 use firefly_core::{
     FireflyAuthTokenCallback, FireflyIdentity, FireflyMlsClient, FireflyMlsGroup,
-    config::{UpdateRoleInChannelProposal, UpdateRoleProposal, UpdateUserProposal, UserPermission},
+    config::{UpdateRoleInChannelProposal, UpdateRoleProposal, UpdateUserInChannelProposal, UpdateUserProposal, UserPermission},
     extension::FireflyGroupExtensionWrapper,
 };
 use firefly_protos::firefly::{FireflyGroupMember, FireflyGroupRole};
@@ -393,6 +393,23 @@ impl FfiMlsGroup {
             .await
     }
 
+    pub async fn update_users_in_channel(
+        &self,
+        channel_id: u32,
+        users: Vec<UpdateUserInChannelProposalFfi>,
+    ) -> anyhow::Result<u64> {
+        self.group
+            .update_users_in_channel(users.into_iter().map(|user| {
+                UpdateUserInChannelProposal {
+                    channel_id,
+                    username: user.username,
+                    role_id: user.role_id,
+                    delete: user.delete,
+                }
+            }))
+            .await
+    }
+
     pub async fn group_identifier(&self) -> anyhow::Result<Vec<u8>> {
         self.group.group_identifier().await
     }
@@ -426,4 +443,10 @@ pub struct UpdateRoleProposalFfi {
 pub struct UpdateUserProposalFfi {
     pub username: String,
     pub role_id: u32,
+}
+
+pub struct UpdateUserInChannelProposalFfi {
+    pub username: String,
+    pub role_id: u32,
+    pub delete: bool,
 }
