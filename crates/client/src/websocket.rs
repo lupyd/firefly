@@ -365,12 +365,17 @@ impl FireflyWsClient {
             self.firefly_base_ws_url, addressId, device_id, last_synced_upto, token
         );
 
+        let sanitized_url = format!(
+            "{}?uid={}&device_id={}&last_synced_upto={}&token=[REDACTED]",
+            self.firefly_base_ws_url, addressId, device_id, last_synced_upto
+        );
+
         let show_connecting = {
             let last_err = self.last_connection_error.lock().unwrap();
             last_err.is_none()
         };
         if show_connecting {
-            log::info!("connecting to {}", url);
+            log::info!("connecting to {}", sanitized_url);
         }
 
         let (stream, response) = match tokio_tungstenite::connect_async(&url).await {
@@ -398,7 +403,7 @@ impl FireflyWsClient {
 
         log::info!(
             "connected successfully to {}, Headers: {:?} ",
-            url,
+            sanitized_url,
             response.headers()
         );
 
@@ -802,6 +807,35 @@ impl FireflyWsClient {
         to: String,
         payload: Vec<u8>,
     ) -> anyhow::Result<UserMessage> {
+        let result = self.encrypt_and_send_internal(&to, &payload).await;
+        match result {
+            Ok(msg) => Ok(msg),
+            Err(err) => {
+                let err_str = err.to_string();
+                if err_str.contains("invalid from_address")
+                    || err_str.contains("Sender address is invalid or rotated")
+                    || err_str.contains("400")
+                {
+                    log::warn!("encrypt_and_send failed with sender address error, re-registering device address: {err}");
+                    self.fully_initialized
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    if let Err(re_reg_err) = self.check_setup().await {
+                        log::error!("failed to re-register device address during recovery: {re_reg_err}");
+                        return Err(err);
+                    }
+                    log::info!("re-registered device address successfully, retrying encrypt_and_send");
+                    return self.encrypt_and_send_internal(&to, &payload).await;
+                }
+                Err(err)
+            }
+        }
+    }
+
+    async fn encrypt_and_send_internal(
+        &self,
+        to: &str,
+        payload: &[u8],
+    ) -> anyhow::Result<UserMessage> {
         let token = self
             .callbacks
             .get_access_token()
@@ -811,21 +845,21 @@ impl FireflyWsClient {
         let store = self.key_stores.store();
 
         let _settings =
-            if let Some(settings) = store.conversation_store.get_conversation(&to).await? {
+            if let Some(settings) = store.conversation_store.get_conversation(to).await? {
                 settings
             } else {
-                self.create_conversation(&to, 1, &token).await?
+                self.create_conversation(to, 1, &token).await?
             };
         let address_store = &self.key_stores.store().address_store;
 
-        let other_addresses = address_store.get(&to).await?;
+        let other_addresses = address_store.get(to).await?;
 
         if other_addresses.is_empty() {
-            self.get_and_process_all_pre_key_bundles_of_user(&to, &token)
+            self.get_and_process_all_pre_key_bundles_of_user(to, &token)
                 .await?;
         }
 
-        let other_addresses = self.key_stores.store().address_store.get(&to).await?;
+        let other_addresses = self.key_stores.store().address_store.get(to).await?;
         if other_addresses.is_empty() {
             return Err(anyhow::anyhow!("no addresses found for user {}", to));
         }
@@ -843,10 +877,10 @@ impl FireflyWsClient {
         for address in other_addresses.iter() {
             let message = self
                 .create_encrypted_message(
-                    ProtocolAddress::new(to.clone(), DeviceId::new(address.device_id)?),
+                    ProtocolAddress::new(to.to_string(), DeviceId::new(address.device_id)?),
                     address.address_id,
                     message_settings,
-                    payload.clone(),
+                    payload.to_vec(),
                 )
                 .await?;
             message_entries.messages.push(message);
@@ -854,8 +888,8 @@ impl FireflyWsClient {
         let self_message_payload = serialize_proto(&firefly::UserMessageInner {
             message: firefly::mod_UserMessageInner::OneOfmessage::selfMessage(
                 firefly::SelfUserMessage {
-                    to: to.clone().into(),
-                    inner: payload.clone().into(),
+                    to: to.to_string().into(),
+                    inner: payload.to_vec().into(),
                 },
             ),
             nonce: rng().next_u32(),
@@ -892,15 +926,30 @@ impl FireflyWsClient {
 
         if let firefly::mod_Response::OneOfbody::userMessageUploaded(body) = response.body {
             log::info!("uploaded messages: {:?}", body);
-            for ids in body.messageIds {
-                if ids.id == 0 && ids.to != 0 {
-                    more_addresses_to_send_to.push(ids.to);
-                } else {
-                    if let Some(index) = addresses_to_not_send_to
-                        .iter()
-                        .position(|x| x.address_id == ids.to)
-                    {
-                        addresses_to_not_send_to.swap_remove(index);
+            // If body.messageIds is empty (all target addresses were stale/rotated), refresh pre_key_bundles
+            if body.messageIds.is_empty() {
+                log::warn!("received empty messageIds from server, purging cached addresses for {} and fetching fresh pre_key_bundles", to);
+                for addr in &other_addresses {
+                    let _ = address_store.delete_by_id(addr.address_id).await;
+                }
+                self.get_and_process_all_pre_key_bundles_of_user(to, &token).await?;
+                let fresh_addresses = address_store.get(to).await?;
+                for addr in fresh_addresses {
+                    if addr.username != self_username {
+                        more_addresses_to_send_to.push(addr.address_id);
+                    }
+                }
+            } else {
+                for ids in body.messageIds {
+                    if ids.id == 0 && ids.to != 0 {
+                        more_addresses_to_send_to.push(ids.to);
+                    } else {
+                        if let Some(index) = addresses_to_not_send_to
+                            .iter()
+                            .position(|x| x.address_id == ids.to)
+                        {
+                            addresses_to_not_send_to.swap_remove(index);
+                        }
                     }
                 }
             }
@@ -915,8 +964,8 @@ impl FireflyWsClient {
         if more_addresses_to_send_to.is_empty() {
             return Ok(UserMessage {
                 id: get_current_timestamp_microseconds_since_epoch(),
-                other: to.clone(),
-                message: payload.clone(),
+                other: to.to_string(),
+                message: payload.to_vec(),
                 sent_by_other: false,
             });
         }
@@ -943,7 +992,7 @@ impl FireflyWsClient {
                         protocol_address,
                         address.address_id,
                         message_settings,
-                        payload.clone(),
+                        payload.to_vec(),
                     )
                 }
                 .await?;
@@ -972,8 +1021,8 @@ impl FireflyWsClient {
 
         return Ok(UserMessage {
             id: get_current_timestamp_microseconds_since_epoch(),
-            other: to.clone(),
-            message: payload.clone(),
+            other: to.to_string(),
+            message: payload.to_vec(),
             sent_by_other: false,
         });
     }

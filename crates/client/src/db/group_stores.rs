@@ -39,7 +39,7 @@ impl GroupStateStore {
     }
 
     pub async fn get_state(&self, id: &[u8]) -> anyhow::Result<Vec<u8>> {
-        log::info!("store select: group_state id={:?}", id);
+        log::info!("store select: group_state id={}", hex::encode(id));
         let row = sqlx::query("SELECT state FROM group_states WHERE id = ?")
             .bind(id)
             .fetch_one(&self.pool)
@@ -55,7 +55,7 @@ impl GroupStateStore {
         epoch_inserts: HashMap<u64, Vec<u8>>,
         epoch_updates: HashMap<u64, Vec<u8>>,
     ) -> anyhow::Result<()> {
-        log::info!("store insert: group_state id={:?}", group_id);
+        log::info!("store insert: group_state id={}", hex::encode(group_id));
         let mut tx = self.pool.begin().await?;
 
         sqlx::query("INSERT OR REPLACE INTO group_states (id, state) VALUES (?, ?)")
@@ -66,8 +66,8 @@ impl GroupStateStore {
 
         for (epoch_id, state) in epoch_inserts {
             log::info!(
-                "store insert: group_epoch_state id={:?} epoch={}",
-                group_id,
+                "store insert: group_epoch_state id={} epoch={}",
+                hex::encode(group_id),
                 epoch_id
             );
             sqlx::query(
@@ -81,8 +81,8 @@ impl GroupStateStore {
         }
         for (epoch_id, state) in epoch_updates {
             log::info!(
-                "store update: group_epoch_state id={:?} epoch={}",
-                group_id,
+                "store update: group_epoch_state id={} epoch={}",
+                hex::encode(group_id),
                 epoch_id
             );
             sqlx::query(
@@ -102,8 +102,8 @@ impl GroupStateStore {
 
     pub async fn get_epoch_state(&self, id: &[u8], epoch_id: u64) -> anyhow::Result<Vec<u8>> {
         log::info!(
-            "store select: group_epoch_state id={:?} epoch={}",
-            id,
+            "store select: group_epoch_state id={} epoch={}",
+            hex::encode(id),
             epoch_id
         );
         let row = sqlx::query("SELECT state FROM group_epoch_states WHERE id = ? AND epoch = ?")
@@ -116,7 +116,7 @@ impl GroupStateStore {
     }
 
     pub async fn get_max_epoch_id(&self, group_id: &[u8]) -> anyhow::Result<Option<u64>> {
-        log::info!("store select: group_max_epoch id={:?}", group_id);
+        log::info!("store select: group_max_epoch id={}", hex::encode(group_id));
         let row = sqlx::query("SELECT MAX(epoch) FROM group_epoch_states WHERE id = ?")
             .bind(&group_id)
             .fetch_one(&self.pool)
@@ -251,7 +251,7 @@ impl GroupKeyPackageStore {
 #[async_trait::async_trait]
 impl MlsKeyPackageStorage for GroupKeyPackageStore {
     async fn insert(&self, id: Vec<u8>, key_package_data: Vec<u8>) -> bool {
-        log::info!("store insert: group_key_package id={:?}", id);
+        log::info!("store insert: group_key_package id={}", hex::encode(&id));
         sqlx::query(
             r#"
                 INSERT INTO group_key_packages (id, key_package)
@@ -266,7 +266,7 @@ impl MlsKeyPackageStorage for GroupKeyPackageStore {
     }
 
     async fn delete(&self, id: Vec<u8>) -> bool {
-        log::info!("store delete: group_key_package id={:?}", id);
+        log::info!("store delete: group_key_package id={}", hex::encode(&id));
         sqlx::query(
             r#"
                 DELETE FROM group_key_packages
@@ -280,7 +280,7 @@ impl MlsKeyPackageStorage for GroupKeyPackageStore {
     }
 
     async fn get(&self, id: Vec<u8>) -> Option<Vec<u8>> {
-        log::info!("store select: group_key_package id={:?}", id);
+        log::info!("store select: group_key_package id={}", hex::encode(&id));
         let row = sqlx::query(
             r#"
                 SELECT key_package FROM group_key_packages

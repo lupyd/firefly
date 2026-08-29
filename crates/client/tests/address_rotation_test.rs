@@ -77,7 +77,7 @@ async fn test_address_rotation() {
         let (msg_tx, msg_rx) = mpsc::channel(100);
         let (gmsg_tx, _gmsg_rx) = mpsc::channel(100);
         let callbacks = TestCallbacks {
-            name: format!("alice_dev_{}", i),
+            name: "alice".into(),
             token: "alice".into(),
             message_tx: msg_tx,
             group_message_tx: gmsg_tx,
@@ -168,7 +168,7 @@ async fn test_address_rotation() {
     let (msg_tx6, mut msg_rx6) = mpsc::channel(100);
     let (gmsg_tx6, _gmsg_rx6) = mpsc::channel(100);
     let callbacks6 = TestCallbacks {
-        name: "alice_dev_6".into(),
+        name: "alice".into(),
         token: "alice".into(),
         message_tx: msg_tx6,
         group_message_tx: gmsg_tx6,
@@ -245,4 +245,220 @@ async fn test_address_rotation() {
     }
     let _ = std::fs::remove_file(format!("/tmp/alice_rot_6_{}.db", test_run_id));
     let _ = std::fs::remove_file(format!("/tmp/bob_rot_{}.db", test_run_id));
+}
+
+#[tokio::test]
+async fn test_bidirectional_multi_device_rotation_and_messaging() {
+    let (base_url, ws_url) = match setup_server().await {
+        Some(urls) => urls,
+        None => return,
+    };
+
+    let test_run_id = rand::random::<u32>();
+
+    // 1. Create 3 initial Alice devices and 3 initial Bob devices
+    let mut alice_clients = Vec::new();
+    let mut alice_receivers = Vec::new();
+    for i in 1..=3 {
+        let (msg_tx, msg_rx) = mpsc::channel(100);
+        let (gmsg_tx, _gmsg_rx) = mpsc::channel(100);
+        let callbacks = TestCallbacks {
+            name: "alice".into(),
+            token: "alice".into(),
+            message_tx: msg_tx,
+            group_message_tx: gmsg_tx,
+        };
+
+        let db = format!("/tmp/alice_bidi_{}_{}.db", i, test_run_id);
+        let _ = std::fs::remove_file(&db);
+
+        let client = FireflyWsClient::create(
+            base_url.clone(),
+            ws_url.clone(),
+            1000,
+            Box::new(callbacks),
+            db.clone(),
+            5000,
+        )
+        .await
+        .expect("Failed to create Alice client");
+        let client = Arc::new(client);
+
+        let client_init = client.clone();
+        tokio::spawn(async move {
+            let _ = client_init.initialize_with_retrying().await;
+        });
+
+        wait_for_init(&client)
+            .await
+            .expect(&format!("Alice client {} failed to initialize", i));
+
+        alice_clients.push(client);
+        alice_receivers.push(msg_rx);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let mut bob_clients = Vec::new();
+    let mut bob_receivers = Vec::new();
+    for i in 1..=3 {
+        let (msg_tx, msg_rx) = mpsc::channel(100);
+        let (gmsg_tx, _gmsg_rx) = mpsc::channel(100);
+        let callbacks = TestCallbacks {
+            name: "bob".into(),
+            token: "bob".into(),
+            message_tx: msg_tx,
+            group_message_tx: gmsg_tx,
+        };
+
+        let db = format!("/tmp/bob_bidi_{}_{}.db", i, test_run_id);
+        let _ = std::fs::remove_file(&db);
+
+        let client = FireflyWsClient::create(
+            base_url.clone(),
+            ws_url.clone(),
+            1000,
+            Box::new(callbacks),
+            db.clone(),
+            5000,
+        )
+        .await
+        .expect("Failed to create Bob client");
+        let client = Arc::new(client);
+
+        let client_init = client.clone();
+        tokio::spawn(async move {
+            let _ = client_init.initialize_with_retrying().await;
+        });
+
+        wait_for_init(&client)
+            .await
+            .expect(&format!("Bob client {} failed to initialize", i));
+
+        bob_clients.push(client);
+        bob_receivers.push(msg_rx);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // 2. Alice1 sends message to Bob (All 3 Bob devices receive)
+    println!("Alice 1 sending message to Bob...");
+    alice_clients[0]
+        .encrypt_and_send("bob".to_string(), b"alice -> bob 1".to_vec())
+        .await
+        .expect("Alice 1 failed to send");
+
+    for i in 0..3 {
+        let msg = tokio::time::timeout(Duration::from_secs(10), bob_receivers[i].recv())
+            .await
+            .expect(&format!("Timeout waiting for message on Bob device {}", i + 1))
+            .unwrap();
+        assert_eq!(msg.message, b"alice -> bob 1");
+    }
+
+    // 3. Bob1 replies to Alice (All 3 Alice devices receive)
+    println!("Bob 1 sending reply to Alice...");
+    bob_clients[0]
+        .encrypt_and_send("alice".to_string(), b"bob -> alice 1".to_vec())
+        .await
+        .expect("Bob 1 failed to send");
+
+    for i in 0..3 {
+        let msg = tokio::time::timeout(Duration::from_secs(10), alice_receivers[i].recv())
+            .await
+            .expect(&format!("Timeout waiting for message on Alice device {}", i + 1))
+            .unwrap();
+        assert_eq!(msg.message, b"bob -> alice 1");
+    }
+
+    // 4. Add Bob devices 4, 5, 6 (Device 1 should be rotated out of active 5)
+    println!("Adding Bob devices 4, 5, 6 (triggering rotation of Bob 1)...");
+    for i in 4..=6 {
+        let (msg_tx, msg_rx) = mpsc::channel(100);
+        let (gmsg_tx, _gmsg_rx) = mpsc::channel(100);
+        let callbacks = TestCallbacks {
+            name: "bob".into(),
+            token: "bob".into(),
+            message_tx: msg_tx,
+            group_message_tx: gmsg_tx,
+        };
+
+        let db = format!("/tmp/bob_bidi_{}_{}.db", i, test_run_id);
+        let _ = std::fs::remove_file(&db);
+
+        let client = FireflyWsClient::create(
+            base_url.clone(),
+            ws_url.clone(),
+            1000,
+            Box::new(callbacks),
+            db.clone(),
+            5000,
+        )
+        .await
+        .expect("Failed to create Bob client");
+        let client = Arc::new(client);
+
+        let client_init = client.clone();
+        tokio::spawn(async move {
+            let _ = client_init.initialize_with_retrying().await;
+        });
+
+        wait_for_init(&client)
+            .await
+            .expect(&format!("Bob client {} failed to initialize", i));
+
+        bob_clients.push(client);
+        bob_receivers.push(msg_rx);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // 5. Alice 2 sends message to Bob -> Server will notice Bob1 is gone and return new active Bob devices
+    println!("Alice 2 sending message to Bob after Bob rotation...");
+    alice_clients[1]
+        .encrypt_and_send("bob".to_string(), b"alice -> bob 2".to_vec())
+        .await
+        .expect("Alice 2 failed to send");
+
+    // Bob 1 (index 0) must NOT receive (dropped)
+    let res_dropped = tokio::time::timeout(Duration::from_secs(4), bob_receivers[0].recv()).await;
+    assert!(res_dropped.is_err(), "Bob 1 should have been rotated out and receive nothing");
+
+    // Active Bob devices (indices 1..6 -> Bob 2, 3, 4, 5, 6) must receive
+    for i in 1..6 {
+        let msg = tokio::time::timeout(Duration::from_secs(10), bob_receivers[i].recv())
+            .await
+            .expect(&format!("Timeout waiting for message on active Bob device {}", i + 1))
+            .unwrap();
+        assert_eq!(msg.message, b"alice -> bob 2");
+    }
+
+    // 6. Bob 6 replies to Alice -> All active Alice devices receive
+    println!("Bob 6 sending reply to Alice...");
+    bob_clients[5]
+        .encrypt_and_send("alice".to_string(), b"bob 6 -> alice".to_vec())
+        .await
+        .expect("Bob 6 failed to send");
+
+    for i in 0..3 {
+        let msg = tokio::time::timeout(Duration::from_secs(10), alice_receivers[i].recv())
+            .await
+            .expect(&format!("Timeout waiting for message on Alice device {}", i + 1))
+            .unwrap();
+        assert_eq!(msg.message, b"bob 6 -> alice");
+    }
+
+    println!("Bidirectional multi-device rotation test passed successfully!");
+
+    // Cleanup
+    for c in alice_clients {
+        c.dispose().await;
+    }
+    for c in bob_clients {
+        c.dispose().await;
+    }
+
+    for i in 1..=3 {
+        let _ = std::fs::remove_file(format!("/tmp/alice_bidi_{}_{}.db", i, test_run_id));
+    }
+    for i in 1..=6 {
+        let _ = std::fs::remove_file(format!("/tmp/bob_bidi_{}_{}.db", i, test_run_id));
+    }
 }
