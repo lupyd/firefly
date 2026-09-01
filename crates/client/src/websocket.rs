@@ -182,7 +182,7 @@ impl Drop for Connection {
 
 type PendingRequests = Arc<std::sync::Mutex<HashMap<u32, oneshot::Sender<Bytes>>>>;
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub enum ConnectionState {
     #[default]
     Disconnected,
@@ -268,6 +268,18 @@ impl FireflyWsClient {
         })
     }
     pub async fn initialize_with_retrying(&self) -> anyhow::Result<()> {
+        {
+            let mut state = self.state.write().unwrap();
+            if !matches!(*state, ConnectionState::Disconnected) {
+                log::info!(
+                    "initialize_with_retrying: already in state {:?}, skipping duplicate initialization",
+                    *state
+                );
+                return Ok(());
+            }
+            *state = ConnectionState::CheckingSetup;
+        }
+
         let id = self.callbacks.name().to_string();
         while !self
             .stop_reconnecting
@@ -1603,6 +1615,24 @@ impl FireflyWsClient {
         addressId: u64,
     ) -> anyhow::Result<()> {
         let groupId = request.group_id;
+
+        // If request is for our current device address, delete redundant reAdd request from server
+        if request.address_id == addressId {
+            log::info!(
+                "[re_add_member] Request is for our own current address {}, deleting redundant request",
+                addressId
+            );
+            let _ = HTTP_CLIENT
+                .delete(format!(
+                    "{}/group/reAdd?groupId={}&address={}&myAddress={}",
+                    self.firefly_base_url, groupId, request.address_id, addressId,
+                ))
+                .bearer_auth(token)
+                .send()
+                .await;
+            return Ok(());
+        }
+
         log::info!("[re_add_member] Loading group {} for re-adding user {}", groupId, request.username);
         let group_info = self.group_info_store.get(groupId).await?;
 
@@ -1634,6 +1664,7 @@ impl FireflyWsClient {
                         .bearer_auth(token)
                         .send()
                         .await;
+                    return Ok(());
                 }
                 return Err(err.into());
             }
