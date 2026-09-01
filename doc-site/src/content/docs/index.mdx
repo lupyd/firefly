@@ -1,0 +1,51 @@
+---
+title: Firefly MLS Documentation
+description: Build end-to-end encrypted messaging, automated bots, and embedded chat experiences powered by RFC 9420 Message Layer Security.
+template: splash
+hero:
+  tagline: Modern, secure, decentralized E2EE messaging protocol & client SDKs.
+  image:
+    file: ../../assets/firefly-logo.svg
+  actions:
+    - text: Get Started
+      link: /getting-started/overview/
+      icon: right-arrow
+      variant: primary
+    - text: Bot Framework
+      link: /bot/framework/
+      icon: rocket
+      variant: secondary
+    - text: Embed in Web Page
+      link: /embedding/web-embedding/
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Why Firefly MLS?
+
+<CardGrid stagger>
+	<Card title="RFC 9420 MLS Standard" icon="star">
+		Built on modern Message Layer Security (MLS) with post-compromise security, forward secrecy, and efficient group key ratchets.
+	</Card>
+	<Card title="High-Performance Rust Core" icon="seti:rust">
+		Underpinned by native Rust with N-API native bindings for Node.js and Bun, plus TypeScript SDKs.
+	</Card>
+	<Card title="Expressive Bot Framework" icon="laptop">
+		Easily create command-driven chatbots (`bot.command(...)`) that automatically process and reply to 1-on-1 and group messages.
+	</Card>
+	<Card title="Embed Anywhere" icon="puzzle">
+		Embed end-to-end encrypted messaging widgets directly into any web application, dashboard, or portal.
+	</Card>
+</CardGrid>
+
+---
+
+## Quick Navigation
+
+- 🚀 **[Getting Started](/getting-started/overview/)**: Learn the architecture, primitives, and installation.
+- 💻 **[Client SDK Guide](/client/js-client/)**: Connect to the Firefly network, handle events, and send encrypted messages.
+- 🤖 **[Chatbot Framework](/bot/framework/)**: Build autonomous command bots with rich contexts and reply hooks.
+- 🌐 **[Web Embedding](/embedding/web-embedding/)**: Embed real-time chat widgets into React, Vue, or Vanilla HTML pages.
+- 📚 **[API Reference](/reference/api-reference/)**: Exhaustive reference for methods, callbacks, and protobuf wire schemas.

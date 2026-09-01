@@ -1,0 +1,14 @@
+packages:
+  - 'crates/*'
+  - 'examples/*'
+  - 'doc-site'
+
+allowBuilds:
+  esbuild: true
+  protobufjs: true
+  sharp: true
+
+onlyBuiltDependencies:
+  - esbuild
+  - protobufjs
+  - sharp

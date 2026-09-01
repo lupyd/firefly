@@ -6,4 +6,5 @@ Cargo.lock
 *.so
 
 .antigravitycli/
+node_modules/
 
