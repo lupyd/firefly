@@ -35,28 +35,33 @@ cargo build --release
 
 ## Running Tests
 
-### 1. Standalone / Unit Tests
+### 1. Client Unit Tests
+All client-side unit tests, cryptographic rules, SQLite stores, cursor advances, and key material storage providers run in-memory and require no running external dependencies:
 
-All client-side unit tests, cryptographic rules, and local storage provider tests run out-of-the-box without requiring any running server or database:
+```bash
+cargo test --lib
+```
 
+### 2. Running All Workspace Tests
 ```bash
 cargo test
 ```
 
-### 2. End-to-End Server Integration Tests
+### 3. End-to-End Server Integration Tests
+Client integration tests can be executed against a running Firefly MLS server instance:
 
-Client integration tests can be executed against any running Firefly MLS server instance.
+1. Start the backend PostgreSQL database and server in the `firefly-mls` repository:
+   ```bash
+   cd ../firefly-mls
+   docker compose up -d
+   cargo run -p firefly-server
+   ```
+2. Run client integration tests pointing to the test server:
+   ```bash
+   FIREFLY_BASE_URL=http://127.0.0.1:39205 FIREFLY_WS_URL=ws://127.0.0.1:39205/ RUST_LOG=info cargo test
+   ```
 
-To run tests against an external or locally hosted Firefly MLS server:
-
-1. Ensure your Firefly MLS server is running (e.g. at `http://127.0.0.1:39205`).
-2. Pass the server endpoint via environment variables:
-
-```bash
-FIREFLY_BASE_URL=http://127.0.0.1:39205 FIREFLY_WS_URL=ws://127.0.0.1:39205/ RUST_LOG=info cargo test
-```
-
-If `FIREFLY_BASE_URL` is not set, server integration tests automatically skip gracefully, allowing offline CI/CD pipelines to run standard unit tests clean and fast.
+If `FIREFLY_BASE_URL` is not specified, server integration tests skip gracefully so offline CI/CD pipelines run standard unit tests quickly.
 
 ## License
 

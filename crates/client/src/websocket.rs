@@ -1723,7 +1723,7 @@ impl FireflyWsClient {
         &self,
         name: String,
         description: String,
-        settings: u32,
+        _settings: u32,
     ) -> anyhow::Result<GroupInfo> {
         let client = self
             .firefly_mls_client

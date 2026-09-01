@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Context;
@@ -21,7 +21,6 @@ use crate::{
         group_stores::{GroupInfoStore, GroupKeyPackageStore, GroupPskStore, GroupStateStore},
         keyvalue::KeyValueStore,
     },
-    error,
 };
 
 #[derive(Debug)]

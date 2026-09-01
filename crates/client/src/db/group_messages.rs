@@ -332,4 +332,17 @@ mod tests {
         assert_eq!(store.get(100, 10, 10).await.unwrap().len(), 0);
         assert_eq!(store.get(200, 10, 10).await.unwrap().len(), 1);
     }
+
+    #[tokio::test]
+    async fn test_update_cursor_advances_last_message() {
+        let pool = setup_test_db().await;
+        let store = GroupMessagesStore::new(pool).await.unwrap();
+
+        store.add(1, 100, 1, 1, "user1", &[1]).await.unwrap();
+        assert_eq!(store.get_last_message_of_group(100).await.unwrap().id, 1);
+
+        // Advance cursor via commit/readd id without full message body
+        store.update_cursor(10, 100, 2).await.unwrap();
+        assert_eq!(store.get_last_message_of_group(100).await.unwrap().id, 10);
+    }
 }
