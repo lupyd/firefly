@@ -1148,17 +1148,33 @@ impl FireflyWsClient {
                     firefly_mls_client,
                     &self.group_info_store,
                     &self.group_messages_store,
+                    &self.key_value_store,
                     &self.callbacks,
                     false,
                 )
                 .await
                 {
-                    log::error!("failed to process group message {:?}", err)
+                    log::error!("failed to process group message {:?}", err);
                 }
             }
             if messages_len < LIMIT {
                 break;
             }
+        }
+
+        if let Some(token) = self.callbacks.get_access_token().await {
+            if let Err(err) = self.update_group_commits(&token, addressId).await {
+                log::error!(
+                    "[sync_group_messages] Failed to update group commits to server: {:?}",
+                    err
+                );
+            } else {
+                log::info!("[sync_group_messages] Successfully synced group cursors to server");
+            }
+        } else {
+            log::warn!(
+                "[sync_group_messages] Skipping update_group_commits, access token unavailable"
+            );
         }
 
         Ok(())
@@ -1595,9 +1611,33 @@ impl FireflyWsClient {
             .await?;
 
         log::info!("[re_add_member] Calling group.re_add_member for user {} (address {}) in group {}", request.username, request.address_id, groupId);
-        let id = group
+        let res = group
             .re_add_member(request.username.to_string(), request.address_id)
-            .await?;
+            .await;
+
+        let id = match res {
+            Ok(id) => id,
+            Err(err) => {
+                let err_str = err.to_string();
+                if err_str.contains("don't have permission")
+                    || err_str.contains("Committer can not remove themselves")
+                {
+                    log::warn!(
+                        "[re_add_member] Skipping and deleting invalid/unauthorized reAdd request: {:?}",
+                        err_str
+                    );
+                    let _ = HTTP_CLIENT
+                        .delete(format!(
+                            "{}/group/reAdd?groupId={}&address={}&myAddress={}",
+                            self.firefly_base_url, groupId, request.address_id, addressId,
+                        ))
+                        .bearer_auth(token)
+                        .send()
+                        .await;
+                }
+                return Err(err.into());
+            }
+        };
 
         self.group_messages_store
             .update_cursor(id, groupId, group.epoch().await as u32)
@@ -1605,8 +1645,8 @@ impl FireflyWsClient {
 
         log::info!("[re_add_member] Successfully committed re-add. Notifying server to delete reAdd request...");
         let response = HTTP_CLIENT
-            .post(format!(
-                "{}/group/reAdd?groupId={}&other_address_id={}&address={}",
+            .delete(format!(
+                "{}/group/reAdd?groupId={}&address={}&myAddress={}",
                 self.firefly_base_url, groupId, request.address_id, addressId,
             ))
             .bearer_auth(token)
@@ -2556,9 +2596,14 @@ async fn on_group_message(
     firefly_mls_client: &FfiMlsClient,
     group_info_store: &GroupInfoStore,
     group_message_store: &GroupMessagesStore,
+    key_value_store: &KeyValueStore,
     callbacks: &Arc<dyn FireflyWsClientCallback>,
     is_commit: bool,
 ) -> anyhow::Result<()> {
+    let _ = key_value_store
+        .update_last_received_message_id(msg.id)
+        .await;
+
     let groupId = msg.groupId;
     let group = match group_info_store.get(groupId).await {
         Ok(g) => g,
@@ -2957,15 +3002,26 @@ async fn on_server_message(
                 group_message.message.len(),
                 group_message.epoch,
             );
-            on_group_message(
+            if let Err(err) = on_group_message(
                 &group_message,
                 firefly_mls_client,
                 group_info_store,
                 group_message_store,
+                key_value_store,
                 callbacks,
                 false,
             )
-            .await?;
+            .await
+            {
+                log::error!(
+                    "failed to process group message {}: {:?}",
+                    group_message.id,
+                    err
+                );
+            }
+            let _ = key_value_store
+                .update_last_received_message_id(group_message.id)
+                .await;
         }
         firefly::mod_ServerMessage::OneOfmessage::response(response) => {
             if let Some(tx) = pending_requests.lock().unwrap().remove(&response.id) {
@@ -2977,15 +3033,26 @@ async fn on_server_message(
         }
         firefly::mod_ServerMessage::OneOfmessage::groupMessages(messages) => {
             for group_message in messages.messages {
-                on_group_message(
+                if let Err(err) = on_group_message(
                     &group_message,
                     firefly_mls_client,
                     group_info_store,
                     group_message_store,
+                    key_value_store,
                     callbacks,
                     false,
                 )
-                .await?;
+                .await
+                {
+                    log::error!(
+                        "failed to process group message {}: {:?}",
+                        group_message.id,
+                        err
+                    );
+                }
+                let _ = key_value_store
+                    .update_last_received_message_id(group_message.id)
+                    .await;
             }
         }
         firefly::mod_ServerMessage::OneOfmessage::groupInvite(invite) => {
@@ -3020,15 +3087,22 @@ async fn on_server_message(
                     message: commit.commit,
                     epoch: commit.epoch,
                 };
-                on_group_message(
+                if let Err(err) = on_group_message(
                     &msg,
                     firefly_mls_client,
                     group_info_store,
                     group_message_store,
+                    key_value_store,
                     callbacks,
                     true,
                 )
-                .await?;
+                .await
+                {
+                    log::error!("failed to process group commit {}: {:?}", commit.id, err);
+                }
+                let _ = key_value_store
+                    .update_last_received_message_id(commit.id)
+                    .await;
             }
         }
         firefly::mod_ServerMessage::OneOfmessage::groupReAddRequests(requests) => {
