@@ -447,7 +447,16 @@ fn handle_custom_proposal(
     if proposal_type == UpdateUserProposal::proposal_type() {
         let update_user = UpdateUserProposal::from_custom_proposal(proposal)?;
 
-        if has_permission(sender_permissions, UserPermission::ManageRole as u32) {
+        let is_existing_member = current_extension.get_role_of_user(&update_user.username).is_some();
+        let required_permission = if is_existing_member {
+            UserPermission::ManageRole as u32
+        } else {
+            UserPermission::ManageMember as u32
+        };
+
+        if has_permission(sender_permissions, required_permission)
+            || has_permission(sender_permissions, UserPermission::ManageRole as u32)
+        {
             if update_user.role_id != 0 {
                 let Some(permissions) =
                     current_extension.get_permissions_from_role_id(update_user.role_id)
@@ -481,7 +490,8 @@ fn handle_custom_proposal(
                 return Ok(false);
             }
         } else {
-            return Err(anyhow::anyhow!("ManageRole permission required to update member roles"));
+            let req_name = if is_existing_member { "ManageRole" } else { "ManageMember" };
+            return Err(anyhow::anyhow!("{} permission required to update member roles", req_name));
         }
     } else if proposal_type == UpdateRoleProposal::proposal_type() {
         let update_role_proposal = UpdateRoleProposal::from_custom_proposal(proposal)?;
