@@ -103,6 +103,12 @@ impl<'a> FireflyGroupExtensionWrapper<'a> {
         self.inner.default_permissions
     }
 
+    pub fn get_role(&self, role_id: u32) -> Option<&protos::firefly::FireflyGroupRole<'a>> {
+        let roles = &self.inner.roles;
+        let idx = roles.search_by_key(&role_id, |x| x.id).ok()?;
+        Some(&roles[idx])
+    }
+
     pub fn get_permissions_from_role_id(&self, role: u32) -> Option<u32> {
         if role == 0 {
             return Some(self.default_permissions());

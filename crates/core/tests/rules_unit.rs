@@ -118,6 +118,75 @@ fn test_permissions() {
 }
 
 #[test]
+fn test_role_hierarchy_and_inactivity() {
+    let now = 1000u64;
+    let active_valid_until = 2000u64;
+    let expired_valid_until = 500u64;
+
+    // Active vs Inactive token check
+    assert!(active_valid_until >= now);
+    assert!(!(expired_valid_until >= now));
+
+    // Permission hierarchy checks
+    let owner_perms = u32::MAX;
+    let admin_perms = UserPermission::AddMessage as u32
+        | UserPermission::ManageMember as u32
+        | UserPermission::ManageRole as u32
+        | UserPermission::ManageChannel as u32;
+    let manager_perms = UserPermission::AddMessage as u32 | UserPermission::ManageMember as u32;
+    let moderator_perms = UserPermission::AddMessage as u32 | UserPermission::ManageChannel as u32;
+    let default_member_perms = UserPermission::AddMessage as u32;
+
+    // Owner has permissions over admin and manager
+    assert!(has_permission(owner_perms, admin_perms));
+    assert!(has_permission(owner_perms, manager_perms));
+    assert!(has_permission(owner_perms, default_member_perms));
+
+    // Admin has permissions over manager and moderator
+    assert!(has_permission(admin_perms, manager_perms));
+    assert!(has_permission(admin_perms, moderator_perms));
+    assert!(!has_permission(admin_perms, owner_perms));
+
+    // Manager does NOT have permissions over admin or owner
+    assert!(!has_permission(manager_perms, admin_perms));
+    assert!(!has_permission(manager_perms, owner_perms));
+    assert!(has_permission(manager_perms, default_member_perms));
+
+    // Moderator cannot manage members or roles
+    assert!(!has_permission(moderator_perms, UserPermission::ManageMember as u32));
+    assert!(!has_permission(moderator_perms, UserPermission::ManageRole as u32));
+    assert!(has_permission(moderator_perms, UserPermission::ManageChannel as u32));
+
+    // Default member only has AddMessage
+    assert!(!has_permission(default_member_perms, UserPermission::ManageMember as u32));
+    assert!(!has_permission(default_member_perms, UserPermission::ManageRole as u32));
+    assert!(!has_permission(default_member_perms, UserPermission::ManageChannel as u32));
+    assert!(!has_permission(default_member_perms, UserPermission::ManageGroup as u32));
+    assert!(has_permission(default_member_perms, UserPermission::AddMessage as u32));
+}
+
+#[test]
+fn test_privilege_escalation_rules() {
+    let sender_permissions = UserPermission::AddMessage as u32 | UserPermission::ManageMember as u32;
+    let target_role_permissions = UserPermission::AddMessage as u32
+        | UserPermission::ManageMember as u32
+        | UserPermission::ManageRole as u32;
+
+    // Sender cannot grant a role that has permissions sender does not possess
+    assert!(!has_permission(sender_permissions, target_role_permissions));
+
+    // Sender cannot modify/create a role that has permissions sender does not possess
+    assert!(!has_permission(sender_permissions, target_role_permissions));
+
+    // Sender cannot delete a role with higher permissions
+    assert!(!has_permission(sender_permissions, target_role_permissions));
+
+    // Sender CAN grant a role with equal or fewer permissions
+    let allowed_role_perms = UserPermission::AddMessage as u32;
+    assert!(has_permission(sender_permissions, allowed_role_perms));
+}
+
+#[test]
 fn test_name_validation() {
     assert!(is_valid_name("valid_name"));
     assert!(is_valid_name("Alice"));

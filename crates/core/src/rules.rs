@@ -247,13 +247,61 @@ impl MlsRules for FireflyMlsRules {
 
                     let auth_token =
                         get_auth_token_from_signing_identity(&member_to_remove.signing_identity)?;
-                    if auth_token.valid_until < get_current_timestamp_in_secs() {
-                        log::info!("removing user {} because token became invalid", auth_token.username);
-                    } else if auth_token.username != sender_username
-                        && !has_permission(sender_permissions, UserPermission::ManageMember as u32)
-                    {
-                        // Any group member is allowed to remove another member's device to clean up inactive devices.
-                        log::info!("Allowing removal of {}'s device by {} for inactive device cleanup", auth_token.username, sender_username);
+
+                    if auth_token.username == sender_username {
+                        // User removing their own device (leaving or cleanup) is always allowed
+                    } else {
+                        // Check if this is an inactive/stale device that any member can clean up.
+                        // An inactive device is:
+                        // 1. A device whose token has expired (valid_until < now), OR
+                        // 2. An older device when multiple devices exist for the user, leaving the most recent device.
+                        let target_devices =
+                            get_devices_already_in(current_roster, &auth_token.username);
+                        let is_inactive_token =
+                            auth_token.valid_until < get_current_timestamp_in_secs();
+                        let is_stale_device = if target_devices.len() > 1 {
+                            let most_recent_valid_until = target_devices
+                                .iter()
+                                .map(|(_, tok)| tok.valid_until)
+                                .max()
+                                .unwrap_or(0);
+                            auth_token.valid_until < most_recent_valid_until
+                        } else {
+                            false
+                        };
+
+                        if is_inactive_token || is_stale_device {
+                            log::info!(
+                                "Allowing removal of {}'s inactive/stale device by {}",
+                                auth_token.username,
+                                sender_username
+                            );
+                        } else {
+                            // Removing an active/primary device requires ManageMember permission
+                            if !has_permission(
+                                sender_permissions,
+                                UserPermission::ManageMember as u32,
+                            ) {
+                                return Err(format!(
+                                    "rejected remove proposal, remover {} does not have permission to manage members",
+                                    sender_username
+                                )
+                                .into());
+                            }
+
+                            // A member with ManageMember can remove anyone EXCEPT the owner (owner role is always 1)
+                            let target_role_id = current_extension
+                                .get_role_of_user(&auth_token.username)
+                                .unwrap_or_default();
+
+                            if target_role_id == 1 {
+                                return Err(format!(
+                                    "rejected remove proposal, cannot remove the group owner {}",
+                                    auth_token.username
+                                )
+                                .into());
+                            }
+                        }
                     }
 
                     members_removed

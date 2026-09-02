@@ -210,9 +210,29 @@ async fn test_kick_member() {
         .check_setup()
         .await
         .expect("Charles failed to join group");
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Charles (default member without ManageMember) attempts to kick Alice (owner) - must fail!
+    println!("Charles attempting to kick Alice (should fail)...");
+    let kick_alice_res = charles_client
+        .kick_group_member(group_id, "alice".into())
+        .await;
+    assert!(
+        kick_alice_res.is_err(),
+        "Charles without ManageMember must NOT be able to kick owner Alice!"
+    );
+    println!("Charles kicking Alice correctly failed: {:?}", kick_alice_res.err().unwrap());
 
-    // Alice removes Bob
+    // Charles (default member without ManageMember) attempts to kick Bob (active member) - must fail!
+    println!("Charles attempting to kick Bob (should fail)...");
+    let kick_bob_res = charles_client
+        .kick_group_member(group_id, "bob".into())
+        .await;
+    assert!(
+        kick_bob_res.is_err(),
+        "Charles without ManageMember must NOT be able to kick active member Bob!"
+    );
+    println!("Charles kicking Bob correctly failed: {:?}", kick_bob_res.err().unwrap());
+
+    // Alice (owner) removes Bob
     println!("Alice kicking Bob...");
     alice_client
         .kick_group_member(group_id, "bob".into())

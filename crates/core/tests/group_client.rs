@@ -586,6 +586,30 @@ async fn group_flow() {
         Err(err) => log::error!("{:?}", err),
     };
 
+    // charles cannot kick active member alice (owner)
+    match charles_group.kick_member("alice").await {
+        Ok(_) => {
+            panic!("charles should not be able to kick owner alice")
+        }
+        Err(err) => log::info!("Expected error when charles kicks alice: {:?}", err),
+    };
+
+    // charles cannot kick active member bob
+    match charles_group.kick_member("bob").await {
+        Ok(_) => {
+            panic!("charles should not be able to kick active member bob without ManageMember")
+        }
+        Err(err) => log::info!("Expected error when charles kicks bob: {:?}", err),
+    };
+
+    // bob (has ManageMember) cannot kick owner alice (role 1)
+    match bob_group.kick_member("alice").await {
+        Ok(_) => {
+            panic!("bob should not be able to kick owner alice")
+        }
+        Err(err) => log::info!("Expected error when bob kicks alice: {:?}", err),
+    };
+
     // charles cannot update roles
     match charles_group
         .update_roles(
