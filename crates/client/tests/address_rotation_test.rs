@@ -24,7 +24,9 @@ impl FireflyWsClientCallback for TestCallbacks {
     }
 
     async fn on_message(&self, message: UserMessage) {
-        let _ = self.message_tx.send(message).await;
+        if message.sent_by_other {
+            let _ = self.message_tx.send(message).await;
+        }
     }
 
     async fn on_group_message(&self, group_message: GroupMessage) {
@@ -67,6 +69,8 @@ async fn test_address_rotation() {
     };
 
     let test_run_id = rand::random::<u32>();
+    let alice_name = format!("alice_rot_{}", test_run_id);
+    let bob_name = format!("bob_rot_{}", test_run_id);
 
     let mut alice_clients = Vec::new();
     let mut alice_receivers = Vec::new();
@@ -77,8 +81,8 @@ async fn test_address_rotation() {
         let (msg_tx, msg_rx) = mpsc::channel(100);
         let (gmsg_tx, _gmsg_rx) = mpsc::channel(100);
         let callbacks = TestCallbacks {
-            name: "alice".into(),
-            token: "alice".into(),
+            name: alice_name.clone(),
+            token: alice_name.clone(),
             message_tx: msg_tx,
             group_message_tx: gmsg_tx,
         };
@@ -119,8 +123,8 @@ async fn test_address_rotation() {
     let (bob_msg_tx, _bob_msg_rx) = mpsc::channel(100);
     let (bob_gmsg_tx, _bob_gmsg_rx) = mpsc::channel(100);
     let bob_callbacks = TestCallbacks {
-        name: "bob".into(),
-        token: "bob".into(),
+        name: bob_name.clone(),
+        token: bob_name.clone(),
         message_tx: bob_msg_tx,
         group_message_tx: bob_gmsg_tx,
     };
@@ -146,10 +150,12 @@ async fn test_address_rotation() {
         .await
         .expect("Bob client failed to initialize");
 
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
     // 3. Bob sends message to Alice
     println!("Bob sending first message to Alice...");
     bob_client
-        .encrypt_and_send("alice".to_string(), b"hello 1".to_vec())
+        .encrypt_and_send(alice_name.clone(), b"hello 1".to_vec())
         .await
         .expect("Bob failed to send message");
 
@@ -168,8 +174,8 @@ async fn test_address_rotation() {
     let (msg_tx6, mut msg_rx6) = mpsc::channel(100);
     let (gmsg_tx6, _gmsg_rx6) = mpsc::channel(100);
     let callbacks6 = TestCallbacks {
-        name: "alice".into(),
-        token: "alice".into(),
+        name: alice_name.clone(),
+        token: alice_name.clone(),
         message_tx: msg_tx6,
         group_message_tx: gmsg_tx6,
     };
@@ -198,16 +204,21 @@ async fn test_address_rotation() {
         .await
         .expect("Alice device 6 failed to initialize");
 
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
     // 7. Bob sends second message
     println!("Bob sending second message to Alice...");
     bob_client
-        .encrypt_and_send("alice".to_string(), b"hello 2".to_vec())
+        .encrypt_and_send(alice_name.clone(), b"hello 2".to_vec())
         .await
         .expect("Bob failed to send second message");
 
     // Check device 1 (the oldest one)
     println!("Checking that device 1 does NOT receive the message...");
     let res1 = tokio::time::timeout(Duration::from_secs(5), alice_receivers[0].recv()).await;
+    if let Ok(Some(ref msg)) = res1 {
+        panic!("Device 1 should NOT have received the message, but received: {:?}", String::from_utf8_lossy(&msg.message));
+    }
     assert!(
         res1.is_err(),
         "Device 1 should NOT have received the message as it should be dropped"
@@ -255,6 +266,8 @@ async fn test_bidirectional_multi_device_rotation_and_messaging() {
     };
 
     let test_run_id = rand::random::<u32>();
+    let alice_name = format!("alice_bidi_{}", test_run_id);
+    let bob_name = format!("bob_bidi_{}", test_run_id);
 
     // 1. Create 3 initial Alice devices and 3 initial Bob devices
     let mut alice_clients = Vec::new();
@@ -263,8 +276,8 @@ async fn test_bidirectional_multi_device_rotation_and_messaging() {
         let (msg_tx, msg_rx) = mpsc::channel(100);
         let (gmsg_tx, _gmsg_rx) = mpsc::channel(100);
         let callbacks = TestCallbacks {
-            name: "alice".into(),
-            token: "alice".into(),
+            name: alice_name.clone(),
+            token: alice_name.clone(),
             message_tx: msg_tx,
             group_message_tx: gmsg_tx,
         };
@@ -298,14 +311,16 @@ async fn test_bidirectional_multi_device_rotation_and_messaging() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
     let mut bob_clients = Vec::new();
     let mut bob_receivers = Vec::new();
     for i in 1..=3 {
         let (msg_tx, msg_rx) = mpsc::channel(100);
         let (gmsg_tx, _gmsg_rx) = mpsc::channel(100);
         let callbacks = TestCallbacks {
-            name: "bob".into(),
-            token: "bob".into(),
+            name: bob_name.clone(),
+            token: bob_name.clone(),
             message_tx: msg_tx,
             group_message_tx: gmsg_tx,
         };
@@ -339,10 +354,12 @@ async fn test_bidirectional_multi_device_rotation_and_messaging() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
     // 2. Alice1 sends message to Bob (All 3 Bob devices receive)
     println!("Alice 1 sending message to Bob...");
     alice_clients[0]
-        .encrypt_and_send("bob".to_string(), b"alice -> bob 1".to_vec())
+        .encrypt_and_send(bob_name.clone(), b"alice -> bob 1".to_vec())
         .await
         .expect("Alice 1 failed to send");
 
@@ -354,10 +371,12 @@ async fn test_bidirectional_multi_device_rotation_and_messaging() {
         assert_eq!(msg.message, b"alice -> bob 1");
     }
 
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     // 3. Bob1 replies to Alice (All 3 Alice devices receive)
     println!("Bob 1 sending reply to Alice...");
     bob_clients[0]
-        .encrypt_and_send("alice".to_string(), b"bob -> alice 1".to_vec())
+        .encrypt_and_send(alice_name.clone(), b"bob -> alice 1".to_vec())
         .await
         .expect("Bob 1 failed to send");
 
@@ -375,8 +394,8 @@ async fn test_bidirectional_multi_device_rotation_and_messaging() {
         let (msg_tx, msg_rx) = mpsc::channel(100);
         let (gmsg_tx, _gmsg_rx) = mpsc::channel(100);
         let callbacks = TestCallbacks {
-            name: "bob".into(),
-            token: "bob".into(),
+            name: bob_name.clone(),
+            token: bob_name.clone(),
             message_tx: msg_tx,
             group_message_tx: gmsg_tx,
         };
@@ -410,10 +429,12 @@ async fn test_bidirectional_multi_device_rotation_and_messaging() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
     // 5. Alice 2 sends message to Bob -> Server will notice Bob1 is gone and return new active Bob devices
     println!("Alice 2 sending message to Bob after Bob rotation...");
     alice_clients[1]
-        .encrypt_and_send("bob".to_string(), b"alice -> bob 2".to_vec())
+        .encrypt_and_send(bob_name.clone(), b"alice -> bob 2".to_vec())
         .await
         .expect("Alice 2 failed to send");
 
@@ -430,10 +451,12 @@ async fn test_bidirectional_multi_device_rotation_and_messaging() {
         assert_eq!(msg.message, b"alice -> bob 2");
     }
 
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     // 6. Bob 6 replies to Alice -> All active Alice devices receive
     println!("Bob 6 sending reply to Alice...");
     bob_clients[5]
-        .encrypt_and_send("alice".to_string(), b"bob 6 -> alice".to_vec())
+        .encrypt_and_send(alice_name.clone(), b"bob 6 -> alice".to_vec())
         .await
         .expect("Bob 6 failed to send");
 

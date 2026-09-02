@@ -90,3 +90,10 @@ pnpm dlx tsx bot.ts
 ```
 
 Once running, send `/help` or `/ping` in any 1-on-1 chat with the bot or mention it in a group chat, and the bot will reply with end-to-end encrypted messages!
+
+---
+
+## Next Steps
+
+- **[Embedding Firefly into Web Pages](../embedding/web-embedding/)**: Connect your bot with frontend chat widgets.
+- **[API Reference](../reference/api-reference/)**: Complete method list and configuration options.

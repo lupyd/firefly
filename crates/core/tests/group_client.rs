@@ -262,6 +262,12 @@ async fn group_flow() {
         })
         .init();
 
+    let test_run_id = rand::random::<u32>();
+    let alice_name = format!("alice_gc_{}", test_run_id);
+    let bob_name = format!("bob_gc_{}", test_run_id);
+    let charles_name = format!("charles_gc_{}", test_run_id);
+    let dave_name = format!("dave_gc_{}", test_run_id);
+
     let mut wrapper = FireflyGroupExtensionWrapper::new(Default::default());
     wrapper.update_group("alice's group".into(), UserPermission::AddMessage as u32);
     wrapper.update_role(FireflyGroupRole {
@@ -271,7 +277,7 @@ async fn group_flow() {
         color: Default::default(),
     });
     wrapper.update_member(FireflyGroupMember {
-        username: "alice".into(),
+        username: alice_name.clone().into(),
         role: 1,
     });
     wrapper.update_channel(FireflyGroupChannel {
@@ -284,7 +290,7 @@ async fn group_flow() {
 
     log::info!("{:#?}", wrapper.inner());
 
-    let (alice, alice_address) = new_test_user("alice", 1, None).await;
+    let (alice, alice_address) = new_test_user(&alice_name, 1, None).await;
     let alice_identity = alice.get_identity().as_ref().clone();
     let alice_group = alice.create_group(wrapper.inner().clone()).await.unwrap();
 
@@ -311,14 +317,14 @@ async fn group_flow() {
         assert!(response.status().is_success());
     }
 
-    add_member_server("alice", alice_address, &alice_group).await;
+    add_member_server(&alice_name, alice_address, &alice_group).await;
 
     // just waste some time for keys to expire, they'll expire in 8 seconds
     tokio::time::sleep(Duration::from_secs(5)).await;
-    let (bob, bob_address) = new_test_user("bob", 1, None).await;
+    let (bob, bob_address) = new_test_user(&bob_name, 1, None).await;
     let bob_identity = bob.get_identity().as_ref().clone();
 
-    alice_group.add_member("bob".into(), 0).await.unwrap();
+    alice_group.add_member(bob_name.clone(), 0).await.unwrap();
 
     let bob_group = {
         let response = HTTP_CLIENT
@@ -327,7 +333,7 @@ async fn group_flow() {
                 get_base_url(),
                 bob_address
             ))
-            .bearer_auth("bob")
+            .bearer_auth(&bob_name)
             .send()
             .await
             .unwrap();
@@ -358,10 +364,10 @@ async fn group_flow() {
         );
     }
 
-    let (charles, charles_address) = new_test_user("charles", 1, None).await;
+    let (charles, charles_address) = new_test_user(&charles_name, 1, None).await;
     let charles_identity = charles.get_identity().as_ref().clone();
 
-    match bob_group.add_member("charles".into(), 0).await {
+    match bob_group.add_member(charles_name.clone(), 0).await {
         Err(err) => log::info!("{:?}", err),
         Ok(_) => {
             panic!("this shouldn't succeed, because bob doesn't have the required permissions");
@@ -386,7 +392,7 @@ async fn group_flow() {
     alice_group
         .update_users(
             [UpdateUserProposal {
-                username: "bob".into(),
+                username: bob_name.clone(),
                 role_id: 2,
             }]
             .into_iter(),
@@ -433,20 +439,20 @@ async fn group_flow() {
         }
     }
 
-    sync_groups(bob_address, "bob", &bob_group).await;
+    sync_groups(bob_address, &bob_name, &bob_group).await;
 
     log::info!("Bob's extension:");
     print_extension(&bob_group).await;
 
     // now this should fail, because role 1 is owner, has too many permissions, that bob can't give to charles
-    match bob_group.add_member("charles".into(), 1).await {
+    match bob_group.add_member(charles_name.clone(), 1).await {
         Ok(_) => panic!(
             "this should fail, because role 1 is owner, has too many permissions, that bob can't give to charles"
         ),
         Err(err) => log::info!("{}", err),
     }
 
-    bob_group.add_member("charles".into(), 2).await.unwrap(); // can succeed giving same role
+    bob_group.add_member(charles_name.clone(), 2).await.unwrap(); // can succeed giving same role
 
     match bob_group
         .update_channel(2, false, "manager-message-only".into(), 1, 0)
@@ -459,7 +465,7 @@ async fn group_flow() {
     match bob_group
         .update_users(
             [UpdateUserProposal {
-                username: "bob".into(),
+                username: bob_name.clone(),
                 role_id: 1,
             }]
             .into_iter(),
@@ -487,8 +493,8 @@ async fn group_flow() {
         Err(err) => log::info!("{:?}", err),
     };
 
-    add_member_server("alice", alice_address, &alice_group).await;
-    sync_groups(alice_address, "alice", &alice_group).await;
+    add_member_server(&alice_name, alice_address, &alice_group).await;
+    sync_groups(alice_address, &alice_name, &alice_group).await;
 
     alice_group
         .update_roles(
@@ -506,10 +512,10 @@ async fn group_flow() {
         .await
         .unwrap();
 
-    add_member_server("bob", bob_address, &bob_group).await;
-    add_member_server("alice", alice_address, &alice_group).await;
+    add_member_server(&bob_name, bob_address, &bob_group).await;
+    add_member_server(&alice_name, alice_address, &alice_group).await;
 
-    sync_groups(bob_address, "bob", &bob_group).await;
+    sync_groups(bob_address, &bob_name, &bob_group).await;
 
     log::info!("bob extension: ");
     print_extension(&bob_group).await;
@@ -560,7 +566,7 @@ async fn group_flow() {
                 get_base_url(),
                 charles_address
             ))
-            .bearer_auth("charles")
+            .bearer_auth(&charles_name)
             .send()
             .await
             .unwrap();
@@ -576,10 +582,11 @@ async fn group_flow() {
             .unwrap()
     };
 
-    // add_member_server("charles", charles_address, &charles_group).await;
+    add_member_server(&charles_name, charles_address, &charles_group).await;
+    sync_groups(charles_address, &charles_name, &charles_group).await;
 
     // charles has role 2 (manager), should not be able to add members
-    match charles_group.add_member("dave".into(), 0).await {
+    match charles_group.add_member(dave_name.clone(), 0).await {
         Ok(_) => {
             panic!("charles should not be able to add members without ManageMember permission")
         }
@@ -587,7 +594,7 @@ async fn group_flow() {
     };
 
     // charles cannot kick active member alice (owner)
-    match charles_group.kick_member("alice").await {
+    match charles_group.kick_member(&alice_name).await {
         Ok(_) => {
             panic!("charles should not be able to kick owner alice")
         }
@@ -595,7 +602,7 @@ async fn group_flow() {
     };
 
     // charles cannot kick active member bob
-    match charles_group.kick_member("bob").await {
+    match charles_group.kick_member(&bob_name).await {
         Ok(_) => {
             panic!("charles should not be able to kick active member bob without ManageMember")
         }
@@ -603,20 +610,20 @@ async fn group_flow() {
     };
 
     // bob (has ManageMember) cannot kick owner alice (role 1)
-    match bob_group.kick_member("alice").await {
+    match bob_group.kick_member(&alice_name).await {
         Ok(_) => {
             panic!("bob should not be able to kick owner alice")
         }
         Err(err) => log::info!("Expected error when bob kicks alice: {:?}", err),
     };
 
-    // charles cannot update roles
+    // charles cannot create role with permissions he doesn't have (ManageMember)
     match charles_group
         .update_roles(
             [UpdateRoleProposal {
                 name: "test".into(),
                 role_id: 5,
-                permissions: 0,
+                permissions: UserPermission::ManageMember as u32,
                 delete: false,
                 color: Default::default(),
             }]
@@ -624,7 +631,7 @@ async fn group_flow() {
         )
         .await
     {
-        Ok(_) => panic!("charles should not be able to update roles without ManageRole permission"),
+        Ok(_) => panic!("charles should not be able to update roles with permissions he lacks"),
         Err(err) => log::error!("{:?}", err),
     };
 
@@ -632,7 +639,7 @@ async fn group_flow() {
     match charles_group
         .update_users(
             [UpdateUserProposal {
-                username: "charles".into(),
+                username: charles_name.clone(),
                 role_id: 1,
             }]
             .into_iter(),
@@ -643,16 +650,16 @@ async fn group_flow() {
         Err(err) => log::error!("{:?}", err),
     };
 
-    add_member_server("charles", charles_address, &charles_group).await;
-    sync_groups(charles_address, "charles", &charles_group).await;
+    add_member_server(&charles_name, charles_address, &charles_group).await;
+    sync_groups(charles_address, &charles_name, &charles_group).await;
     // charles can update channels since he has ManageChannel
     charles_group
         .update_channel(3, false, "charles-channel".into(), 1, 0)
         .await
         .unwrap();
 
-    add_member_server("alice", alice_address, &alice_group).await;
-    sync_groups(alice_address, "alice", &alice_group).await;
+    add_member_server(&alice_name, alice_address, &alice_group).await;
+    sync_groups(alice_address, &alice_name, &alice_group).await;
     // alice removes ManageChannel from role 2
     alice_group
         .update_roles(
@@ -669,12 +676,12 @@ async fn group_flow() {
         .await
         .unwrap();
 
-    add_member_server("alice", alice_address, &alice_group).await;
-    sync_groups(alice_address, "alice", &alice_group).await;
-    add_member_server("bob", bob_address, &bob_group).await;
-    sync_groups(bob_address, "bob", &bob_group).await;
-    add_member_server("charles", charles_address, &charles_group).await;
-    sync_groups(charles_address, "charles", &charles_group).await;
+    add_member_server(&alice_name, alice_address, &alice_group).await;
+    sync_groups(alice_address, &alice_name, &alice_group).await;
+    add_member_server(&bob_name, bob_address, &bob_group).await;
+    sync_groups(bob_address, &bob_name, &bob_group).await;
+    add_member_server(&charles_name, charles_address, &charles_group).await;
+    sync_groups(charles_address, &charles_name, &charles_group).await;
 
     // now charles cannot update channels
     match charles_group
@@ -691,7 +698,7 @@ async fn group_flow() {
     let (bob, bob_address, bob_group) = {
         // let bob get a new identity
 
-        let (bob, bob_address) = new_test_user("bob", 1, Some(bob_identity)).await;
+        let (bob, bob_address) = new_test_user(&bob_name, 1, Some(bob_identity)).await;
 
         bob_group.save().await.unwrap();
 
@@ -706,8 +713,8 @@ async fn group_flow() {
         (bob, bob_address, group)
     };
 
-    add_member_server("bob", bob_address, &bob_group).await;
-    sync_groups(bob_address, "bob", &bob_group).await;
+    add_member_server(&bob_name, bob_address, &bob_group).await;
+    sync_groups(bob_address, &bob_name, &bob_group).await;
 
     // update to new key
     bob_group.update_leaf(&bob.get_identity()).await.unwrap();

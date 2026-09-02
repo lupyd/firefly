@@ -1,7 +1,10 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 lazy_static::lazy_static! {
-    pub static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::new();
+    pub static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::builder()
+        .pool_max_idle_per_host(0)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 }
 
 lazy_static::lazy_static! {

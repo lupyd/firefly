@@ -74,3 +74,13 @@ High-performance native N-API bindings generated for Node.js and Bun environment
 
 ### 5. `crates/firefly-client-js` (`firefly-client-js`)
 Developer-facing TypeScript/JavaScript library providing the `FireflyClient` and `FireflyBot` classes, Auth0 PKCE browser authentication, command dispatching, and reply context management.
+
+---
+
+## Next Steps
+
+- **[Installation & Setup](./installation/)**: Install dependencies and build native bindings.
+- **[Quickstart](./quickstart/)**: Send your first encrypted message in 5 minutes.
+- **[Client SDK Guide](../client/js-client/)**: Learn how to use the JavaScript/TypeScript client.
+- **[Chatbot Framework](../bot/framework/)**: Build command-driven bots and auto-responders.
+- **[Web Embedding](../embedding/web-embedding/)**: Embed Firefly into any web application.

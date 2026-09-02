@@ -62,3 +62,11 @@ bot.command('add', async (ctx) => {
   await ctx.reply(`Result: ${a + b}`);
 });
 ```
+
+---
+
+## Next Steps
+
+- **[Authentication & Emulator Mode](./auth-and-emulator/)**: Learn about session persistence and test modes.
+- **[Complete Chatbot Tutorial](./example-bot/)**: Put everything together into a full chatbot service.
+- **[Protobuf Wire Formats](../reference/protobufs/)**: Explore payload schemas.

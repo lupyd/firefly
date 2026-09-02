@@ -67,13 +67,16 @@ async fn test_online_status() {
     };
 
     let test_run_id = rand::random::<u32>();
+    let alice_name = format!("alice_on_{}", test_run_id);
+    let bob_name = format!("bob_on_{}", test_run_id);
+    let charlie_name = format!("charlie_on_{}", test_run_id);
 
     // Alice Setup
     let (alice_msg_tx, _alice_msg_rx) = mpsc::channel(100);
     let (alice_gmsg_tx, _alice_gmsg_rx) = mpsc::channel(100);
     let alice_callbacks = TestCallbacks {
-        name: "alice".into(),
-        token: "alice".into(),
+        name: alice_name.clone(),
+        token: alice_name.clone(),
         message_tx: alice_msg_tx,
         group_message_tx: alice_gmsg_tx,
     };
@@ -108,8 +111,8 @@ async fn test_online_status() {
     let (bob_msg_tx, _bob_msg_rx) = mpsc::channel(100);
     let (bob_gmsg_tx, _bob_gmsg_rx) = mpsc::channel(100);
     let bob_callbacks = TestCallbacks {
-        name: "bob".into(),
-        token: "bob".into(),
+        name: bob_name.clone(),
+        token: bob_name.clone(),
         message_tx: bob_msg_tx,
         group_message_tx: bob_gmsg_tx,
     };
@@ -142,9 +145,9 @@ async fn test_online_status() {
     // Check online status
     println!("Checking online status...");
     let usernames = vec![
-        "alice".to_string(),
-        "bob".to_string(),
-        "charlie".to_string(),
+        alice_name.clone(),
+        bob_name.clone(),
+        charlie_name.clone(),
     ];
     let online_users = alice_client
         .get_online_status(usernames.clone())
@@ -152,9 +155,9 @@ async fn test_online_status() {
         .expect("Failed to get online status");
 
     println!("Online users: {:?}", online_users);
-    assert!(online_users.contains(&"alice".to_string()));
-    assert!(online_users.contains(&"bob".to_string()));
-    assert!(!online_users.contains(&"charlie".to_string()));
+    assert!(online_users.contains(&alice_name));
+    assert!(online_users.contains(&bob_name));
+    assert!(!online_users.contains(&charlie_name));
 
     // Dispose Bob and check again
     println!("Disposing Bob...");
@@ -172,8 +175,8 @@ async fn test_online_status() {
         "Online users after Bob left: {:?}",
         online_users_after_bob_left
     );
-    assert!(online_users_after_bob_left.contains(&"alice".to_string()));
-    assert!(!online_users_after_bob_left.contains(&"bob".to_string()));
+    assert!(online_users_after_bob_left.contains(&alice_name));
+    assert!(!online_users_after_bob_left.contains(&bob_name));
 
     println!("Test passed!");
 

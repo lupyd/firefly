@@ -67,3 +67,11 @@ With the gateway model, your backend runs a dedicated `FireflyClient` or `Firefl
 - Extremely lightweight on mobile browsers.
 - Centralized auth token management integrated with your existing session cookies or JWTs.
 - Zero local compilation or native addon requirements in the client bundle.
+
+---
+
+## Next Steps
+
+- **[Building an Embeddable Chat Widget](./chat-widget/)**: Drop-in chat component example.
+- **[Security & Token Bridging](./security-and-auth/)**: Session security and token management.
+- **[Chatbot Framework](../bot/framework/)**: Pair your embedded widget with an autonomous backend bot.

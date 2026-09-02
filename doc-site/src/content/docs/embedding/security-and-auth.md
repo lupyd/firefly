@@ -46,3 +46,10 @@ const callbacks = {
 - [x] **Always enable TLS/HTTPS and WSS in production.**
 - [x] **Ensure SQLite database files have restrictive filesystem permissions (`0600`).**
 - [x] **Rotate user keys periodically to preserve Post-Compromise Security (PCS).**
+
+---
+
+## Next Steps
+
+- **[Building a Chat Widget](./chat-widget/)**: See the full frontend chat widget implementation.
+- **[API Reference](../reference/api-reference/)**: Methods and configuration options.

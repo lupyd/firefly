@@ -88,3 +88,11 @@ To query whether group members are currently connected:
 const status = await client.getGroupMembersOnlineStatus(groupId);
 console.log('Group members online:', status);
 ```
+
+---
+
+## Next Steps
+
+- **[Groups & Ratchet Trees](./groups/)**: Dive deeper into group states and multi-channel architecture.
+- **[Chatbot Framework](../bot/framework/)**: Build autonomous command bots with auto-reply routing.
+- **[Building a Chat Widget](../embedding/chat-widget/)**: Render real-time messages in a web widget.

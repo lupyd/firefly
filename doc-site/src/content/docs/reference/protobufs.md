@@ -70,3 +70,11 @@ const encodedBytes = protos.UserMessageInner.encode(payload).finish();
 const decoded = protos.UserMessageInner.decode(encodedBytes);
 console.log(decoded.messagePayload.text); // "Hello Firefly!"
 ```
+
+---
+
+## Next Steps
+
+- **[Encrypted Messaging](../../client/messaging/)**: See complete message encryption and sending code.
+- **[FireflyClient & FireflyBot API](./api-reference/)**: Methods and options reference.
+- **[Callbacks & Event Hooks](./callbacks/)**: Event interfaces and callback hooks.

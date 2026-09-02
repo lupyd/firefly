@@ -45,3 +45,11 @@ client.client.onGroupJoined = async (groupId: number) => {
   await client.client.loadAllGroups();
 };
 ```
+
+---
+
+## Next Steps
+
+- **[Encrypted Messaging](./messaging/)**: Learn about group and 1-on-1 message payloads.
+- **[Chatbot Framework](../bot/framework/)**: Handle group commands with contextual auto-replies.
+- **[Web Embedding](../embedding/web-embedding/)**: Embed group chat rooms in web pages.

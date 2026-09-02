@@ -73,3 +73,11 @@ async function launch() {
 
 launch().catch(console.error);
 ```
+
+---
+
+## Next Steps
+
+- **[Context & Auto-Replies](./context-and-replies/)**: Learn how `BotContext` and `ctx.reply()` route messages.
+- **[Authentication & Emulator Mode](./auth-and-emulator/)**: Configure Auth0 PKCE or local test emulator.
+- **[Complete Chatbot Tutorial](./example-bot/)**: Build a production-ready chatbot with multi-command menus.

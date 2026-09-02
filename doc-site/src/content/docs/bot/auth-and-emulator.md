@@ -48,3 +48,10 @@ In Emulator Mode:
 - No browser window opens.
 - The bot sets the access token directly to `BOT_USERNAME`.
 - Perfect for non-interactive server environments, Docker containers, and CI/CD test runners.
+
+---
+
+## Next Steps
+
+- **[Complete Chatbot Tutorial](./example-bot/)**: Build a complete multi-command bot.
+- **[Security & Token Bridging](../embedding/security-and-auth/)**: Secure token handling in web and embedded environments.

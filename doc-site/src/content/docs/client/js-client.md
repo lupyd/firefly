@@ -85,3 +85,12 @@ If you need low-level control over raw MLS operations or custom queries:
 ```typescript
 const nativeClient = client.client; // Instance of FireflyClientNode
 ```
+
+---
+
+## Next Steps
+
+- **[Encrypted Messaging](./messaging/)**: Send direct and group messages.
+- **[Groups & Ratchet Trees](./groups/)**: Manage group channels and membership.
+- **[Native Node Client](./node-client/)**: Use raw N-API bindings.
+- **[API Reference](../reference/api-reference/)**: Full method and parameter documentation.

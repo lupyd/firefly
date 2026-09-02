@@ -262,3 +262,10 @@ export function FireflyChatWidget({ recipient = 'support_bot' }) {
   );
 }
 ```
+
+---
+
+## Next Steps
+
+- **[Security & Token Bridging](./security-and-auth/)**: Secure token handling in web and embedded environments.
+- **[Chatbot Framework](../bot/framework/)**: Build a bot backend to reply to widget messages.

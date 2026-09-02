@@ -48,3 +48,11 @@ Queries the online presence status for all members of the specified group.
 
 ### `readUserMessagesUpto(other: string, uptoMessageId: bigint | number): Promise<void>`
 Sends a read receipt acknowledging that all messages up to `uptoMessageId` from `other` have been read.
+
+---
+
+## Next Steps
+
+- **[Callbacks & Event Hooks](./callbacks/)**: Event interfaces and JSON payloads.
+- **[Protocol Buffer Wire Format](./protobufs/)**: Payload definitions.
+- **[Chatbot Framework](../../bot/framework/)**: Bot class and handler setup.

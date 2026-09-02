@@ -372,14 +372,15 @@ impl FireflyWsClient {
             .parse::<u64>()
             .unwrap_or_default();
 
+        let base_ws = self.firefly_base_ws_url.trim_end_matches('/');
         let url = format!(
-            "{}?uid={}&device_id={}&last_synced_upto={}&token={}",
-            self.firefly_base_ws_url, addressId, device_id, last_synced_upto, token
+            "{}/?uid={}&device_id={}&last_synced_upto={}&token={}",
+            base_ws, addressId, device_id, last_synced_upto, token
         );
 
         let sanitized_url = format!(
-            "{}?uid={}&device_id={}&last_synced_upto={}&token=[REDACTED]",
-            self.firefly_base_ws_url, addressId, device_id, last_synced_upto
+            "{}/?uid={}&device_id={}&last_synced_upto={}&token=[REDACTED]",
+            base_ws, addressId, device_id, last_synced_upto
         );
 
         let show_connecting = {
@@ -915,8 +916,16 @@ impl FireflyWsClient {
                     self_message_settings,
                     self_message_payload.clone(),
                 );
-                let message = message.await?;
-                message_entries.messages.push(message);
+                match message.await {
+                    Ok(m) => message_entries.messages.push(m),
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to encrypt self-sync message for device {}: {}",
+                            address.device_id,
+                            e
+                        );
+                    }
+                }
             }
         }
         let bytes = self
@@ -1006,10 +1015,18 @@ impl FireflyWsClient {
                         message_settings,
                         payload.to_vec(),
                     )
-                }
-                .await?;
+                };
 
-                upload_request.messages.push(message);
+                match message.await {
+                    Ok(m) => upload_request.messages.push(m),
+                    Err(e) => {
+                        if !is_self {
+                            return Err(e);
+                        } else {
+                            log::warn!("failed to encrypt message for self device: {}", e);
+                        }
+                    }
+                }
             } else {
                 continue;
             }

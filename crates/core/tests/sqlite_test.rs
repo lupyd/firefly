@@ -418,6 +418,12 @@ mod tests {
             })
             .init();
 
+        let test_run_id = rand::random::<u32>();
+        let alice_name = format!("alice_sq_{}", test_run_id);
+        let bob_name = format!("bob_sq_{}", test_run_id);
+        let charles_name = format!("charles_sq_{}", test_run_id);
+        let dave_name = format!("dave_sq_{}", test_run_id);
+
         let mut wrapper = FireflyGroupExtensionWrapper::new(Default::default());
         wrapper.update_group("alice's group".into(), UserPermission::AddMessage as u32);
         wrapper.update_role(FireflyGroupRole {
@@ -427,7 +433,7 @@ mod tests {
             color: Default::default(),
         });
         wrapper.update_member(FireflyGroupMember {
-            username: "alice".into(),
+            username: alice_name.clone().into(),
             role: 1,
         });
         wrapper.update_channel(FireflyGroupChannel {
@@ -440,7 +446,7 @@ mod tests {
 
         log::info!("{:#?}", wrapper.inner());
 
-        let (alice, alice_address) = new_test_user("alice", 1, None).await;
+        let (alice, alice_address) = new_test_user(&alice_name, 1, None).await;
         let alice_identity = alice.get_identity().as_ref().clone();
         let alice_group = alice.create_group(wrapper.inner().clone()).await.unwrap();
 
@@ -467,13 +473,13 @@ mod tests {
             assert!(response.status().is_success());
         }
 
-        add_member_server("alice", alice_address, &alice_group).await;
+        add_member_server(&alice_name, alice_address, &alice_group).await;
 
         tokio::time::sleep(Duration::from_secs(5)).await;
-        let (bob, bob_address) = new_test_user("bob", 1, None).await;
+        let (bob, bob_address) = new_test_user(&bob_name, 1, None).await;
         let bob_identity = bob.get_identity().as_ref().clone();
 
-        alice_group.add_member("bob".into(), 0).await.unwrap();
+        alice_group.add_member(bob_name.clone(), 0).await.unwrap();
 
         let bob_group = {
             let response = HTTP_CLIENT
@@ -482,7 +488,7 @@ mod tests {
                     get_base_url(),
                     bob_address
                 ))
-                .bearer_auth("bob")
+                .bearer_auth(&bob_name)
                 .send()
                 .await
                 .unwrap();
@@ -511,9 +517,9 @@ mod tests {
             );
         }
 
-        let (charles, charles_address) = new_test_user("charles", 1, None).await;
+        let (charles, charles_address) = new_test_user(&charles_name, 1, None).await;
 
-        match bob_group.add_member("charles".into(), 0).await {
+        match bob_group.add_member(charles_name.clone(), 0).await {
             Err(err) => log::info!("{:?}", err),
             Ok(_) => {
                 panic!("this shouldn't succeed, because bob doesn't have the required permissions");
@@ -538,7 +544,7 @@ mod tests {
         alice_group
             .update_users(
                 [UpdateUserProposal {
-                    username: "bob".into(),
+                    username: bob_name.clone(),
                     role_id: 2,
                 }]
                 .into_iter(),
@@ -585,19 +591,19 @@ mod tests {
             }
         }
 
-        sync_groups(bob_address, "bob", &bob_group).await;
+        sync_groups(bob_address, &bob_name, &bob_group).await;
 
         log::info!("Bob's extension:");
         print_extension(&bob_group).await;
 
-        match bob_group.add_member("charles".into(), 1).await {
+        match bob_group.add_member(charles_name.clone(), 1).await {
             Ok(_) => panic!(
                 "this should fail, because role 1 is owner, has too many permissions, that bob can't give to charles"
             ),
             Err(err) => log::info!("{}", err),
         }
 
-        bob_group.add_member("charles".into(), 2).await.unwrap();
+        bob_group.add_member(charles_name.clone(), 2).await.unwrap();
 
         match bob_group
             .update_channel(2, false, "manager-message-only".into(), 1, 0)
@@ -610,7 +616,7 @@ mod tests {
         match bob_group
             .update_users(
                 [UpdateUserProposal {
-                    username: "bob".into(),
+                    username: bob_name.clone(),
                     role_id: 1,
                 }]
                 .into_iter(),
@@ -642,8 +648,8 @@ mod tests {
             Err(err) => log::info!("{:?}", err),
         };
 
-        add_member_server("alice", alice_address, &alice_group).await;
-        sync_groups(alice_address, "alice", &alice_group).await;
+        add_member_server(&alice_name, alice_address, &alice_group).await;
+        sync_groups(alice_address, &alice_name, &alice_group).await;
 
         alice_group
             .update_roles(
@@ -661,10 +667,10 @@ mod tests {
             .await
             .unwrap();
 
-        add_member_server("bob", bob_address, &bob_group).await;
-        add_member_server("alice", alice_address, &alice_group).await;
+        add_member_server(&bob_name, bob_address, &bob_group).await;
+        add_member_server(&alice_name, alice_address, &alice_group).await;
 
-        sync_groups(bob_address, "bob", &bob_group).await;
+        sync_groups(bob_address, &bob_name, &bob_group).await;
 
         log::info!("bob extension: ");
         print_extension(&bob_group).await;
@@ -712,7 +718,7 @@ mod tests {
                     get_base_url(),
                     charles_address
                 ))
-                .bearer_auth("charles")
+                .bearer_auth(&charles_name)
                 .send()
                 .await
                 .unwrap();
@@ -728,7 +734,7 @@ mod tests {
                 .unwrap()
         };
 
-        match charles_group.add_member("dave".into(), 0).await {
+        match charles_group.add_member(dave_name.clone(), 0).await {
             Ok(_) => {
                 panic!("charles should not be able to add members without ManageMember permission")
             }
@@ -757,7 +763,7 @@ mod tests {
         match charles_group
             .update_users(
                 [UpdateUserProposal {
-                    username: "charles".into(),
+                    username: charles_name.clone(),
                     role_id: 1,
                 }]
                 .into_iter(),
@@ -768,16 +774,16 @@ mod tests {
             Err(err) => log::error!("{:?}", err),
         };
 
-        add_member_server("charles", charles_address, &charles_group).await;
-        sync_groups(charles_address, "charles", &charles_group).await;
+        add_member_server(&charles_name, charles_address, &charles_group).await;
+        sync_groups(charles_address, &charles_name, &charles_group).await;
 
         charles_group
             .update_channel(3, false, "charles-channel".into(), 1, 0)
             .await
             .unwrap();
 
-        add_member_server("alice", alice_address, &alice_group).await;
-        sync_groups(alice_address, "alice", &alice_group).await;
+        add_member_server(&alice_name, alice_address, &alice_group).await;
+        sync_groups(alice_address, &alice_name, &alice_group).await;
 
         alice_group
             .update_roles(
@@ -794,12 +800,12 @@ mod tests {
             .await
             .unwrap();
 
-        add_member_server("alice", alice_address, &alice_group).await;
-        sync_groups(alice_address, "alice", &alice_group).await;
-        add_member_server("bob", bob_address, &bob_group).await;
-        sync_groups(bob_address, "bob", &bob_group).await;
-        add_member_server("charles", charles_address, &charles_group).await;
-        sync_groups(charles_address, "charles", &charles_group).await;
+        add_member_server(&alice_name, alice_address, &alice_group).await;
+        sync_groups(alice_address, &alice_name, &alice_group).await;
+        add_member_server(&bob_name, bob_address, &bob_group).await;
+        sync_groups(bob_address, &bob_name, &bob_group).await;
+        add_member_server(&charles_name, charles_address, &charles_group).await;
+        sync_groups(charles_address, &charles_name, &charles_group).await;
 
         match charles_group
             .update_channel(4, false, "fail-channel".into(), 1, 0)
@@ -814,7 +820,7 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(5)).await;
 
         let (bob, bob_address, bob_group) = {
-            let (bob, bob_address) = new_test_user("bob", 1, Some(bob_identity)).await;
+            let (bob, bob_address) = new_test_user(&bob_name, 1, Some(bob_identity)).await;
 
             bob_group.save().await.unwrap();
 
@@ -829,8 +835,8 @@ mod tests {
             (bob, bob_address, group)
         };
 
-        add_member_server("bob", bob_address, &bob_group).await;
-        sync_groups(bob_address, "bob", &bob_group).await;
+        add_member_server(&bob_name, bob_address, &bob_group).await;
+        sync_groups(bob_address, &bob_name, &bob_group).await;
 
         bob_group.update_leaf(&bob.get_identity()).await.unwrap();
 

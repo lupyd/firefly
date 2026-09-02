@@ -58,3 +58,11 @@ pnpm dlx tsx client.ts
 2. **Keystore Initialization**: The client opens/creates `./alice-store.db` to securely persist cryptographic ratchet state and identity keys.
 3. **Network Connection**: Connects to the Firefly MLS WebSocket server and runs `checkSetup()` to synchronize group ratchet epochs.
 4. **Event Dispatching**: Decodes incoming encrypted protobuf messages and routes commands to your handler functions.
+
+---
+
+## Next Steps
+
+- **[Client SDK Guide](../client/js-client/)**: Explore complete client features and API configuration.
+- **[Chatbot Framework](../bot/framework/)**: Build rich command handlers and context replies.
+- **[Web Embedding](../embedding/web-embedding/)**: Embed Firefly in your frontend applications.

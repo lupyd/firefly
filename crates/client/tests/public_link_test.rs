@@ -66,13 +66,17 @@ async fn test_public_link_flow() {
     };
 
     let test_run_id = rand::random::<u32>();
+    let alice_name = format!("alice_lnk_{}", test_run_id);
+    let bob_name = format!("bob_lnk_{}", test_run_id);
+    let charlie_name = format!("charlie_lnk_{}", test_run_id);
+    let dave_name = format!("dave_lnk_{}", test_run_id);
 
     // Alice Setup
     let (alice_msg_tx, _alice_msg_rx) = mpsc::channel(100);
     let (alice_gmsg_tx, mut alice_gmsg_rx) = mpsc::channel(100);
     let alice_callbacks = TestCallbacks {
-        name: "alice".into(),
-        token: "alice".into(),
+        name: alice_name.clone(),
+        token: alice_name.clone(),
         message_tx: alice_msg_tx,
         group_message_tx: alice_gmsg_tx,
     };
@@ -104,8 +108,8 @@ async fn test_public_link_flow() {
     let (bob_msg_tx, _bob_msg_rx) = mpsc::channel(100);
     let (bob_gmsg_tx, mut bob_gmsg_rx) = mpsc::channel(100);
     let bob_callbacks = TestCallbacks {
-        name: "bob".into(),
-        token: "bob".into(),
+        name: bob_name.clone(),
+        token: bob_name.clone(),
         message_tx: bob_msg_tx,
         group_message_tx: bob_gmsg_tx,
     };
@@ -235,8 +239,8 @@ async fn test_public_link_flow() {
     let (charlie_msg_tx, _charlie_msg_rx) = mpsc::channel(100);
     let (charlie_gmsg_tx, mut charlie_gmsg_rx) = mpsc::channel(100);
     let charlie_callbacks = TestCallbacks {
-        name: "charlie".into(),
-        token: "charlie".into(),
+        name: charlie_name.clone(),
+        token: charlie_name.clone(),
         message_tx: charlie_msg_tx,
         group_message_tx: charlie_gmsg_tx,
     };
@@ -272,8 +276,8 @@ async fn test_public_link_flow() {
     let (dave_msg_tx, _dave_msg_rx) = mpsc::channel(100);
     let (dave_gmsg_tx, mut dave_gmsg_rx) = mpsc::channel(100);
     let dave_callbacks = TestCallbacks {
-        name: "dave".into(),
-        token: "dave".into(),
+        name: dave_name.clone(),
+        token: dave_name.clone(),
         message_tx: dave_msg_tx,
         group_message_tx: dave_gmsg_tx,
     };

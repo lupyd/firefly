@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use sqlx::{Executor, sqlite::SqlitePoolOptions};
+use std::str::FromStr;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
 pub mod address;
 pub mod auth;
@@ -13,12 +14,15 @@ pub mod messages;
 pub mod stores;
 
 pub async fn setup_pool(url: &str, max_connections: u32) -> Result<sqlx::SqlitePool, sqlx::Error> {
+    let opts = SqliteConnectOptions::from_str(url)?
+        .journal_mode(SqliteJournalMode::Wal)
+        .foreign_keys(true)
+        .busy_timeout(std::time::Duration::from_secs(10));
+
     let pool = SqlitePoolOptions::new()
         .max_connections(max_connections)
-        .connect(url)
+        .connect_with(opts)
         .await?;
-    pool.execute("PRAGMA journal_mode=WAL").await?;
-    pool.execute("PRAGMA foreign_keys=ON").await?;
     Ok(pool)
 }
 

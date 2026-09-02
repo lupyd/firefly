@@ -85,3 +85,11 @@ async function run() {
 
 run().catch(console.error);
 ```
+
+---
+
+## Next Steps
+
+- **[JavaScript / TypeScript Client](./js-client/)**: Use the high-level JS client wrapper.
+- **[Callbacks & Event Hooks Reference](../reference/callbacks/)**: In-depth callback types and payloads.
+- **[Protocol Buffer Wire Format](../reference/protobufs/)**: Message payload wire definitions.

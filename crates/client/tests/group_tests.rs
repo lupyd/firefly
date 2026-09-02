@@ -68,13 +68,15 @@ async fn test_client_group_flow() {
     };
 
     let test_run_id = rand::random::<u32>();
+    let alice_name = format!("alice_grp_{}", test_run_id);
+    let bob_name = format!("bob_grp_{}", test_run_id);
 
     // Alice Setup
     let (alice_msg_tx, _alice_msg_rx) = mpsc::channel(100);
     let (alice_gmsg_tx, mut alice_gmsg_rx) = mpsc::channel(100);
     let alice_callbacks = TestCallbacks {
-        name: "alice".into(),
-        token: "alice".into(),
+        name: alice_name.clone(),
+        token: alice_name.clone(),
         message_tx: alice_msg_tx,
         group_message_tx: alice_gmsg_tx,
     };
@@ -111,8 +113,8 @@ async fn test_client_group_flow() {
     let (bob_msg_tx, _bob_msg_rx) = mpsc::channel(100);
     let (bob_gmsg_tx, mut bob_gmsg_rx) = mpsc::channel(100);
     let bob_callbacks = TestCallbacks {
-        name: "bob".into(),
-        token: "bob".into(),
+        name: bob_name.clone(),
+        token: bob_name.clone(),
         message_tx: bob_msg_tx,
         group_message_tx: bob_gmsg_tx,
     };
@@ -158,7 +160,7 @@ async fn test_client_group_flow() {
     // Alice adds Bob
     println!("Alice adding Bob...");
     alice_client
-        .add_group_member(group_id, "bob".into(), 0)
+        .add_group_member(group_id, bob_name.clone(), 0)
         .await
         .expect("Alice failed to add Bob");
 

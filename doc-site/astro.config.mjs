@@ -3,7 +3,7 @@ import starlight from '@astrojs/starlight';
 
 // https://astro.build/config
 export default defineConfig({
-  site: 'https://firefly.lupyd.com',
+  site: 'https://lupyd.github.io/firefly',
   outDir: '../docs',
   integrations: [
     starlight({

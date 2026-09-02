@@ -47,3 +47,11 @@ The underlying `FireflyClientNode` supports event callbacks passed at initializa
   "created_at": 1725200000000
 }
 ```
+
+---
+
+## Next Steps
+
+- **[FireflyClient & FireflyBot API](./api-reference/)**: Methods and options reference.
+- **[Protocol Buffer Wire Format](./protobufs/)**: Wire message protobuf definitions.
+- **[Node.js Native FFI Client](../../client/node-client/)**: Native callback implementations.

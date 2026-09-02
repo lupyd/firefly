@@ -72,3 +72,11 @@ For local testing and offline development without connecting to live servers:
    export FIREFLY_BASE_URL=http://127.0.0.1:30000
    export FIREFLY_WS_URL=ws://127.0.0.1:30000/
    ```
+
+---
+
+## Next Steps
+
+- **[Quickstart Guide](./quickstart/)**: Send your first encrypted message.
+- **[JavaScript / TypeScript Client](../client/js-client/)**: Configure and start `FireflyClient`.
+- **[Chatbot Framework](../bot/framework/)**: Build custom bot commands.
