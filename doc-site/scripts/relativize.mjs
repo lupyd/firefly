@@ -27,17 +27,20 @@ function relativizeHtml(filePath, content) {
     if (target.startsWith('/')) return match;
     
     if (target === '') {
-      return `${attr}="${prefix}/index.html"`;
+      return `${attr}="${prefix}/"`;
     }
     
-    // If target is a directory path ending with / or without extension
-    let resolved = `${prefix}/${target}`;
-    if (target.endsWith('/')) {
-      resolved = `${prefix}/${target}index.html`;
-    } else if (!path.extname(target) && !target.includes('#') && !target.includes('?')) {
-      resolved = `${prefix}/${target}/index.html`;
+    const [pathPart, ...suffixParts] = target.split(/([?#].*)/);
+    const suffix = suffixParts.join('');
+
+    let resolvedPath = `${prefix}/${pathPart}`;
+    if (!path.extname(pathPart)) {
+      if (!resolvedPath.endsWith('/')) {
+        resolvedPath += '/';
+      }
     }
-    return `${attr}="${resolved}"`;
+    
+    return `${attr}="${resolvedPath}${suffix}"`;
   });
 
   // Also replace canonical / sitemap root links if needed

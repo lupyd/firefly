@@ -5,6 +5,9 @@ import starlight from '@astrojs/starlight';
 export default defineConfig({
   site: 'https://lupyd.github.io/firefly',
   outDir: '../docs',
+  build: {
+    assets: "assets"
+  },
   integrations: [
     starlight({
       title: 'Firefly MLS',
