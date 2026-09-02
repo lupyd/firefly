@@ -289,17 +289,20 @@ impl MlsRules for FireflyMlsRules {
                                 .into());
                             }
 
-                            // A member with ManageMember can remove anyone EXCEPT the owner (owner role is always 1)
+                            // A member cannot remove someone who has permissions that the remover does not have
                             let target_role_id = current_extension
                                 .get_role_of_user(&auth_token.username)
                                 .unwrap_or_default();
 
-                            if target_role_id == 1 {
-                                return Err(format!(
-                                    "rejected remove proposal, cannot remove the group owner {}",
-                                    auth_token.username
-                                )
-                                .into());
+                            if let Some(target_permissions) = current_extension.get_permissions_from_role_id(target_role_id) {
+                                if !has_permission(sender_permissions, target_permissions) {
+                                    return Err(format!(
+                                        "rejected remove proposal, remover {} does not have permissions to remove {}",
+                                        sender_username,
+                                        auth_token.username
+                                    )
+                                    .into());
+                                }
                             }
                         }
                     }
@@ -444,7 +447,7 @@ fn handle_custom_proposal(
     if proposal_type == UpdateUserProposal::proposal_type() {
         let update_user = UpdateUserProposal::from_custom_proposal(proposal)?;
 
-        if has_permission(sender_permissions, UserPermission::ManageMember as u32) {
+        if has_permission(sender_permissions, UserPermission::ManageRole as u32) {
             if update_user.role_id != 0 {
                 let Some(permissions) =
                     current_extension.get_permissions_from_role_id(update_user.role_id)
@@ -455,6 +458,15 @@ fn handle_custom_proposal(
                 // member can only give any role that has subset of permissions of themselves to others
                 if !has_permission(sender_permissions, permissions) {
                     return Err(anyhow::anyhow!("not enough permissions"));
+                }
+
+                // member cannot change the role of someone whose current role has permissions the sender lacks
+                if let Some(target_current_role) = current_extension.get_role_of_user(&update_user.username) {
+                    if let Some(target_permissions) = current_extension.get_permissions_from_role_id(target_current_role) {
+                        if !has_permission(sender_permissions, target_permissions) {
+                            return Err(anyhow::anyhow!("not enough permissions to modify target user's role"));
+                        }
+                    }
                 }
 
                 current_extension
@@ -469,7 +481,7 @@ fn handle_custom_proposal(
                 return Ok(false);
             }
         } else {
-            return Err(anyhow::anyhow!("not enough permissions"));
+            return Err(anyhow::anyhow!("ManageRole permission required to update member roles"));
         }
     } else if proposal_type == UpdateRoleProposal::proposal_type() {
         let update_role_proposal = UpdateRoleProposal::from_custom_proposal(proposal)?;
