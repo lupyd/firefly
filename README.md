@@ -65,4 +65,4 @@ If `FIREFLY_BASE_URL` is not specified, server integration tests skip gracefully
 
 ## License
 
-Apache-2.0 / MIT
+MIT
