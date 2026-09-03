@@ -2014,7 +2014,11 @@ impl FireflyWsClient {
             let address = firefly::Address {
                 id: identity.id as u64,
                 username: get_claims_from_token(&token)?.uname.into(),
-                deviceId: identity.device_id as u32,
+                deviceId: if identity.id == 0 {
+                    0
+                } else {
+                    identity.device_id as u32
+                },
                 fcmToken: fcm_token.into(),
             };
 
@@ -2044,10 +2048,18 @@ impl FireflyWsClient {
             self.addressId
                 .store(address.id, std::sync::atomic::Ordering::Relaxed);
 
+            let assigned_device_id = u8::try_from(address.deviceId)
+                .context("server returned a device ID outside the supported range")?;
+            DeviceId::new(assigned_device_id)?;
+
             self.key_stores
                 .store()
                 .identity_store
-                .update_id_for_keypair(address.id as i64, &address.username)
+                .update_registration_for_keypair(
+                    address.id as i64,
+                    &address.username,
+                    assigned_device_id,
+                )
                 .await?;
 
             self.update_pre_key_bundles(&token).await?;

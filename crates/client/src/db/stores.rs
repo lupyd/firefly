@@ -299,6 +299,34 @@ impl IdentityDb {
         Ok(Self { pool })
     }
 
+    pub async fn update_registration_for_keypair(
+        &self,
+        id: i64,
+        username: &str,
+        device_id: u8,
+    ) -> anyhow::Result<()> {
+        log::info!(
+            "store update: identity_keypair id={} username={} device_id={}",
+            id,
+            username,
+            device_id
+        );
+        let mut db = self.pool.acquire().await?;
+        sqlx::query("UPDATE identity_keypair SET id = ?, username = ?, device_id = ?")
+            .bind(id)
+            .bind(username)
+            .bind(device_id)
+            .execute(&mut *db)
+            .await?;
+
+        log::info!("store delete: identity_keypair id!={}", id);
+        sqlx::query("DELETE FROM identity_keypair WHERE id <> ?")
+            .bind(id)
+            .execute(&mut *db)
+            .await?;
+        Ok(())
+    }
+
     pub async fn update_id_for_keypair(&self, id: i64, username: &str) -> anyhow::Result<()> {
         log::info!(
             "store update: identity_keypair id={} username={}",
