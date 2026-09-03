@@ -226,6 +226,38 @@ impl SelfGroupKeyPackageStore {
 
         Ok(key_package)
     }
+
+    pub async fn delete(&self, id: i32) -> anyhow::Result<()> {
+        log::info!("store delete: self_group_key_package id={}", id);
+        sqlx::query(
+            r#"
+                DELETE FROM self_group_key_packages
+                WHERE id = ?
+                "#,
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn delete_many(&self, ids: &[i32]) -> anyhow::Result<()> {
+        for chunk in ids.chunks(50) {
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let query = format!(
+                "DELETE FROM self_group_key_packages WHERE id IN ({})",
+                placeholders
+            );
+            let mut q = sqlx::query(&query);
+            for id in chunk {
+                q = q.bind(id);
+            }
+            q.execute(&self.pool).await?;
+        }
+
+        Ok(())
+    }
 }
 
 pub struct GroupKeyPackageStore {
@@ -245,6 +277,21 @@ impl GroupKeyPackageStore {
         .await?;
 
         Ok(Self { pool })
+    }
+
+    pub async fn contains(&self, id: &[u8]) -> bool {
+        sqlx::query(
+            r#"
+                SELECT 1 FROM group_key_packages
+                WHERE id = ?
+                "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
     }
 }
 

@@ -28,7 +28,7 @@ use crate::{
         conversations::ConversationSettings,
         ffi_stores::FfiKeyStores,
         group_messages::GroupMessagesStore,
-        group_stores::{GroupInfo, GroupInfoStore, SelfGroupKeyPackageStore},
+        group_stores::{GroupInfo, GroupInfoStore, GroupKeyPackageStore, SelfGroupKeyPackageStore},
         keyvalue::{KEY_FCM_TOKEN, KEY_LAST_RECEIVED_MESSAGE_ID, KeyValueStore},
         messages::UserMessage,
         setup_pool_from_path,
@@ -216,6 +216,7 @@ pub struct FireflyWsClient {
     firefly_mls_client: tokio::sync::OnceCell<Arc<FfiMlsClient>>,
     group_info_store: GroupInfoStore,
     self_group_key_packages_store: SelfGroupKeyPackageStore,
+    group_key_packages_store: GroupKeyPackageStore,
     fully_initialized: AtomicBool,
     pool: SqlitePool,
     next_request_id: AtomicU32,
@@ -237,6 +238,7 @@ impl FireflyWsClient {
 
         let groups_store = GroupMessagesStore::new(pool.clone()).await?;
         let self_group_key_packages_store = SelfGroupKeyPackageStore::new(pool.clone()).await?;
+        let group_key_packages_store = GroupKeyPackageStore::new(pool.clone()).await?;
 
         let last_connection_established_timestamp = get_current_timestamp_millis_since_epoch();
 
@@ -260,6 +262,7 @@ impl FireflyWsClient {
             addressId: Default::default(),
             group_messages_store: groups_store,
             self_group_key_packages_store,
+            group_key_packages_store,
             fully_initialized: AtomicBool::new(false),
             firefly_mls_client: Default::default(),
             group_info_store,
@@ -1312,14 +1315,26 @@ impl FireflyWsClient {
                     continue;
                 } else {
                     let message = MlsMessage::from_bytes(&package.package).ok();
-                    if !message
+                    let valid_identity = message
+                        .as_ref()
                         .and_then(|x| {
                             x.as_key_package().and_then(|x| {
                                 Some(x.signing_identity() == &current_signing_identity)
                             })
                         })
-                        .unwrap_or_default()
-                    {
+                        .unwrap_or_default();
+                    if !valid_identity {
+                        ids_to_delete.push(id);
+                        continue;
+                    }
+
+                    use sha2::{Digest, Sha256};
+                    let kp_hash = Sha256::digest(&package.package);
+                    if !self.group_key_packages_store.contains(kp_hash.as_slice()).await {
+                        log::warn!(
+                            "Key package id={} is missing private key in local storage, marking for deletion",
+                            id
+                        );
                         ids_to_delete.push(id);
                         continue;
                     }
@@ -1346,6 +1361,7 @@ impl FireflyWsClient {
                 ));
             }
 
+            self.self_group_key_packages_store.delete_many(&ids_to_delete).await?;
             log::info!("deleted key packages: {:?}", ids_to_delete);
         }
 
@@ -1366,9 +1382,6 @@ impl FireflyWsClient {
                     .generate_key_package()
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?;
-                self.self_group_key_packages_store
-                    .set(id, &key_package)
-                    .await?;
                 self.self_group_key_packages_store
                     .set(id, &key_package)
                     .await?;
@@ -1936,12 +1949,15 @@ impl FireflyWsClient {
             self.firefly_base_url, groupId, addressId
         );
 
-        let last_message_seen = self
+        let mut last_message_seen = self
             .group_messages_store
             .get_last_message_of_group(groupId)
             .await
             .map(|last_message| last_message.id)
             .unwrap_or(0);
+        if last_message_seen == 0 {
+            last_message_seen = invite.commitId;
+        }
         let update = firefly::GroupMemberUpdate {
             group_id: groupId,
             last_epoch: group.epoch().await as u32,
@@ -3000,6 +3016,24 @@ async fn join_group_internal(
         group_message_store
             .update_cursor(invite.commitId, group_id, group.epoch().await as u32)
             .await?;
+    }
+
+    let member_url = format!(
+        "{}/group/member?groupId={}&address={}",
+        firefly_base_url, group_id, _address_id
+    );
+    let update = firefly::GroupMemberUpdate {
+        group_id,
+        last_epoch: group.epoch().await as u32,
+        last_message_seen: invite.commitId,
+    };
+    if let Ok(body) = serialize_proto(&update) {
+        let _ = HTTP_CLIENT
+            .post(member_url)
+            .bearer_auth(token)
+            .body(body)
+            .send()
+            .await;
     }
 
     callbacks.on_group_joined(group_id).await;
