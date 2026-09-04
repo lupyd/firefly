@@ -3,7 +3,6 @@ use firefly_client::callbacks::FireflyWsClientCallback;
 use firefly_client::db::{group_messages::GroupMessage, messages::UserMessage};
 use firefly_client::websocket::{ConnectionState, FfiFireflyWsClient};
 use firefly_protos::firefly;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -33,7 +32,14 @@ impl FireflyWsClientCallback for TestCallbacks {
     }
 }
 
+fn cleanup_dir(dir: &str) {
+    if let Err(e) = std::fs::remove_dir_all(dir) {
+        log::warn!("Failed to clean up test directory {}: {}", dir, e);
+    }
+}
+
 async fn setup_server() -> Option<(String, String)> {
+    let _ = std::fs::create_dir_all("/tmp/firefly");
     dotenv::from_filename(".env.test").ok();
     dotenv::dotenv().ok();
     if let Ok(base_url) = std::env::var("FIREFLY_BASE_URL") {
@@ -68,6 +74,8 @@ async fn test_offline_group_operations() {
     };
 
     let test_run_id = rand::random::<u32>();
+    let test_dir = format!("/tmp/firefly/off_{}", test_run_id);
+    let _ = std::fs::create_dir_all(&test_dir);
     let alice_name = format!("alice_off_{}", test_run_id);
     let bob_name = format!("bob_off_{}", test_run_id);
 
@@ -81,8 +89,7 @@ async fn test_offline_group_operations() {
         group_message_tx: alice_gmsg_tx,
     };
 
-    let alice_db = format!("/tmp/offline_alice_{}.db", test_run_id);
-    let _ = std::fs::remove_file(&alice_db);
+    let alice_db = format!("{}/alice.db", test_dir);
 
     let alice_client = FfiFireflyWsClient::create(
         base_url.clone(),
@@ -111,8 +118,7 @@ async fn test_offline_group_operations() {
         group_message_tx: bob_gmsg_tx,
     };
 
-    let bob_db = format!("/tmp/offline_bob_{}.db", test_run_id);
-    let _ = std::fs::remove_file(&bob_db);
+    let bob_db = format!("{}/bob.db", test_dir);
 
     let bob_client = FfiFireflyWsClient::create(
         base_url.clone(),
@@ -245,6 +251,5 @@ async fn test_offline_group_operations() {
 
     // Cleanup
     let _ = alice_client.dispose().await;
-    let _ = std::fs::remove_file(&alice_db);
-    let _ = std::fs::remove_file(&bob_db);
+    cleanup_dir(&test_dir);
 }

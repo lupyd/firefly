@@ -308,6 +308,9 @@ impl FfiMlsGroup {
         let result = self.group.process(&message).await?;
         Ok(match result {
             firefly_core::FireflyMlsReceivedMessage::Message(msg) => {
+                if let Err(err) = self.group.save().await {
+                    log::warn!("Failed to save group state after process message: {:?}", err);
+                }
                 FireflyMlsReceivedMessage::Message(EncryptedGroupMessage {
                     sender: msg.sender,
                     message: msg.message,

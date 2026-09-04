@@ -33,7 +33,14 @@ impl FireflyWsClientCallback for TestCallbacks {
     }
 }
 
+fn cleanup_dir(dir: &str) {
+    if let Err(e) = std::fs::remove_dir_all(dir) {
+        log::warn!("Failed to clean up test directory {}: {}", dir, e);
+    }
+}
+
 async fn setup_server() -> Option<(String, String)> {
+    let _ = std::fs::create_dir_all("/tmp/firefly");
     dotenv::from_filename(".env.test").ok();
     dotenv::dotenv().ok();
     if let Ok(base_url) = std::env::var("FIREFLY_BASE_URL") {
@@ -68,6 +75,8 @@ async fn test_remove_readd_member() {
     };
 
     let test_run_id = rand::random::<u32>();
+    let test_dir = format!("/tmp/firefly/remreadd_{}", test_run_id);
+    let _ = std::fs::create_dir_all(&test_dir);
     let alice_name = format!("alice_remreadd_{}", test_run_id);
     let bob_name = format!("bob_remreadd_{}", test_run_id);
 
@@ -81,8 +90,7 @@ async fn test_remove_readd_member() {
         group_message_tx: alice_gmsg_tx,
     };
 
-    let alice_db = format!("/tmp/alice_remreadd_{}.db", test_run_id);
-    let _ = std::fs::remove_file(&alice_db);
+    let alice_db = format!("{}/alice.db", test_dir);
 
     let alice_client = FireflyWsClient::create(
         base_url.clone(),
@@ -117,8 +125,7 @@ async fn test_remove_readd_member() {
         group_message_tx: bob_gmsg_tx,
     };
 
-    let bob_db = format!("/tmp/bob_remreadd_{}.db", test_run_id);
-    let _ = std::fs::remove_file(&bob_db);
+    let bob_db = format!("{}/bob.db", test_dir);
 
     let bob_client = FireflyWsClient::create(
         base_url.clone(),
@@ -259,6 +266,5 @@ async fn test_remove_readd_member() {
     // Cleanup
     let _ = alice_client.dispose().await;
     let _ = bob_client.dispose().await;
-    let _ = std::fs::remove_file(&alice_db);
-    let _ = std::fs::remove_file(&bob_db);
+    cleanup_dir(&test_dir);
 }

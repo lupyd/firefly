@@ -258,6 +258,17 @@ impl FireflyMlsClient {
         FireflyCredential::from_signing_identity(key_package.signing_identity())
     }
 
+    pub async fn key_package_reference(message: &[u8]) -> anyhow::Result<Vec<u8>> {
+        let message = MlsMessage::from_bytes(message)?;
+        let key_package = message.as_key_package().context("not a key package")?;
+        let crypto_provider = mls_rs_crypto_rustcrypto::RustCryptoProvider::default();
+        let cipher_suite = crypto_provider
+            .cipher_suite_provider(CIPHERSUITE)
+            .ok_or(anyhow::anyhow!("missing cipher_suite"))?;
+        let reference = key_package.to_reference(&cipher_suite).await?;
+        Ok(reference.to_vec())
+    }
+
     pub async fn join_group(
         &self,
         group_id: u64,

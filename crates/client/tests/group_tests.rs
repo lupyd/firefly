@@ -34,6 +34,7 @@ impl FireflyWsClientCallback for TestCallbacks {
 }
 
 async fn setup_server() -> Option<(String, String)> {
+    let _ = std::fs::create_dir_all("/tmp/firefly");
     dotenv::from_filename(".env.test").ok();
     dotenv::dotenv().ok();
     if let Ok(base_url) = std::env::var("FIREFLY_BASE_URL") {
@@ -47,6 +48,14 @@ async fn setup_server() -> Option<(String, String)> {
     } else {
         println!("Skipping integration test: FIREFLY_BASE_URL is not set.");
         None
+    }
+}
+
+fn cleanup_dir(dir: &str) {
+    if let Err(e) = std::fs::remove_dir_all(dir) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            log::warn!("Failed to cleanup test dir {}: {:?}", dir, e);
+        }
     }
 }
 
@@ -68,6 +77,9 @@ async fn test_client_group_flow() {
     };
 
     let test_run_id = rand::random::<u32>();
+    let test_dir = format!("/tmp/firefly/flow_{}", test_run_id);
+    let _ = std::fs::create_dir_all(&test_dir);
+
     let alice_name = format!("alice_grp_{}", test_run_id);
     let bob_name = format!("bob_grp_{}", test_run_id);
 
@@ -81,8 +93,7 @@ async fn test_client_group_flow() {
         group_message_tx: alice_gmsg_tx,
     };
 
-    let alice_db = format!("/tmp/alice_group_test_{}.db", test_run_id);
-    let _ = std::fs::remove_file(&alice_db);
+    let alice_db = format!("{}/alice.db", test_dir);
 
     let alice_client = FireflyWsClient::create(
         base_url.clone(),
@@ -111,7 +122,7 @@ async fn test_client_group_flow() {
 
     // Bob Setup
     let (bob_msg_tx, _bob_msg_rx) = mpsc::channel(100);
-    let (bob_gmsg_tx, mut bob_gmsg_rx) = mpsc::channel(100);
+    let (bob_gmsg_tx, _bob_gmsg_rx) = mpsc::channel(100);
     let bob_callbacks = TestCallbacks {
         name: bob_name.clone(),
         token: bob_name.clone(),
@@ -119,8 +130,7 @@ async fn test_client_group_flow() {
         group_message_tx: bob_gmsg_tx,
     };
 
-    let bob_db = format!("/tmp/bob_group_test_{}.db", test_run_id);
-    let _ = std::fs::remove_file(&bob_db);
+    let bob_db = format!("{}/bob.db", test_dir);
 
     let bob_client = FireflyWsClient::create(
         base_url.clone(),
@@ -218,8 +228,7 @@ async fn test_client_group_flow() {
     // Cleanup
     let _ = alice_client.dispose().await;
     let _ = bob_client.dispose().await;
-    let _ = std::fs::remove_file(&alice_db);
-    let _ = std::fs::remove_file(&bob_db);
+    cleanup_dir(&test_dir);
 }
 
 #[tokio::test]
@@ -230,6 +239,9 @@ async fn test_key_package_exhaustion_and_restart_cleanup_with_real_client() {
     };
 
     let test_run_id = rand::random::<u32>();
+    let test_dir = format!("/tmp/firefly/clean_{}", test_run_id);
+    let _ = std::fs::create_dir_all(&test_dir);
+
     let alice_name = format!("alice_cl_{}", test_run_id);
     let bob_name = format!("bob_cl_{}", test_run_id);
 
@@ -243,8 +255,7 @@ async fn test_key_package_exhaustion_and_restart_cleanup_with_real_client() {
         group_message_tx: alice_gmsg_tx,
     };
 
-    let alice_db = format!("/tmp/alice_clean_{}.db", test_run_id);
-    let _ = std::fs::remove_file(&alice_db);
+    let alice_db = format!("{}/alice.db", test_dir);
 
     let alice_client = FireflyWsClient::create(
         base_url.clone(),
@@ -277,8 +288,7 @@ async fn test_key_package_exhaustion_and_restart_cleanup_with_real_client() {
         group_message_tx: bob_gmsg_tx,
     };
 
-    let bob_db = format!("/tmp/bob_clean_{}.db", test_run_id);
-    let _ = std::fs::remove_file(&bob_db);
+    let bob_db = format!("{}/bob.db", test_dir);
 
     let bob_client = FireflyWsClient::create(
         base_url.clone(),
@@ -437,8 +447,7 @@ async fn test_key_package_exhaustion_and_restart_cleanup_with_real_client() {
     // Cleanup
     alice_client2.dispose().await;
     bob_client.dispose().await;
-    let _ = std::fs::remove_file(&alice_db);
-    let _ = std::fs::remove_file(&bob_db);
+    cleanup_dir(&test_dir);
 }
 
 #[tokio::test]
@@ -449,6 +458,8 @@ async fn test_late_joiner_does_not_receive_prior_messages_and_reconnection_sync(
     };
 
     let test_run_id = rand::random::<u32>();
+    let test_dir = format!("/tmp/firefly/late_{}", test_run_id);
+    let _ = std::fs::create_dir_all(&test_dir);
     let alice_name = format!("alice_late_{}", test_run_id);
     let bob_name = format!("bob_late_{}", test_run_id);
     let charlie_name = format!("charlie_late_{}", test_run_id);
@@ -462,8 +473,7 @@ async fn test_late_joiner_does_not_receive_prior_messages_and_reconnection_sync(
         message_tx: alice_msg_tx,
         group_message_tx: alice_gmsg_tx,
     };
-    let alice_db = format!("/tmp/alice_late_{}.db", test_run_id);
-    let _ = std::fs::remove_file(&alice_db);
+    let alice_db = format!("{}/alice.db", test_dir);
 
     let alice_client = FireflyWsClient::create(
         base_url.clone(),
@@ -491,8 +501,7 @@ async fn test_late_joiner_does_not_receive_prior_messages_and_reconnection_sync(
         message_tx: bob_msg_tx,
         group_message_tx: bob_gmsg_tx,
     };
-    let bob_db = format!("/tmp/bob_late_{}.db", test_run_id);
-    let _ = std::fs::remove_file(&bob_db);
+    let bob_db = format!("{}/bob.db", test_dir);
 
     let bob_client = FireflyWsClient::create(
         base_url.clone(),
@@ -520,8 +529,7 @@ async fn test_late_joiner_does_not_receive_prior_messages_and_reconnection_sync(
         message_tx: charlie_msg_tx,
         group_message_tx: charlie_gmsg_tx,
     };
-    let charlie_db = format!("/tmp/charlie_late_{}.db", test_run_id);
-    let _ = std::fs::remove_file(&charlie_db);
+    let charlie_db = format!("{}/charlie.db", test_dir);
 
     let charlie_client = FireflyWsClient::create(
         base_url.clone(),
@@ -697,7 +705,5 @@ async fn test_late_joiner_does_not_receive_prior_messages_and_reconnection_sync(
     alice_client.dispose().await;
     bob_client.dispose().await;
     charlie_reconnected.dispose().await;
-    let _ = std::fs::remove_file(&alice_db);
-    let _ = std::fs::remove_file(&bob_db);
-    let _ = std::fs::remove_file(&charlie_db);
+    cleanup_dir(&test_dir);
 }

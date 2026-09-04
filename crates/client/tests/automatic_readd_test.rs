@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use firefly_client::callbacks::FireflyWsClientCallback;
 use firefly_client::db::{group_messages::GroupMessage, messages::UserMessage};
 use firefly_client::websocket::FireflyWsClient;
-use firefly_protos::{deserialize_proto, firefly};
+use firefly_protos::firefly;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -33,7 +33,14 @@ impl FireflyWsClientCallback for TestCallbacks {
     }
 }
 
+fn cleanup_dir(dir: &str) {
+    if let Err(e) = std::fs::remove_dir_all(dir) {
+        log::warn!("Failed to clean up test directory {}: {}", dir, e);
+    }
+}
+
 async fn setup_server() -> Option<(String, String)> {
+    let _ = std::fs::create_dir_all("/tmp/firefly");
     dotenv::from_filename(".env.test").ok();
     dotenv::dotenv().ok();
     if let Ok(base_url) = std::env::var("FIREFLY_BASE_URL") {
@@ -68,6 +75,8 @@ async fn test_automatic_readd() {
     };
 
     let test_run_id = rand::random::<u32>();
+    let test_dir = format!("/tmp/firefly/readd_{}", test_run_id);
+    let _ = std::fs::create_dir_all(&test_dir);
     let alice_name = format!("alice_readd_{}", test_run_id);
     let bob_name = format!("bob_readd_{}", test_run_id);
 
@@ -81,8 +90,7 @@ async fn test_automatic_readd() {
         group_message_tx: alice_gmsg_tx,
     };
 
-    let alice_db = format!("/tmp/alice_readd_{}.db", test_run_id);
-    let _ = std::fs::remove_file(&alice_db);
+    let alice_db = format!("{}/alice.db", test_dir);
 
     let alice_client = FireflyWsClient::create(
         base_url.clone(),
@@ -116,8 +124,7 @@ async fn test_automatic_readd() {
         group_message_tx: bob1_gmsg_tx,
     };
 
-    let bob1_db = format!("/tmp/bob1_readd_{}.db", test_run_id);
-    let _ = std::fs::remove_file(&bob1_db);
+    let bob1_db = format!("{}/bob1.db", test_dir);
 
     let bob1_client = FireflyWsClient::create(
         base_url.clone(),
@@ -161,7 +168,7 @@ async fn test_automatic_readd() {
 
     // Bob Device 2 Setup
     let (bob2_msg_tx, _bob2_msg_rx) = mpsc::channel(100);
-    let (bob2_gmsg_tx, mut bob2_gmsg_rx) = mpsc::channel(100);
+    let (bob2_gmsg_tx, _bob2_gmsg_rx) = mpsc::channel(100);
     let bob2_callbacks = TestCallbacks {
         name: bob_name.clone(),
         token: bob_name.clone(),
@@ -169,8 +176,7 @@ async fn test_automatic_readd() {
         group_message_tx: bob2_gmsg_tx,
     };
 
-    let bob2_db = format!("/tmp/bob2_readd_{}.db", test_run_id);
-    let _ = std::fs::remove_file(&bob2_db);
+    let bob2_db = format!("{}/bob2.db", test_dir);
 
     let bob2_client = FireflyWsClient::create(
         base_url.clone(),
@@ -236,7 +242,5 @@ async fn test_automatic_readd() {
     let _ = alice_client.dispose().await;
     let _ = bob1_client.dispose().await;
     let _ = bob2_client.dispose().await;
-    let _ = std::fs::remove_file(&alice_db);
-    let _ = std::fs::remove_file(&bob1_db);
-    let _ = std::fs::remove_file(&bob2_db);
+    cleanup_dir(&test_dir);
 }

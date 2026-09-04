@@ -1326,9 +1326,15 @@ impl FireflyWsClient {
                         continue;
                     }
 
-                    use sha2::{Digest, Sha256};
-                    let kp_hash = Sha256::digest(&package.package);
-                    if !self.group_key_packages_store.contains(kp_hash.as_slice()).await {
+                    let Ok(kp_ref) = firefly_core::FireflyMlsClient::key_package_reference(&package.package).await else {
+                        log::warn!(
+                            "Key package id={} could not be parsed for reference, marking for deletion",
+                            id
+                        );
+                        ids_to_delete.push(id);
+                        continue;
+                    };
+                    if !self.group_key_packages_store.contains(&kp_ref).await {
                         log::warn!(
                             "Key package id={} is missing private key in local storage, marking for deletion",
                             id
@@ -1842,6 +1848,10 @@ impl FireflyWsClient {
             .encrypt(payload.to_vec())
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
+
+        if let Err(err) = group.save().await {
+            log::warn!("Failed to save group state after encrypt: {:?}", err);
+        }
 
         let current_epoch = group.epoch().await as u32;
         let group_message = firefly::GroupMessage {
@@ -2662,6 +2672,14 @@ impl FireflyWsClient {
             .await;
 
         Ok(())
+    }
+
+    pub fn address_id(&self) -> u64 {
+        self.addressId.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn key_stores(&self) -> &Arc<crate::db::ffi_stores::FfiKeyStores> {
+        &self.key_stores
     }
 }
 

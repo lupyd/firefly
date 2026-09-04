@@ -33,7 +33,14 @@ impl FireflyWsClientCallback for TestCallbacks {
     }
 }
 
+fn cleanup_dir(dir: &str) {
+    if let Err(e) = std::fs::remove_dir_all(dir) {
+        log::warn!("Failed to clean up test directory {}: {}", dir, e);
+    }
+}
+
 async fn setup_server() -> Option<(String, String)> {
+    let _ = std::fs::create_dir_all("/tmp/firefly");
     dotenv::from_filename(".env.test").ok();
     dotenv::dotenv().ok();
     if let Ok(base_url) = std::env::var("FIREFLY_BASE_URL") {
@@ -68,6 +75,8 @@ async fn test_kick_member() {
     };
 
     let test_run_id = rand::random::<u32>();
+    let test_dir = format!("/tmp/firefly/kick_{}", test_run_id);
+    let _ = std::fs::create_dir_all(&test_dir);
 
     // Alice Setup
     let (alice_msg_tx, _alice_msg_rx) = mpsc::channel(100);
@@ -79,8 +88,7 @@ async fn test_kick_member() {
         group_message_tx: alice_gmsg_tx,
     };
 
-    let alice_db = format!("/tmp/alice_kick_{}.db", test_run_id);
-    let _ = std::fs::remove_file(&alice_db);
+    let alice_db = format!("{}/alice.db", test_dir);
 
     let alice_client = FireflyWsClient::create(
         base_url.clone(),
@@ -107,7 +115,7 @@ async fn test_kick_member() {
 
     // Bob Setup
     let (bob_msg_tx, _bob_msg_rx) = mpsc::channel(100);
-    let (bob_gmsg_tx, mut bob_gmsg_rx) = mpsc::channel(100);
+    let (bob_gmsg_tx, _bob_gmsg_rx) = mpsc::channel(100);
     let bob_callbacks = TestCallbacks {
         name: "bob".into(),
         token: "bob".into(),
@@ -115,8 +123,7 @@ async fn test_kick_member() {
         group_message_tx: bob_gmsg_tx,
     };
 
-    let bob_db = format!("/tmp/bob_kick_{}.db", test_run_id);
-    let _ = std::fs::remove_file(&bob_db);
+    let bob_db = format!("{}/bob.db", test_dir);
 
     let bob_client = FireflyWsClient::create(
         base_url.clone(),
@@ -151,8 +158,7 @@ async fn test_kick_member() {
         group_message_tx: charles_gmsg_tx,
     };
 
-    let charles_db = format!("/tmp/charles_kick_{}.db", test_run_id);
-    let _ = std::fs::remove_file(&charles_db);
+    let charles_db = format!("{}/charles.db", test_dir);
 
     let charles_client = FireflyWsClient::create(
         base_url.clone(),
@@ -340,7 +346,5 @@ async fn test_kick_member() {
     let _ = alice_client.dispose().await;
     let _ = bob_client.dispose().await;
     let _ = charles_client.dispose().await;
-    let _ = std::fs::remove_file(&alice_db);
-    let _ = std::fs::remove_file(&bob_db);
-    let _ = std::fs::remove_file(&charles_db);
+    cleanup_dir(&test_dir);
 }
