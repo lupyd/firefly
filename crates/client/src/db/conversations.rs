@@ -51,9 +51,9 @@ impl ConversationStore {
 
         if let Some(row) = row {
             let settings = row.try_get(0)?;
-            return Ok(Some(ConversationSettings::new(settings)));
+            Ok(Some(ConversationSettings::new(settings)))
         } else {
-            return Ok(None);
+            Ok(None)
         }
     }
 

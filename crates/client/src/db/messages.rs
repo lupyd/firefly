@@ -49,7 +49,7 @@ impl MessagesStore {
     pub async fn from_path(path: String) -> anyhow::Result<Self> {
         let pool = setup_pool_from_path(&path, 5).await?;
 
-        Ok(Self::new(pool).await?)
+        Self::new(pool).await
     }
 
     pub async fn get_last_messages_of(

@@ -50,14 +50,14 @@ pub struct FfiPreKeyBundle {
 impl From<firefly::PreKeyBundle<'_>> for FfiPreKeyBundle {
     fn from(bundle: firefly::PreKeyBundle<'_>) -> Self {
         Self {
-            registration_id: bundle.registrationId as u32,
+            registration_id: bundle.registrationId,
             device_id: bundle.deviceId as u8,
-            pre_key_id: bundle.preKeyId as u32,
+            pre_key_id: bundle.preKeyId,
             pre_key: bundle.prePublicKey.to_vec(),
-            signed_pre_key_id: bundle.signedPreKeyId as u32,
+            signed_pre_key_id: bundle.signedPreKeyId,
             signed_pre_key_public: bundle.signedPrePublicKey.to_vec(),
             signed_pre_key_signature: bundle.signedPreKeySignature.to_vec(),
-            kyber_pre_key_id: bundle.KEMPreKeyId as u32,
+            kyber_pre_key_id: bundle.KEMPreKeyId,
             kyber_pre_key_public: bundle.KEMPrePublicKey.to_vec(),
             kyber_pre_key_signature: bundle.KEMPreKeySignature.to_vec(),
             identity_key: bundle.identityPublicKey.to_vec(),
@@ -65,20 +65,20 @@ impl From<firefly::PreKeyBundle<'_>> for FfiPreKeyBundle {
     }
 }
 
-impl Into<firefly::PreKeyBundle<'static>> for FfiPreKeyBundle {
-    fn into(self) -> firefly::PreKeyBundle<'static> {
+impl From<FfiPreKeyBundle> for firefly::PreKeyBundle<'static> {
+    fn from(val: FfiPreKeyBundle) -> Self {
         firefly::PreKeyBundle {
-            registrationId: self.registration_id,
-            deviceId: self.device_id as u32,
-            preKeyId: self.pre_key_id,
-            prePublicKey: self.pre_key.into(),
-            signedPreKeyId: self.signed_pre_key_id,
-            signedPrePublicKey: self.signed_pre_key_public.into(),
-            signedPreKeySignature: self.signed_pre_key_signature.into(),
-            KEMPreKeyId: self.kyber_pre_key_id,
-            KEMPrePublicKey: self.kyber_pre_key_public.into(),
-            KEMPreKeySignature: self.kyber_pre_key_signature.into(),
-            identityPublicKey: self.identity_key.into(),
+            registrationId: val.registration_id,
+            deviceId: val.device_id as u32,
+            preKeyId: val.pre_key_id,
+            prePublicKey: val.pre_key.into(),
+            signedPreKeyId: val.signed_pre_key_id,
+            signedPrePublicKey: val.signed_pre_key_public.into(),
+            signedPreKeySignature: val.signed_pre_key_signature.into(),
+            KEMPreKeyId: val.kyber_pre_key_id,
+            KEMPrePublicKey: val.kyber_pre_key_public.into(),
+            KEMPreKeySignature: val.kyber_pre_key_signature.into(),
+            identityPublicKey: val.identity_key.into(),
         }
     }
 }

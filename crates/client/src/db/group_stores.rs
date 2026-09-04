@@ -59,8 +59,8 @@ impl GroupStateStore {
         let mut tx = self.pool.begin().await?;
 
         sqlx::query("INSERT OR REPLACE INTO group_states (id, state) VALUES (?, ?)")
-            .bind(&group_id)
-            .bind(&state_data)
+            .bind(group_id)
+            .bind(state_data)
             .execute(&mut *tx)
             .await?;
 
@@ -73,7 +73,7 @@ impl GroupStateStore {
             sqlx::query(
                 "INSERT OR REPLACE INTO group_epoch_states (id, epoch, state) VALUES (?, ?, ?)",
             )
-            .bind(&group_id)
+            .bind(group_id)
             .bind(epoch_id as i64)
             .bind(state)
             .execute(&mut *tx)
@@ -88,7 +88,7 @@ impl GroupStateStore {
             sqlx::query(
                 "INSERT OR REPLACE INTO group_epoch_states (id, epoch, state) VALUES (?, ?, ?)",
             )
-            .bind(&group_id)
+            .bind(group_id)
             .bind(epoch_id as i64)
             .bind(state)
             .execute(&mut *tx)
@@ -118,7 +118,7 @@ impl GroupStateStore {
     pub async fn get_max_epoch_id(&self, group_id: &[u8]) -> anyhow::Result<Option<u64>> {
         log::info!("store select: group_max_epoch id={}", hex::encode(group_id));
         let row = sqlx::query("SELECT MAX(epoch) FROM group_epoch_states WHERE id = ?")
-            .bind(&group_id)
+            .bind(group_id)
             .fetch_one(&self.pool)
             .await?;
 

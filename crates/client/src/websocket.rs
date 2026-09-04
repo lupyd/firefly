@@ -257,7 +257,7 @@ impl FireflyWsClient {
             request_timeout: Duration::from_millis(request_timeout_in_ms),
             connection: Default::default(),
             stop_reconnecting: AtomicBool::new(false),
-            key_value_store: key_value_store,
+            key_value_store,
             state: Default::default(),
             addressId: Default::default(),
             group_messages_store: groups_store,
@@ -750,17 +750,17 @@ impl FireflyWsClient {
         let message = firefly::UserMessage {
             id: get_current_timestamp_microseconds_since_epoch(),
             toId: addressId,
-            fromId: fromId,
+            fromId,
             text: cipher.cipher_text.into(),
             type_pb: cipher.ty as u32,
             settings,
             fromUsername: Default::default(),
             fromDeviceId: Default::default(),
 
-            hashValue: hashValue,
+            hashValue,
         };
 
-        return Ok(message);
+        Ok(message)
     }
 
     async fn create_conversation(
@@ -1051,12 +1051,12 @@ impl FireflyWsClient {
             log::info!("uploaded messages: {:?}", uploaded);
         }
 
-        return Ok(UserMessage {
+        Ok(UserMessage {
             id: get_current_timestamp_microseconds_since_epoch(),
             other: to.to_string(),
             message: payload.to_vec(),
             sent_by_other: false,
-        });
+        })
     }
 
     async fn get_and_process_all_pre_key_bundles_of_user(
@@ -1288,7 +1288,7 @@ impl FireflyWsClient {
             "{}/group/keyPackages?address_id={}&device_id={}",
             self.firefly_base_url, addressId, device_id
         );
-        let response = HTTP_CLIENT.get(url).bearer_auth(&token).send().await?;
+        let response = HTTP_CLIENT.get(url).bearer_auth(token).send().await?;
 
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
@@ -1318,9 +1318,7 @@ impl FireflyWsClient {
                     let valid_identity = message
                         .as_ref()
                         .and_then(|x| {
-                            x.as_key_package().and_then(|x| {
-                                Some(x.signing_identity() == &current_signing_identity)
-                            })
+                            x.as_key_package().map(|x| x.signing_identity() == &current_signing_identity)
                         })
                         .unwrap_or_default();
                     if !valid_identity {
@@ -1352,7 +1350,7 @@ impl FireflyWsClient {
             );
             write_url_comma_seperated(&mut url, ids_to_delete.iter())?;
 
-            let response = HTTP_CLIENT.delete(url).bearer_auth(&token).send().await?;
+            let response = HTTP_CLIENT.delete(url).bearer_auth(token).send().await?;
             if !response.status().is_success() {
                 return Err(anyhow::anyhow!(
                     "unexpected status [{}] {}",
@@ -1401,7 +1399,7 @@ impl FireflyWsClient {
             );
             let response = HTTP_CLIENT
                 .post(url)
-                .bearer_auth(&token)
+                .bearer_auth(token)
                 .body(body)
                 .send()
                 .await?;
@@ -1523,7 +1521,7 @@ impl FireflyWsClient {
     ) -> anyhow::Result<()> {
         let url = format!("{}/groups", self.firefly_base_url);
 
-        let response = HTTP_CLIENT.get(url).bearer_auth(&token).send().await?;
+        let response = HTTP_CLIENT.get(url).bearer_auth(token).send().await?;
 
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
@@ -1551,7 +1549,7 @@ impl FireflyWsClient {
             );
             write_url_comma_seperated(&mut url, groupIds_to_be_requested_to_add.iter())?;
 
-            let response = HTTP_CLIENT.post(url).bearer_auth(&token).send().await?;
+            let response = HTTP_CLIENT.post(url).bearer_auth(token).send().await?;
             if !response.status().is_success() {
                 return Err(anyhow::anyhow!(
                     "unexpected status [{}] {}",
@@ -1588,7 +1586,7 @@ impl FireflyWsClient {
             groups.len()
         );
 
-        let response = HTTP_CLIENT.get(&url).bearer_auth(&token).send().await?;
+        let response = HTTP_CLIENT.get(&url).bearer_auth(token).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1622,7 +1620,7 @@ impl FireflyWsClient {
                 request.address_id
             );
             match self
-                .re_add_member(token, &firefly_mls_client, &request, addressId)
+                .re_add_member(token, firefly_mls_client, &request, addressId)
                 .await
             {
                 Ok(_) => {
@@ -1696,7 +1694,7 @@ impl FireflyWsClient {
                         .await;
                     return Ok(());
                 }
-                return Err(err.into());
+                return Err(err);
             }
         };
 
@@ -1808,7 +1806,7 @@ impl FireflyWsClient {
             )
             .await?;
 
-        return Ok(self.group_info_store.get(group.group_id()).await?);
+        return self.group_info_store.get(group.group_id()).await;
     }
 
     pub fn is_initialized(&self) -> bool {
@@ -1961,11 +1959,11 @@ impl FireflyWsClient {
         let update = firefly::GroupMemberUpdate {
             group_id: groupId,
             last_epoch: group.epoch().await as u32,
-            last_message_seen: last_message_seen,
+            last_message_seen,
         };
         let response = HTTP_CLIENT
             .post(url)
-            .bearer_auth(&token)
+            .bearer_auth(token)
             .body(serialize_proto(&update)?)
             .send()
             .await?;
@@ -2090,7 +2088,7 @@ impl FireflyWsClient {
             "{}/user/preKeyBundles?id={}&onlyIds=true",
             self.firefly_base_url, addressId
         );
-        let response = HTTP_CLIENT.get(url).bearer_auth(&token).send().await?;
+        let response = HTTP_CLIENT.get(url).bearer_auth(token).send().await?;
 
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
@@ -2135,7 +2133,7 @@ impl FireflyWsClient {
             write_url_comma_seperated(&mut url, key_ids_to_delete.iter())?;
 
             log::info!("Deleting preKeyBundles via {}", url);
-            let response = HTTP_CLIENT.delete(&url).bearer_auth(&token).send().await?;
+            let response = HTTP_CLIENT.delete(&url).bearer_auth(token).send().await?;
 
             if response.status().is_success() {
                 log::info!("deleted preKeyBundles via {}", url);
@@ -2178,7 +2176,7 @@ impl FireflyWsClient {
             let url = format!("{}/user/preKeyBundles", self.firefly_base_url);
             let response = HTTP_CLIENT
                 .post(url)
-                .bearer_auth(&token)
+                .bearer_auth(token)
                 .body(serialize_proto(&bundles)?)
                 .send()
                 .await?;
@@ -2219,7 +2217,7 @@ impl FireflyWsClient {
 
             group_commit_syncs.updates.push(firefly::GroupMemberUpdate {
                 group_id: info.id,
-                last_message_seen: last_message_seen,
+                last_message_seen,
                 last_epoch: epoch as u32,
             });
         }
@@ -2270,8 +2268,8 @@ impl FireflyWsClient {
                 val
             }
             None => {
-                let val = self.key_value_store.get(KEY_FCM_TOKEN).await?;
-                val
+                
+                self.key_value_store.get(KEY_FCM_TOKEN).await?
             }
         };
 
@@ -2281,7 +2279,7 @@ impl FireflyWsClient {
     pub async fn get_conversations(&self, token: &str) -> anyhow::Result<Vec<FfiConversation>> {
         let url = format!("{}/user/conversations", self.firefly_base_url);
 
-        let claims = get_claims_from_token(&token)?;
+        let claims = get_claims_from_token(token)?;
 
         let response = HTTP_CLIENT.get(url).bearer_auth(token).send().await?;
 
@@ -2833,13 +2831,11 @@ async fn on_user_message(
 
                     if let Ok(inner_inner) =
                         deserialize_proto::<firefly::UserMessageInner>(&final_message)
-                    {
-                        if let firefly::mod_UserMessageInner::OneOfmessage::None =
+                        && let firefly::mod_UserMessageInner::OneOfmessage::None =
                             inner_inner.message
                         {
                             is_dummy = true;
                         }
-                    }
                 }
             }
             _ => {
@@ -2933,7 +2929,7 @@ async fn on_user_message(
 
                         match serialize_proto(&client_msg) {
                             Ok(payload) => {
-                                if let Err(e) = sender.send(Bytes::from(payload)).await {
+                                if let Err(e) = sender.send(payload).await {
                                     log::error!("failed to send dummy accept message: {}", e);
                                 } else {
                                     log::info!(
@@ -3386,7 +3382,7 @@ impl FfiFireflyWsClient {
 
     pub fn get_connection_state(&self) -> ConnectionState {
         let guard = self.inner.state.read().unwrap();
-        return guard.clone();
+        guard.clone()
     }
 
     pub fn is_initialized(&self) -> bool {

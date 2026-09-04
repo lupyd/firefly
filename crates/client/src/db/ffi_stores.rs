@@ -163,8 +163,8 @@ impl FfiKeyStores {
             pre_key_bundle,
             reply,
         })?;
-        let processed = receiver.await??;
-        Ok(processed)
+        receiver.await??;
+        Ok(())
     }
 
     pub async fn generate_prekey_bundle(&self) -> anyhow::Result<FfiPreKeyBundle> {

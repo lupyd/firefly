@@ -21,7 +21,7 @@ pub fn get_current_timestamp_seconds_since_epoch() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("TIME WENT BACKWARDS")
-        .as_secs() as u64
+        .as_secs()
 }
 
 pub fn get_current_timestamp_microseconds_since_epoch() -> u64 {

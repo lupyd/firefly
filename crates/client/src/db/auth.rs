@@ -23,9 +23,9 @@ pub fn get_claims_from_token(s: &str) -> anyhow::Result<TokenClaims> {
         .rsplit_once('.')
         .context("invalid token: missing '.'")?;
 
-    let payload = BASE64_URL_SAFE_NO_PAD.decode(&payload)?;
+    let payload = BASE64_URL_SAFE_NO_PAD.decode(payload)?;
 
     let claims = serde_json::from_slice::<TokenClaims>(&payload)?;
 
-    return Ok(claims);
+    Ok(claims)
 }

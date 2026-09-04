@@ -24,7 +24,7 @@ impl TeeLogger {
 
         let file = std::fs::OpenOptions::new()
             .create(true)
-            .write(true)
+            
             .append(true)
             .open(&path)?;
 

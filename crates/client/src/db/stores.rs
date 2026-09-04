@@ -38,7 +38,7 @@ impl PreKeyDb {
         let record: &[u8] = result
             .try_get(0)
             .map_err(|err| SignalProtocolError::FfiBindingError(err.to_string()))?;
-        return Ok(PreKeyRecord::deserialize(record)?);
+        PreKeyRecord::deserialize(record)
     }
 
     pub async fn save_pre_key(
@@ -113,7 +113,7 @@ impl SignedPreKeyDb {
         let record: &[u8] = result
             .try_get(0)
             .map_err(|err| SignalProtocolError::FfiBindingError(err.to_string()))?;
-        Ok(SignedPreKeyRecord::deserialize(record)?)
+        SignedPreKeyRecord::deserialize(record)
     }
 
     pub async fn save_signed_pre_key(
@@ -527,7 +527,7 @@ impl KyberPreKeyDb {
         let record: &[u8] = result
             .try_get(0)
             .map_err(|err| SignalProtocolError::FfiBindingError(err.to_string()))?;
-        Ok(KyberPreKeyRecord::deserialize(record)?)
+        KyberPreKeyRecord::deserialize(record)
     }
 
     pub async fn save_kyber_pre_key(
@@ -655,7 +655,7 @@ impl KeyStores {
                 )
                 .await?;
 
-                return Ok(decrypted);
+                Ok(decrypted)
             }
             CiphertextMessageType::PreKey => {
                 let message = PreKeySignalMessage::try_from(cipher_text.as_ref())?;
@@ -667,16 +667,16 @@ impl KeyStores {
                     &mut self.session_store,
                     &mut self.identity_store,
                     &mut self.prekey_store,
-                    &mut self.signed_prekey_store,
+                    &self.signed_prekey_store,
                     &mut self.kyber_key_store,
                     &mut rng,
                 )
                 .await?;
 
-                return Ok(decrypted);
+                Ok(decrypted)
             }
 
-            _ => return Err(anyhow::anyhow!("Invalid message type")),
+            _ => Err(anyhow::anyhow!("Invalid message type")),
         }
     }
 
@@ -707,10 +707,10 @@ impl KeyStores {
             remote_address
         );
 
-        return Ok(EncryptedMessage {
+        Ok(EncryptedMessage {
             cipher_text: encrypted.serialize().to_vec(),
             ty: encrypted.message_type() as u8,
-        });
+        })
     }
 
     pub async fn process_pre_key_bundle(
@@ -815,7 +815,7 @@ impl KeyStores {
             .await?;
 
         Ok(FfiPreKeyBundle {
-            registration_id: registration_id,
+            registration_id,
             device_id,
             pre_key_id,
             pre_key: pre_key.public_key.serialize().into(),
