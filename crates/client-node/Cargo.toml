@@ -4,15 +4,33 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-napi = { version = "2.16", features = ["async", "serde-json", "napi4"] }
-napi-derive = "2.16"
 firefly-client = { path = "../client" }
-tokio = { workspace = true }
-anyhow = { workspace = true }
+firefly-protos = { workspace = true }
+firefly-core = { workspace = true }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "WebSocket",
+    "MessageEvent",
+    "BinaryType",
+    "ErrorEvent",
+    "CloseEvent",
+    "console"
+] }
+serde-wasm-bindgen = "0.6"
 serde = { workspace = true }
 serde_json = { workspace = true }
+anyhow = { workspace = true }
 log = { workspace = true }
 async-trait = { workspace = true }
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+tokio = { workspace = true, features = ["sync", "macros"] }
+futures = { workspace = true }
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

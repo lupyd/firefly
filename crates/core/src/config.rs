@@ -283,7 +283,7 @@ pub struct FireflyIdentityProvider {
 fn get_expiry_from_headers(headers: &HeaderMap) -> anyhow::Result<(u64, String)> {
     let last_modified = match headers.get(header::LAST_MODIFIED) {
         Some(val) => val.to_str()?.to_string(),
-        None => httpdate::HttpDate::from(SystemTime::now()).to_string(),
+        None => httpdate::HttpDate::from(crate::utils::now_system_time()).to_string(),
     };
 
     let expiry = headers
@@ -331,23 +331,26 @@ impl FireflyIdentityProvider {
     }
 
     async fn refresh(&self) -> anyhow::Result<()> {
+        let base_url = self.base_url.clone();
+        let (jwks, expiry) = crate::utils::SendWrapper(async move {
+            let url = format!("{}/jwks.json", base_url);
+            let response = HTTP_CLIENT.get(url).send().await?;
+
+            if !response.status().is_success() {
+                return Err(anyhow::anyhow!(
+                    "unexpected status code [{}]: {}",
+                    response.status(),
+                    response.text().await?
+                ));
+            }
+
+            let (expiry, _) = get_expiry_from_headers(response.headers())?;
+            let jwks = response.text().await?;
+            Ok::<_, anyhow::Error>((jwks, expiry))
+        })
+        .await?;
+
         let mut g = self.keys_string.write().await;
-
-        let url = format!("{}/jwks.json", self.base_url);
-
-        let response = HTTP_CLIENT.get(url).send().await?;
-
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "unexpected status code [{}]: {}",
-                response.status(),
-                response.text().await?
-            ));
-        }
-
-        let (expiry, _) = get_expiry_from_headers(response.headers())?;
-        let jwks = response.text().await?;
-
         *g = (jwks, expiry);
         Ok(())
     }
@@ -396,34 +399,37 @@ impl FireflyIdentityProvider {
         device_id: u8,
         address_id: u64,
     ) -> anyhow::Result<Vec<u8>> {
-        let url = format!(
-            "{}/sign?device_id={}&address_id={}",
-            self.base_url, device_id, address_id
-        );
-        let response = HTTP_CLIENT
-            .post(url)
-            .bearer_auth(token)
-            .body(public_key)
-            .send()
-            .await?;
+        let base_url = self.base_url.clone();
+        crate::utils::SendWrapper(async move {
+            let url = format!(
+                "{}/sign?device_id={}&address_id={}",
+                base_url, device_id, address_id
+            );
+            let response = HTTP_CLIENT
+                .post(url)
+                .bearer_auth(token)
+                .body(public_key)
+                .send()
+                .await?;
 
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "unexpected status code [{}]: {}",
-                response.status(),
-                response.text().await?
-            ));
-        }
+            if !response.status().is_success() {
+                return Err(anyhow::anyhow!(
+                    "unexpected status code [{}]: {}",
+                    response.status(),
+                    response.text().await?
+                ));
+            }
 
-        let body = response.bytes().await?;
+            let body = response.bytes().await?;
 
-        let _: SignedToken = deserialize_proto(&body)?;
-        return Ok(body.to_vec());
+            let _: SignedToken = deserialize_proto(&body)?;
+            Ok(body.to_vec())
+        })
+        .await
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl IdentityProvider for FireflyIdentityProvider {
     #[doc = " Error type that this provider returns on internal failure."]
     type Error = FireflyError;

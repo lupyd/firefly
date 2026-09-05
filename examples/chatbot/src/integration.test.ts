@@ -41,6 +41,7 @@ test('Firefly JS Client Integration Test - DM, Group Invite, and Group Messaging
   console.log('Spawning Firefly MLS Server on port', port);
   const serverBin = process.env.FIREFLY_SERVER_PATH || (fs.existsSync('/home/ash/lupyd/firefly-mls-server/target/debug/firefly-server') ? '/home/ash/lupyd/firefly-mls-server/target/debug/firefly-server' : '/home/ash/.cargo/target/debug/firefly-server');
   const serverProcess = spawn(serverBin, [], {
+    cwd: path.resolve(__dirname, '..'),
     env: {
       ...process.env,
       EMULATOR_MODE: 'true',

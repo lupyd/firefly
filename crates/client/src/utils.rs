@@ -10,25 +10,18 @@ lazy_static::lazy_static! {
     pub static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::new();
 }
 
+pub use firefly_core::utils::now_system_time;
+
 pub fn get_current_timestamp_millis_since_epoch() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("TIME WENT BACKWARDS")
-        .as_millis() as u64
+    firefly_core::utils::get_current_timestamp_in_millis()
 }
 
 pub fn get_current_timestamp_seconds_since_epoch() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("TIME WENT BACKWARDS")
-        .as_secs()
+    firefly_core::utils::get_current_timestamp_in_secs()
 }
 
 pub fn get_current_timestamp_microseconds_since_epoch() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("TIME WENT BACKWARDS")
-        .as_micros() as u64
+    firefly_core::utils::get_current_timestamp_in_microsecs() as u64
 }
 
 pub fn rng() -> impl CryptoRng {

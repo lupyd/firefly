@@ -1,10 +1,19 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 lazy_static::lazy_static! {
-    pub static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::builder()
-        .pool_max_idle_per_host(0)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    pub static ref HTTP_CLIENT: reqwest::Client = {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            reqwest::Client::builder()
+                .pool_max_idle_per_host(0)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            reqwest::Client::new()
+        }
+    };
 }
 
 lazy_static::lazy_static! {
@@ -21,10 +30,33 @@ pub fn get_system_time_from_secs(seconds: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(seconds)
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct SendWrapper<F>(pub F);
+unsafe impl<F> Send for SendWrapper<F> {}
+unsafe impl<F> Sync for SendWrapper<F> {}
+
+impl<F: std::future::Future> std::future::Future for SendWrapper<F> {
+    type Output = F::Output;
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        unsafe { self.map_unchecked_mut(|s| &mut s.0).poll(cx) }
+    }
+}
+
 pub fn current_timestamp_duration_since_epoch() -> Duration {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time Went Backwards 🚨🚨🚨 !!!")
+    #[cfg(target_arch = "wasm32")]
+    {
+        Duration::from_millis(js_sys::Date::now() as u64)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time Went Backwards 🚨🚨🚨 !!!")
+    }
+}
+
+pub fn now_system_time() -> SystemTime {
+    UNIX_EPOCH + current_timestamp_duration_since_epoch()
 }
 
 pub fn get_current_timestamp_in_millis() -> u64 {

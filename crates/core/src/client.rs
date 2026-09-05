@@ -36,7 +36,6 @@ pub type FireflyClientMlsConfig = WithIdentityProvider<
 
 pub type FireflyClient = Client<FireflyClientMlsConfig>;
 
-#[cfg(not(target_arch = "wasm32"))]
 pub fn load_client(
     identity: FireflyIdentity,
     key_package_repo: FfiKeyPackageStorage,

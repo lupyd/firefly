@@ -169,6 +169,132 @@ export class FireflyClient {
     await this.client.readUserMessagesUpto(other, Number(uptoMessageId));
   }
 
+  // Direct 1:1 user message
+  async sendUserMessage(to: string, text: string): Promise<any> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    const payload = {
+      messagePayload: {
+        text,
+        files: undefined,
+        replyingTo: 0n,
+      },
+      nonce: Math.floor(Math.random() * 9_999_999),
+    };
+    const messageInnerBytes = UserMessageInner.encode(payload).finish();
+    return await this.client.encryptAndSend(to, Array.from(messageInnerBytes));
+  }
+
+  // Send group message
+  async sendGroupMessage(groupId: number, text: string, channelId: number = 0): Promise<number> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    const payload = {
+      messagePayload: {
+        text,
+        files: undefined,
+        replyingTo: 0n,
+      },
+      channelId,
+    };
+    const messageInnerBytes = GroupMessageInner.encode(payload).finish();
+    return await this.client.encryptAndSendGroup(groupId, Array.from(messageInnerBytes));
+  }
+
+  // Create group
+  async createGroup(name: string, description: string = '', settings?: number): Promise<any> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    return await this.client.createGroup(name, description, settings);
+  }
+
+  // Add/invite member to group
+  async inviteMember(groupId: number, username: string, roleId: number = 1): Promise<void> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    await this.client.addGroupMember(groupId, username, roleId);
+  }
+
+  async addGroupMember(groupId: number, username: string, roleId: number = 1): Promise<void> {
+    return this.inviteMember(groupId, username, roleId);
+  }
+
+  // Kick member from group
+  async kickMember(groupId: number, username: string): Promise<void> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    await this.client.kickGroupMember(groupId, username);
+  }
+
+  async kickGroupMember(groupId: number, username: string): Promise<void> {
+    return this.kickMember(groupId, username);
+  }
+
+  // Create join link for group
+  async createJoinLink(groupId: number, expiresInSeconds: number = 86400, maxUses: number = 100): Promise<string> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    return await this.client.createJoinLink(groupId, expiresInSeconds, maxUses);
+  }
+
+  // Join group via link
+  async joinViaLink(linkToken: string): Promise<void> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    await this.client.joinViaLink(linkToken);
+    await this.client.loadAllGroups();
+  }
+
+  // Request to join / re-add to group
+  async requestToJoin(groupId: number): Promise<void> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    await this.client.requestToJoin(groupId);
+  }
+
+  async syncGroupJoinsAndReadds(groupId: number): Promise<void> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    await this.client.syncGroupJoinsAndReadds(groupId);
+  }
+
+  // List group infos
+  async getGroups(): Promise<any[]> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    return await this.client.getGroupInfos();
+  }
+
+  async getGroupInfos(): Promise<any[]> {
+    return this.getGroups();
+  }
+
+  // Get historical group messages
+  async getGroupMessages(groupId: number, startBefore: number = 0, limit: number = 50): Promise<any[]> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    return await this.client.getGroupMessages(groupId, startBefore, limit);
+  }
+
+  // Query online status
+  async getOnlineStatus(usernames: string[]): Promise<string[]> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    return await this.client.getOnlineStatus(usernames);
+  }
+
   // Load and save session
   private _loadSession(): void {
     if (fs.existsSync(this.sessionFile)) {

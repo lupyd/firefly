@@ -143,6 +143,117 @@ class FireflyClient {
         }
         await this.client.readUserMessagesUpto(other, Number(uptoMessageId));
     }
+    // Direct 1:1 user message
+    async sendUserMessage(to, text) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        const payload = {
+            messagePayload: {
+                text,
+                files: undefined,
+                replyingTo: 0n,
+            },
+            nonce: Math.floor(Math.random() * 9_999_999),
+        };
+        const messageInnerBytes = UserMessageInner.encode(payload).finish();
+        return await this.client.encryptAndSend(to, Array.from(messageInnerBytes));
+    }
+    // Send group message
+    async sendGroupMessage(groupId, text, channelId = 0) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        const payload = {
+            messagePayload: {
+                text,
+                files: undefined,
+                replyingTo: 0n,
+            },
+            channelId,
+        };
+        const messageInnerBytes = GroupMessageInner.encode(payload).finish();
+        return await this.client.encryptAndSendGroup(groupId, Array.from(messageInnerBytes));
+    }
+    // Create group
+    async createGroup(name, description = '', settings) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        return await this.client.createGroup(name, description, settings);
+    }
+    // Add/invite member to group
+    async inviteMember(groupId, username, roleId = 1) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        await this.client.addGroupMember(groupId, username, roleId);
+    }
+    async addGroupMember(groupId, username, roleId = 1) {
+        return this.inviteMember(groupId, username, roleId);
+    }
+    // Kick member from group
+    async kickMember(groupId, username) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        await this.client.kickGroupMember(groupId, username);
+    }
+    async kickGroupMember(groupId, username) {
+        return this.kickMember(groupId, username);
+    }
+    // Create join link for group
+    async createJoinLink(groupId, expiresInSeconds = 86400, maxUses = 100) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        return await this.client.createJoinLink(groupId, expiresInSeconds, maxUses);
+    }
+    // Join group via link
+    async joinViaLink(linkToken) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        await this.client.joinViaLink(linkToken);
+        await this.client.loadAllGroups();
+    }
+    // Request to join / re-add to group
+    async requestToJoin(groupId) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        await this.client.requestToJoin(groupId);
+    }
+    async syncGroupJoinsAndReadds(groupId) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        await this.client.syncGroupJoinsAndReadds(groupId);
+    }
+    // List group infos
+    async getGroups() {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        return await this.client.getGroupInfos();
+    }
+    async getGroupInfos() {
+        return this.getGroups();
+    }
+    // Get historical group messages
+    async getGroupMessages(groupId, startBefore = 0, limit = 50) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        return await this.client.getGroupMessages(groupId, startBefore, limit);
+    }
+    // Query online status
+    async getOnlineStatus(usernames) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        return await this.client.getOnlineStatus(usernames);
+    }
     // Load and save session
     _loadSession() {
         if (fs.existsSync(this.sessionFile)) {

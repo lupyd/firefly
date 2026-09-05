@@ -1,25 +1,42 @@
-use std::sync::{Arc, Mutex};
-use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode, ErrorStrategy, ThreadSafeCallContext};
-use napi_derive::napi;
-use napi::{Env, JsFunction, JsObject, Result, Status};
-use firefly_client::callbacks::{FireflyWsClientCallback, CallSignal, GroupMeetingSignal};
-use firefly_client::websocket::FfiFireflyWsClient;
-use firefly_client::db::messages::UserMessage;
-use firefly_client::db::group_messages::GroupMessage;
-use firefly_client::websocket::ConnectionState;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+};
+use std::collections::HashMap;
 
-#[napi(object)]
-#[derive(Clone, serde::Serialize)]
-pub struct NapiUserMessage {
+use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::future_to_promise;
+use web_sys::{BinaryType, MessageEvent, WebSocket};
+
+use firefly_client::callbacks::{CallSignal, FireflyWsClientCallback, GroupMeetingSignal, ReadUserMessagesUpto};
+use firefly_client::group::FfiMlsClient;
+use firefly_client::libsignal_protocol::{DeviceId, ProtocolAddress};
+use firefly_client::storage::{
+    FireflyStorage, GenericGroupInfoStore, GenericGroupMessagesStore, GenericKeyStores,
+    GenericKeyValueStore, GenericMessagesStore, GenericSelfGroupKeyPackageStore, GroupInfo, GroupMessage, MemoryStorage,
+    UserMessage,
+};
+use firefly_client::utils::{deserialize_proto, serialize_proto, HTTP_CLIENT};
+use firefly_protos::firefly::{self};
+
+#[wasm_bindgen]
+pub fn init_logger(_file_path: String) {
+    std::panic::set_hook(Box::new(|info| {
+        let msg = format!("Rust panic: {}", info);
+        web_sys::console::error_1(&wasm_bindgen::JsValue::from_str(&msg));
+    }));
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct JsUserMessage {
     pub id: f64,
     pub other: String,
     pub message: Vec<u8>,
     pub sent_by_other: bool,
 }
 
-#[napi(object)]
-#[derive(Clone, serde::Serialize)]
-pub struct NapiGroupMessage {
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct JsGroupMessage {
     pub id: f64,
     pub group_id: f64,
     pub by: String,
@@ -28,48 +45,8 @@ pub struct NapiGroupMessage {
     pub epoch: u32,
 }
 
-#[napi(object)]
-#[derive(Clone)]
-pub struct NapiCallSignal {
-    pub call_id: f64,
-    pub sender_username: String,
-    pub receiver_username: String,
-    pub signal_type: i32,
-    pub sdp: String,
-    pub candidate: String,
-    pub sdp_m_line_index: i32,
-    pub sdp_mid: String,
-    pub sender_device_id: u32,
-}
-
-#[napi(object)]
-#[derive(Clone)]
-pub struct NapiGroupMeetingSignal {
-    pub group_id: f64,
-    pub channel_id: u32,
-    pub session_id: f64,
-    pub signal_type: i32,
-    pub username: String,
-    pub cf_meeting_id: String,
-}
-
-#[napi(object)]
-#[derive(Clone, serde::Serialize)]
-pub struct NapiReadUserMessagesUpto {
-    pub other: String,
-    pub upto_message_id: f64,
-}
-
-#[napi(object)]
-#[derive(Clone)]
-pub struct NapiConversation {
-    pub other: String,
-    pub settings: f64,
-}
-
-#[napi(object)]
-#[derive(Clone)]
-pub struct NapiGroupInfo {
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct JsGroupInfo {
     pub id: f64,
     pub name: String,
     pub description: String,
@@ -78,531 +55,1284 @@ pub struct NapiGroupInfo {
     pub has_local_state: bool,
 }
 
-#[napi(object)]
-#[derive(Clone)]
-pub struct NapiGroupInfoDB {
-    pub id: f64,
-    pub name: String,
-    pub description: String,
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct JsConversation {
+    pub other: String,
+    pub settings: f64,
 }
 
-#[napi(object)]
-#[derive(Clone)]
-pub struct NapiUpdateUserProposal {
-    pub username: String,
-    pub role_id: u32,
-}
-
-#[napi(object)]
-#[derive(Clone)]
-pub struct NapiUpdateRoleProposal {
-    pub name: String,
-    pub role_id: u32,
-    pub permissions: u32,
-    pub delete: bool,
-    pub color: u32,
-}
-
-struct NodeClientCallbacks {
+struct WasmClientCallbacks {
     name: String,
     token: Arc<Mutex<Option<String>>>,
-    on_message_fn: ThreadsafeFunction<String, ErrorStrategy::CalleeHandled>,
-    on_group_message_fn: ThreadsafeFunction<String, ErrorStrategy::CalleeHandled>,
-    on_group_joined_fn: ThreadsafeFunction<u64, ErrorStrategy::CalleeHandled>,
-    on_call_signal_fn: ThreadsafeFunction<NapiCallSignal, ErrorStrategy::CalleeHandled>,
-    on_group_meeting_signal_fn: ThreadsafeFunction<NapiGroupMeetingSignal, ErrorStrategy::CalleeHandled>,
-    on_read_user_messages_upto_fn: Option<ThreadsafeFunction<NapiReadUserMessagesUpto, ErrorStrategy::CalleeHandled>>,
+    on_message_fn: Option<js_sys::Function>,
+    on_group_message_fn: Option<js_sys::Function>,
+    on_group_joined_fn: Option<js_sys::Function>,
+    on_call_signal_fn: Option<js_sys::Function>,
+    on_group_meeting_signal_fn: Option<js_sys::Function>,
+    on_read_user_messages_upto_fn: Option<js_sys::Function>,
+    get_access_token_fn: Option<js_sys::Function>,
 }
 
 #[async_trait::async_trait]
-impl FireflyWsClientCallback for NodeClientCallbacks {
+impl FireflyWsClientCallback for WasmClientCallbacks {
     fn name(&self) -> &str {
         &self.name
     }
 
     async fn get_access_token(&self) -> Option<String> {
+        if let Some(ref f) = self.get_access_token_fn {
+            if let Ok(res) = f.call0(&JsValue::NULL) {
+                if let Some(s) = res.as_string() {
+                    *self.token.lock().unwrap() = Some(s.clone());
+                    return Some(s);
+                }
+            }
+        }
         self.token.lock().unwrap().clone()
     }
 
     async fn on_message(&self, message: UserMessage) {
-        let msg = NapiUserMessage {
-            id: message.id as f64,
-            other: message.other,
-            message: message.message,
-            sent_by_other: message.sent_by_other,
-        };
-        let json = serde_json::to_string(&msg).unwrap_or_default();
-        let status = self.on_message_fn.call(Ok(json), ThreadsafeFunctionCallMode::NonBlocking);
-        if status != napi::Status::Ok {
-            eprintln!("Failed to call JS onMessage callback: {:?}", status);
+        if let Some(ref f) = self.on_message_fn {
+            let msg = JsUserMessage {
+                id: message.id as f64,
+                other: message.other,
+                message: message.message,
+                sent_by_other: message.sent_by_other,
+            };
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = f.call2(&JsValue::NULL, &JsValue::NULL, &JsValue::from_str(&json));
+            }
         }
     }
 
     async fn on_group_message(&self, group_message: GroupMessage) {
-        let msg = NapiGroupMessage {
-            id: group_message.id as f64,
-            group_id: group_message.group_id as f64,
-            by: group_message.by,
-            message: group_message.message,
-            channel_id: group_message.channel_id,
-            epoch: group_message.epoch,
-        };
-        let json = serde_json::to_string(&msg).unwrap_or_default();
-        let status = self.on_group_message_fn.call(Ok(json), ThreadsafeFunctionCallMode::NonBlocking);
-        if status != napi::Status::Ok {
-            eprintln!("Failed to call JS onGroupMessage callback: {:?}", status);
+        if let Some(ref f) = self.on_group_message_fn {
+            let msg = JsGroupMessage {
+                id: group_message.id as f64,
+                group_id: group_message.group_id as f64,
+                by: group_message.by,
+                message: group_message.message,
+                channel_id: group_message.channel_id,
+                epoch: group_message.epoch,
+            };
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = f.call2(&JsValue::NULL, &JsValue::NULL, &JsValue::from_str(&json));
+            }
         }
     }
 
     async fn on_group_joined(&self, group_id: u64) {
-        let status = self.on_group_joined_fn.call(Ok(group_id), ThreadsafeFunctionCallMode::NonBlocking);
-        if status != napi::Status::Ok {
-            eprintln!("Failed to call JS onGroupJoined callback: {:?}", status);
+        if let Some(ref f) = self.on_group_joined_fn {
+            let _ = f.call1(&JsValue::NULL, &JsValue::from_f64(group_id as f64));
         }
     }
 
     async fn on_call_signal(&self, signal: CallSignal) {
-        let sig = NapiCallSignal {
-            call_id: signal.call_id as f64,
-            sender_username: signal.sender_username,
-            receiver_username: signal.receiver_username,
-            signal_type: signal.signal_type,
-            sdp: signal.sdp,
-            candidate: signal.candidate,
-            sdp_m_line_index: signal.sdp_m_line_index,
-            sdp_mid: signal.sdp_mid,
-            sender_device_id: signal.sender_device_id,
-        };
-        let _ = self.on_call_signal_fn.call(Ok(sig), ThreadsafeFunctionCallMode::NonBlocking);
+        if let Some(ref f) = self.on_call_signal_fn {
+            let obj = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(&obj, &"callId".into(), &(signal.call_id as f64).into());
+            let _ = js_sys::Reflect::set(&obj, &"senderUsername".into(), &signal.sender_username.into());
+            let _ = js_sys::Reflect::set(&obj, &"receiverUsername".into(), &signal.receiver_username.into());
+            let _ = js_sys::Reflect::set(&obj, &"signalType".into(), &signal.signal_type.into());
+            let _ = js_sys::Reflect::set(&obj, &"sdp".into(), &signal.sdp.into());
+            let _ = js_sys::Reflect::set(&obj, &"candidate".into(), &signal.candidate.into());
+            let _ = js_sys::Reflect::set(&obj, &"sdpMLineIndex".into(), &signal.sdp_m_line_index.into());
+            let _ = js_sys::Reflect::set(&obj, &"sdpMid".into(), &signal.sdp_mid.into());
+            let _ = js_sys::Reflect::set(&obj, &"senderDeviceId".into(), &signal.sender_device_id.into());
+            let _ = f.call1(&JsValue::NULL, &obj);
+        }
     }
 
     async fn on_group_meeting_signal(&self, signal: GroupMeetingSignal) {
-        let sig = NapiGroupMeetingSignal {
-            group_id: signal.group_id as f64,
-            channel_id: signal.channel_id,
-            session_id: signal.session_id as f64,
-            signal_type: signal.signal_type,
-            username: signal.username,
-            cf_meeting_id: signal.cf_meeting_id,
-        };
-        let _ = self.on_group_meeting_signal_fn.call(Ok(sig), ThreadsafeFunctionCallMode::NonBlocking);
+        if let Some(ref f) = self.on_group_meeting_signal_fn {
+            let obj = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(&obj, &"groupId".into(), &(signal.group_id as f64).into());
+            let _ = js_sys::Reflect::set(&obj, &"channelId".into(), &signal.channel_id.into());
+            let _ = js_sys::Reflect::set(&obj, &"sessionId".into(), &(signal.session_id as f64).into());
+            let _ = js_sys::Reflect::set(&obj, &"signalType".into(), &signal.signal_type.into());
+            let _ = js_sys::Reflect::set(&obj, &"username".into(), &signal.username.into());
+            let _ = js_sys::Reflect::set(&obj, &"cfMeetingId".into(), &signal.cf_meeting_id.into());
+            let _ = f.call1(&JsValue::NULL, &obj);
+        }
     }
 
-    async fn on_read_user_messages_upto(&self, read: firefly_client::callbacks::ReadUserMessagesUpto) {
+    async fn on_read_user_messages_upto(&self, read: ReadUserMessagesUpto) {
         if let Some(ref f) = self.on_read_user_messages_upto_fn {
-            let msg = NapiReadUserMessagesUpto {
-                other: read.other,
-                upto_message_id: read.upto_message_id as f64,
-            };
-            let _ = f.call(Ok(msg), ThreadsafeFunctionCallMode::NonBlocking);
+            let obj = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(&obj, &"other".into(), &read.other.into());
+            let _ = js_sys::Reflect::set(&obj, &"uptoMessageId".into(), &(read.upto_message_id as f64).into());
+            let _ = f.call1(&JsValue::NULL, &obj);
         }
     }
 }
 
-fn extract_callbacks(callbacks_obj: JsObject, token: Arc<Mutex<Option<String>>>) -> Result<NodeClientCallbacks> {
-    let name_js: String = callbacks_obj.get_named_property("name")?;
-    let on_message_js: JsFunction = callbacks_obj.get_named_property("onMessage")?;
-    let on_group_message_js: JsFunction = callbacks_obj.get_named_property("onGroupMessage")?;
-    let on_group_joined_js: JsFunction = callbacks_obj.get_named_property("onGroupJoined")?;
-    let on_call_signal_js: JsFunction = callbacks_obj.get_named_property("onCallSignal")?;
-    let on_group_meeting_signal_js: JsFunction = callbacks_obj.get_named_property("onGroupMeetingSignal")?;
-    let on_read_user_messages_upto_js: Option<JsFunction> = callbacks_obj.get_named_property("onReadUserMessagesUpto").ok();
-
-    let on_message_fn = on_message_js.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<String>| {
-        eprintln!("on_message_fn closure value: {}", ctx.value);
-        let js_str = ctx.env.create_string(&ctx.value)?;
-        Ok(vec![js_str.into_unknown()])
-    })?;
-
-    let on_group_message_fn = on_group_message_js.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<String>| {
-        eprintln!("on_group_message_fn closure value: {}", ctx.value);
-        let js_str = ctx.env.create_string(&ctx.value)?;
-        Ok(vec![js_str.into_unknown()])
-    })?;
-
-    let on_group_joined_fn = on_group_joined_js.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<u64>| {
-        Ok(vec![ctx.env.create_double(ctx.value as f64)?.into_unknown()])
-    })?;
-
-    let on_call_signal_fn = on_call_signal_js.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<NapiCallSignal>| {
-        let mut obj = ctx.env.create_object()?;
-        obj.set_named_property("callId", ctx.value.call_id)?;
-        obj.set_named_property("senderUsername", ctx.env.create_string(&ctx.value.sender_username)?)?;
-        obj.set_named_property("receiverUsername", ctx.env.create_string(&ctx.value.receiver_username)?)?;
-        obj.set_named_property("signalType", ctx.value.signal_type)?;
-        obj.set_named_property("sdp", ctx.env.create_string(&ctx.value.sdp)?)?;
-        obj.set_named_property("candidate", ctx.env.create_string(&ctx.value.candidate)?)?;
-        obj.set_named_property("sdpMLineIndex", ctx.value.sdp_m_line_index)?;
-        obj.set_named_property("sdpMid", ctx.env.create_string(&ctx.value.sdp_mid)?)?;
-        obj.set_named_property("senderDeviceId", ctx.value.sender_device_id)?;
-        Ok(vec![obj])
-    })?;
-
-    let on_group_meeting_signal_fn = on_group_meeting_signal_js.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<NapiGroupMeetingSignal>| {
-        let mut obj = ctx.env.create_object()?;
-        obj.set_named_property("groupId", ctx.value.group_id)?;
-        obj.set_named_property("channelId", ctx.value.channel_id)?;
-        obj.set_named_property("sessionId", ctx.value.session_id)?;
-        obj.set_named_property("signalType", ctx.value.signal_type)?;
-        obj.set_named_property("username", ctx.env.create_string(&ctx.value.username)?)?;
-        obj.set_named_property("cfMeetingId", ctx.env.create_string(&ctx.value.cf_meeting_id)?)?;
-        Ok(vec![obj])
-    })?;
-
-    let on_read_user_messages_upto_fn = match on_read_user_messages_upto_js {
-        Some(cb) => Some(cb.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<NapiReadUserMessagesUpto>| {
-            let mut obj = ctx.env.create_object()?;
-            obj.set_named_property("other", ctx.env.create_string(&ctx.value.other)?)?;
-            obj.set_named_property("uptoMessageId", ctx.value.upto_message_id)?;
-            Ok(vec![obj])
-        })?),
-        None => None,
-    };
-
-    Ok(NodeClientCallbacks {
-        name: name_js,
-        token,
-        on_message_fn,
-        on_group_message_fn,
-        on_group_joined_fn,
-        on_call_signal_fn,
-        on_group_meeting_signal_fn,
-        on_read_user_messages_upto_fn,
-    })
-}
-
-#[napi]
-pub fn init_logger(file_path: String) {
-    firefly_client::init_logger(file_path);
-}
-
-#[napi]
+#[wasm_bindgen]
 pub struct FireflyClientNode {
-    inner: Arc<FfiFireflyWsClient>,
+    storage: Arc<dyn FireflyStorage>,
+    key_stores: Arc<tokio::sync::RwLock<GenericKeyStores>>,
+    key_value_store: GenericKeyValueStore,
+    group_messages_store: GenericGroupMessagesStore,
+    user_messages_store: GenericMessagesStore,
+    group_info_store: GenericGroupInfoStore,
+    mls_client: Arc<tokio::sync::RwLock<Option<Arc<FfiMlsClient>>>>,
+    callbacks: Arc<WasmClientCallbacks>,
     token: Arc<Mutex<Option<String>>>,
+    firefly_base_url: String,
+    firefly_base_ws_url: String,
+    ws: Arc<tokio::sync::RwLock<Option<WebSocket>>>,
+    connection_state: Arc<tokio::sync::RwLock<String>>,
+    is_initialized: Arc<AtomicBool>,
+    disposed: Arc<AtomicBool>,
+    address_id: Arc<AtomicU64>,
+    device_id: Arc<AtomicU32>,
+    pending_requests: Arc<tokio::sync::RwLock<HashMap<u32, tokio::sync::oneshot::Sender<Vec<u8>>>>>,
+    next_request_id: Arc<AtomicU32>,
 }
 
-#[napi]
-impl FireflyClientNode {
-    #[napi]
-    pub fn create(
-        env: Env,
-        firefly_base_url: String,
-        firefly_base_ws_url: String,
-        retry_interval_in_ms: f64,
-        callbacks_obj: JsObject,
-        key_stores_pathname: String,
-        request_timeout_in_ms: f64,
-    ) -> Result<JsObject> {
-        let initial_token: Option<String> = callbacks_obj.get_named_property("initialToken").ok();
-        let token = Arc::new(Mutex::new(initial_token));
-        let callbacks = extract_callbacks(callbacks_obj, token.clone())?;
+async fn join_groups_helper(
+    base_url: &str,
+    token: &str,
+    address_id: u64,
+    device_id: u8,
+    mls: &Arc<FfiMlsClient>,
+    group_info_store: &GenericGroupInfoStore,
+    group_messages_store: &GenericGroupMessagesStore,
+    callbacks: &Arc<WasmClientCallbacks>,
+) -> anyhow::Result<()> {
+    let url = format!(
+        "{}/group/invites?address={}&device_id={}",
+        base_url, address_id, device_id
+    );
+    let response = HTTP_CLIENT.get(&url).bearer_auth(token).send().await?;
+    if !response.status().is_success() {
+        return Ok(());
+    }
+    let bytes = response.bytes().await?;
+    let invites = deserialize_proto::<firefly::GroupInvites<'_>>(&bytes)?;
 
-        let token_clone = token.clone();
-        env.execute_tokio_future(
-            async move {
-                let inner = FfiFireflyWsClient::create(
-                    firefly_base_url,
-                    firefly_base_ws_url,
-                    retry_interval_in_ms as u64,
-                    Box::new(callbacks),
-                    key_stores_pathname,
-                    request_timeout_in_ms as u64,
-                )
-                .await
-                .map_err(|e| napi::Error::new(Status::GenericFailure, format!("Failed to create client: {}", e)))?;
-
-                Ok(FireflyClientNode {
-                    inner: Arc::new(inner),
-                    token: token_clone,
-                })
-            },
-            |&mut _env, client| Ok(client),
-        )
+    for invite in invites.invites.iter() {
+        let group_id = invite.groupId;
+        match mls.join_group(group_id, invite.welcomeMessage.to_vec()).await {
+            Ok(group) => {
+                let _ = group.save().await;
+                let grp_url = format!("{}/group?id={}", base_url, group_id);
+                if let Ok(resp) = HTTP_CLIENT.get(&grp_url).bearer_auth(token).send().await {
+                    if resp.status().is_success() {
+                        if let Ok(b) = resp.bytes().await {
+                            if let Ok(info) = deserialize_proto::<firefly::Group>(&b) {
+                                let ident = group.group_identifier().await.unwrap_or_default();
+                                let _ = group_info_store.set(group_id, info.name.to_string(), info.description.to_string(), ident).await;
+                                let _ = group_messages_store.update_cursor(invite.commitId, group_id, group.epoch().await as u32).await;
+                            }
+                        }
+                    }
+                }
+                let member_url = format!("{}/group/member?groupId={}&address={}", base_url, group_id, address_id);
+                let update = firefly::GroupMemberUpdate {
+                    group_id,
+                    last_epoch: group.epoch().await as u32,
+                    last_message_seen: invite.commitId,
+                };
+                if let Ok(body) = serialize_proto(&update) {
+                    let _ = HTTP_CLIENT.post(member_url).bearer_auth(token).body(body.to_vec()).send().await;
+                }
+                callbacks.on_group_joined(group_id).await;
+            }
+            Err(e) => {
+                web_sys::console::error_1(&JsValue::from_str(&format!("join_group error: {:?}", e)));
+            }
+        }
     }
 
-    #[napi]
+    if !invites.invites.is_empty() {
+        let mut del_url = format!("{}/group/invites?address={}&groupIds=", base_url, address_id);
+        firefly_client::utils::write_url_comma_seperated(&mut del_url, invites.invites.iter().map(|x| x.groupId))?;
+        let _ = HTTP_CLIENT.delete(&del_url).bearer_auth(token).send().await;
+    }
+    Ok(())
+}
+
+#[wasm_bindgen]
+impl FireflyClientNode {
+    #[wasm_bindgen]
+    pub fn create(
+        firefly_base_url: String,
+        firefly_base_ws_url: String,
+        _retry_interval_in_ms: f64,
+        callbacks_obj: JsValue,
+        _key_stores_pathname: String,
+        _request_timeout_in_ms: f64,
+    ) -> js_sys::Promise {
+        future_to_promise(async move {
+            let initial_token = js_sys::Reflect::get(&callbacks_obj, &"initialToken".into())
+                .ok()
+                .and_then(|v| v.as_string());
+            let name = js_sys::Reflect::get(&callbacks_obj, &"name".into())
+                .ok()
+                .and_then(|v| v.as_string())
+                .unwrap_or_default();
+
+            let get_access_token_fn = js_sys::Reflect::get(&callbacks_obj, &"getAccessToken".into())
+                .ok()
+                .and_then(|v| v.dyn_into::<js_sys::Function>().ok());
+            let on_message_fn = js_sys::Reflect::get(&callbacks_obj, &"onMessage".into())
+                .ok()
+                .and_then(|v| v.dyn_into::<js_sys::Function>().ok());
+            let on_group_message_fn = js_sys::Reflect::get(&callbacks_obj, &"onGroupMessage".into())
+                .ok()
+                .and_then(|v| v.dyn_into::<js_sys::Function>().ok());
+            let on_group_joined_fn = js_sys::Reflect::get(&callbacks_obj, &"onGroupJoined".into())
+                .ok()
+                .and_then(|v| v.dyn_into::<js_sys::Function>().ok());
+            let on_call_signal_fn = js_sys::Reflect::get(&callbacks_obj, &"onCallSignal".into())
+                .ok()
+                .and_then(|v| v.dyn_into::<js_sys::Function>().ok());
+            let on_group_meeting_signal_fn = js_sys::Reflect::get(&callbacks_obj, &"onGroupMeetingSignal".into())
+                .ok()
+                .and_then(|v| v.dyn_into::<js_sys::Function>().ok());
+            let on_read_user_messages_upto_fn = js_sys::Reflect::get(&callbacks_obj, &"onReadUserMessagesUpto".into())
+                .ok()
+                .and_then(|v| v.dyn_into::<js_sys::Function>().ok());
+
+            let token = Arc::new(Mutex::new(initial_token));
+            let callbacks = Arc::new(WasmClientCallbacks {
+                name,
+                token: token.clone(),
+                on_message_fn,
+                on_group_message_fn,
+                on_group_joined_fn,
+                on_call_signal_fn,
+                on_group_meeting_signal_fn,
+                on_read_user_messages_upto_fn,
+                get_access_token_fn,
+            });
+
+            let storage: Arc<dyn FireflyStorage> = Arc::new(MemoryStorage::new());
+            let key_stores = Arc::new(tokio::sync::RwLock::new(
+                GenericKeyStores::new(storage.clone())
+                    .await
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?,
+            ));
+            let key_value_store = GenericKeyValueStore::new(storage.clone());
+            let group_messages_store = GenericGroupMessagesStore::new(storage.clone());
+            let user_messages_store = GenericMessagesStore::new(storage.clone());
+            let group_info_store = GenericGroupInfoStore::new(storage.clone());
+
+            let client = FireflyClientNode {
+                storage,
+                key_stores,
+                key_value_store,
+                group_messages_store,
+                user_messages_store,
+                group_info_store,
+                mls_client: Arc::new(tokio::sync::RwLock::new(None)),
+                callbacks,
+                token,
+                firefly_base_url,
+                firefly_base_ws_url,
+                ws: Arc::new(tokio::sync::RwLock::new(None)),
+                connection_state: Arc::new(tokio::sync::RwLock::new("Disconnected".to_string())),
+                is_initialized: Arc::new(AtomicBool::new(false)),
+                disposed: Arc::new(AtomicBool::new(false)),
+                address_id: Arc::new(AtomicU64::new(0)),
+                device_id: Arc::new(AtomicU32::new(1)),
+                pending_requests: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+                next_request_id: Arc::new(AtomicU32::new(1)),
+            };
+
+            Ok(JsValue::from(client))
+        })
+    }
+
+    #[wasm_bindgen]
     pub fn set_access_token(&self, token: String) {
         *self.token.lock().unwrap() = Some(token);
     }
 
-    #[napi]
-    pub async fn initialize_with_retrying(&self) -> Result<()> {
-        self.inner.initialize_with_retrying().await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))
-    }
+    #[wasm_bindgen]
+    pub fn check_setup(&self) -> js_sys::Promise {
+        let callbacks = self.callbacks.clone();
+        let key_stores = self.key_stores.clone();
+        let base_url = self.firefly_base_url.clone();
+        let storage = self.storage.clone();
+        let mls_client_holder = self.mls_client.clone();
+        let address_id_atomic = self.address_id.clone();
+        let device_id_atomic = self.device_id.clone();
+        let group_info_store = self.group_info_store.clone();
+        let group_messages_store = self.group_messages_store.clone();
 
-    #[napi]
-    pub async fn check_setup(&self) -> Result<()> {
-        self.inner.check_setup().await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))
-    }
+        future_to_promise(async move {
+            let token = callbacks
+                .get_access_token()
+                .await
+                .ok_or_else(|| JsValue::from_str("Missing access token for check_setup"))?;
 
-    #[napi]
-    pub async fn dispose(&self) {
-        self.inner.dispose().await;
-    }
+            // Register or fetch device address via /user/device
+            let username = callbacks.name().to_string();
+            let mut ks = key_stores.write().await;
+            let identity = ks
+                .identity_store
+                .get_full_identity_key_pair()
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    #[napi]
-    pub async fn read_user_messages_upto(&self, other: String, upto_message_id: f64) -> Result<()> {
-        self.inner.read_user_messages_upto(other, upto_message_id as u64).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))
-    }
+            let address = firefly::Address {
+                id: identity.id as u64,
+                username: username.clone().into(),
+                deviceId: if identity.id == 0 { 0 } else { identity.device_id as u32 },
+                fcmToken: "".into(),
+            };
 
-    #[napi]
-    pub async fn encrypt_and_send(&self, to: String, payload: Vec<u8>) -> Result<NapiUserMessage> {
-        let msg = self.inner.encrypt_and_send(to, payload).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))?;
-        Ok(NapiUserMessage {
-            id: msg.id as f64,
-            other: msg.other,
-            message: msg.message,
-            sent_by_other: msg.sent_by_other,
+            let device_url = format!("{}/user/device", base_url);
+            let proto_bytes = serialize_proto(&address)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            let response = HTTP_CLIENT
+                .post(&device_url)
+                .bearer_auth(&token)
+                .body(proto_bytes.to_vec())
+                .send()
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            if response.status().is_success() {
+                if let Ok(bytes) = response.bytes().await {
+                    if let Ok(resp_address) = deserialize_proto::<firefly::Address>(&bytes) {
+                        address_id_atomic.store(resp_address.id, Ordering::Relaxed);
+                        device_id_atomic.store(resp_address.deviceId, Ordering::Relaxed);
+                        let _ = ks
+                            .identity_store
+                            .update_registration_for_keypair(
+                                resp_address.id as i64,
+                                &resp_address.username,
+                                resp_address.deviceId as u8,
+                            )
+                            .await;
+                    }
+                }
+            }
+
+            let address_id = address_id_atomic.load(Ordering::Relaxed);
+            let device_id = device_id_atomic.load(Ordering::Relaxed) as u8;
+
+            // Generate PreKeyBundle and upload if needed
+            if let Ok(bundle) = ks.generate_prekey_bundle().await {
+                let upload_url = format!("{}/user/preKeyBundles", base_url);
+                let proto_bundle: firefly::PreKeyBundle<'static> = bundle.into();
+                let entries = firefly::PreKeyBundleEntries {
+                    entries: vec![firefly::PreKeyBundleEntry {
+                        id: proto_bundle.preKeyId,
+                        address: address_id,
+                        bundle: Some(proto_bundle),
+                        username: username.into(),
+                        device_id: device_id as u32,
+                    }],
+                };
+                if let Ok(proto_bytes) = serialize_proto(&entries) {
+                    let _ = HTTP_CLIENT
+                        .post(&upload_url)
+                        .bearer_auth(&token)
+                        .body(proto_bytes.to_vec())
+                        .send()
+                        .await;
+                }
+            }
+
+            // Initialize MLS client
+            let mls = FfiMlsClient::initialize_with_storage(
+                device_id,
+                address_id,
+                callbacks.clone(),
+                storage.clone(),
+                base_url.clone(),
+            )
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            let mls = Arc::new(mls);
+
+            // Generate and upload MLS key packages
+            let self_kp_store = GenericSelfGroupKeyPackageStore::new(storage.clone());
+            let mut key_packages = firefly::GroupKeyPackages::default();
+            for _ in 0..16 {
+                let id = (js_sys::Math::random() * 32000.0) as i32;
+                if let Ok(key_package) = mls.generate_key_package().await {
+                    let _ = self_kp_store.set(id, &key_package).await;
+                    key_packages.packages.push(firefly::GroupKeyPackage {
+                        id,
+                        package: key_package.into(),
+                        address: address_id,
+                        username: Default::default(),
+                    });
+                }
+            }
+            if !key_packages.packages.is_empty() {
+                if let Ok(body) = serialize_proto(&key_packages) {
+                    let kp_url = format!(
+                        "{}/group/keyPackages?address={}&device_id={}",
+                        base_url, address_id, device_id
+                    );
+                    let _ = HTTP_CLIENT
+                        .post(&kp_url)
+                        .bearer_auth(&token)
+                        .body(body.to_vec())
+                        .send()
+                        .await;
+                }
+            }
+
+            // Sync pending group invites if any
+            let _ = join_groups_helper(
+                &base_url,
+                &token,
+                address_id,
+                device_id,
+                &mls,
+                &group_info_store,
+                &group_messages_store,
+                &callbacks,
+            ).await;
+
+            *mls_client_holder.write().await = Some(mls);
+
+            Ok(JsValue::NULL)
         })
     }
 
-    #[napi]
-    pub async fn upload_fcm_token(&self, token: Option<String>) -> Result<()> {
-        self.inner.upload_fcm_token(token).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))
+    #[wasm_bindgen]
+    pub fn initialize_with_retrying(&self) -> js_sys::Promise {
+        let callbacks = self.callbacks.clone();
+        let base_ws_url = self.firefly_base_ws_url.clone();
+        let base_url = self.firefly_base_url.clone();
+        let address_id_atomic = self.address_id.clone();
+        let device_id_atomic = self.device_id.clone();
+        let ws_holder = self.ws.clone();
+        let state_holder = self.connection_state.clone();
+        let is_initialized_atomic = self.is_initialized.clone();
+        let _disposed_atomic = self.disposed.clone();
+        let key_stores = self.key_stores.clone();
+        let user_messages_store = self.user_messages_store.clone();
+        let group_messages_store = self.group_messages_store.clone();
+        let group_info_store = self.group_info_store.clone();
+        let pending_requests = self.pending_requests.clone();
+        let mls_holder = self.mls_client.clone();
+
+        let base_url_msg = base_url.clone();
+        let token_holder = self.token.clone();
+
+        future_to_promise(async move {
+            *state_holder.write().await = "Initializing".to_string();
+
+            let token = callbacks
+                .get_access_token()
+                .await
+                .unwrap_or_default();
+            let address_id = address_id_atomic.load(Ordering::Relaxed);
+            let device_id = device_id_atomic.load(Ordering::Relaxed);
+
+            let ws_url = format!(
+                "{}?uid={}&device_id={}&last_synced_upto=0&token={}",
+                base_ws_url, address_id, device_id, token
+            );
+
+            let ws = WebSocket::new(&ws_url)
+                .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+            ws.set_binary_type(BinaryType::Arraybuffer);
+
+            // Wire onmessage
+            let key_stores_clone = key_stores.clone();
+            let user_messages_store_clone = user_messages_store.clone();
+            let group_messages_store_clone = group_messages_store.clone();
+            let group_info_store_clone = group_info_store.clone();
+            let callbacks_clone = callbacks.clone();
+            let pending_requests_clone = pending_requests.clone();
+            let mls_holder_clone = mls_holder.clone();
+            let b_url = base_url_msg.clone();
+            let tok = token_holder.clone();
+            let addr_id = address_id;
+
+            let onmessage_callback = Closure::wrap(Box::new(move |e: MessageEvent| {
+                if let Ok(ab) = e.data().dyn_into::<js_sys::ArrayBuffer>() {
+                    let u8_array = js_sys::Uint8Array::new(&ab);
+                    let bytes = u8_array.to_vec();
+
+                    let ks = key_stores_clone.clone();
+                    let ums = user_messages_store_clone.clone();
+                    let gms = group_messages_store_clone.clone();
+                    let gis = group_info_store_clone.clone();
+                    let cb = callbacks_clone.clone();
+                    let pr = pending_requests_clone.clone();
+                    let mls = mls_holder_clone.clone();
+                    let b_url = b_url.clone();
+                    let tok = tok.clone();
+
+                    wasm_bindgen_futures::spawn_local(async move {
+                        if let Ok(server_msg) = deserialize_proto::<firefly::ServerMessage<'_>>(&bytes) {
+                            match server_msg.message {
+                                firefly::mod_ServerMessage::OneOfmessage::userMessage(um) => {
+                                    let mut ks_guard = ks.write().await;
+                                    let other_addr = ProtocolAddress::new(
+                                        um.fromUsername.to_string(),
+                                        DeviceId::new(um.fromDeviceId as u8).unwrap(),
+                                    );
+                                    if let Ok(decrypted) = ks_guard.decrypt(other_addr, um.text.to_vec(), um.type_pb as u8).await {
+                                        let _ = ums.add(um.id, &um.fromUsername, &decrypted, true).await;
+                                        cb.on_message(UserMessage {
+                                            id: um.id,
+                                            other: um.fromUsername.to_string(),
+                                            message: decrypted,
+                                            sent_by_other: true,
+                                        }).await;
+                                    }
+                                }
+                                firefly::mod_ServerMessage::OneOfmessage::groupMessage(gm) => {
+                                    if let Some(mls_guard) = mls.read().await.as_ref() {
+                                        let grp_ident = gis.get(gm.groupId).await.map(|g| g.identifier).unwrap_or_default();
+                                        if let Ok(group) = mls_guard.load_group(gm.groupId, grp_ident).await {
+                                            if let Ok(firefly_client::group::FireflyMlsReceivedMessage::Message(decrypted)) = group.process(gm.message.to_vec()).await {
+                                                let _ = group.save().await;
+                                                let channel_id = deserialize_proto::<firefly::GroupMessageInner>(&decrypted.message)
+                                                    .map(|inner| inner.channelId)
+                                                    .unwrap_or(0);
+                                                let _ = gms.add(gm.id, gm.groupId, channel_id, gm.epoch, &decrypted.sender, &decrypted.message).await;
+                                                cb.on_group_message(GroupMessage {
+                                                    id: gm.id,
+                                                    group_id: gm.groupId,
+                                                    by: decrypted.sender,
+                                                    message: decrypted.message,
+                                                    channel_id,
+                                                    epoch: gm.epoch,
+                                                }).await;
+                                            }
+                                        }
+                                    }
+                                }
+                                firefly::mod_ServerMessage::OneOfmessage::groupMessages(msgs) => {
+                                    if let Some(mls_guard) = mls.read().await.as_ref() {
+                                        for gm in msgs.messages {
+                                            let grp_ident = gis.get(gm.groupId).await.map(|g| g.identifier).unwrap_or_default();
+                                            if let Ok(group) = mls_guard.load_group(gm.groupId, grp_ident).await {
+                                                if let Ok(firefly_client::group::FireflyMlsReceivedMessage::Message(decrypted)) = group.process(gm.message.to_vec()).await {
+                                                    let _ = group.save().await;
+                                                    let channel_id = deserialize_proto::<firefly::GroupMessageInner>(&decrypted.message)
+                                                        .map(|inner| inner.channelId)
+                                                        .unwrap_or(0);
+                                                    let _ = gms.add(gm.id, gm.groupId, channel_id, gm.epoch, &decrypted.sender, &decrypted.message).await;
+                                                    cb.on_group_message(GroupMessage {
+                                                        id: gm.id,
+                                                        group_id: gm.groupId,
+                                                        by: decrypted.sender,
+                                                        message: decrypted.message,
+                                                        channel_id,
+                                                        epoch: gm.epoch,
+                                                    }).await;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                firefly::mod_ServerMessage::OneOfmessage::groupInvite(invite) => {
+                                    if let Some(mls_guard) = mls.read().await.as_ref() {
+                                        let group_id = invite.groupId;
+                                        if let Ok(group) = mls_guard.join_group(group_id, invite.welcomeMessage.to_vec()).await {
+                                            let _ = group.save().await;
+                                            let cur_token = tok.lock().unwrap().clone().unwrap_or_default();
+                                            let grp_url = format!("{}/group?id={}", b_url, group_id);
+                                            if let Ok(resp) = HTTP_CLIENT.get(&grp_url).bearer_auth(&cur_token).send().await {
+                                                if resp.status().is_success() {
+                                                    if let Ok(b) = resp.bytes().await {
+                                                        if let Ok(info) = deserialize_proto::<firefly::Group>(&b) {
+                                                            let ident = group.group_identifier().await.unwrap_or_default();
+                                                            let _ = gis.set(group_id, info.name.to_string(), info.description.to_string(), ident).await;
+                                                            let _ = gms.update_cursor(invite.commitId, group_id, group.epoch().await as u32).await;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            let member_url = format!("{}/group/member?groupId={}&address={}", b_url, group_id, addr_id);
+                                            let update = firefly::GroupMemberUpdate {
+                                                group_id,
+                                                last_epoch: group.epoch().await as u32,
+                                                last_message_seen: invite.commitId,
+                                            };
+                                            if let Ok(body) = serialize_proto(&update) {
+                                                let _ = HTTP_CLIENT.post(member_url).bearer_auth(&cur_token).body(body.to_vec()).send().await;
+                                            }
+                                            cb.on_group_joined(group_id).await;
+                                        }
+                                    }
+                                }
+                                firefly::mod_ServerMessage::OneOfmessage::groupCommits(commits) => {
+                                    if let Some(mls_guard) = mls.read().await.as_ref() {
+                                        for commit in commits.commits {
+                                            let grp_ident = gis.get(commit.groupId).await.map(|g| g.identifier).unwrap_or_default();
+                                            if let Ok(group) = mls_guard.load_group(commit.groupId, grp_ident).await {
+                                                let _ = group.process(commit.commit.to_vec()).await;
+                                                let _ = group.save().await;
+                                            }
+                                        }
+                                    }
+                                }
+                                firefly::mod_ServerMessage::OneOfmessage::response(resp) => {
+                                    let mut pr_guard = pr.write().await;
+                                    if let Some(sender) = pr_guard.remove(&resp.id) {
+                                        if let Ok(resp_bytes) = serialize_proto(&resp) {
+                                            let _ = sender.send(resp_bytes.to_vec());
+                                        }
+                                    }
+                                }
+                                firefly::mod_ServerMessage::OneOfmessage::callSignal(sig) => {
+                                    cb.on_call_signal(CallSignal {
+                                        call_id: sig.call_id,
+                                        sender_username: sig.sender_username.to_string(),
+                                        receiver_username: sig.receiver_username.to_string(),
+                                        signal_type: sig.type_pb as i32,
+                                        sdp: sig.sdp.to_string(),
+                                        candidate: sig.candidate.to_string(),
+                                        sdp_m_line_index: sig.sdp_m_line_index,
+                                        sdp_mid: sig.sdp_mid.to_string(),
+                                        sender_device_id: sig.sender_device_id,
+                                    }).await;
+                                }
+                                firefly::mod_ServerMessage::OneOfmessage::groupMeetingSignal(sig) => {
+                                    cb.on_group_meeting_signal(GroupMeetingSignal {
+                                        group_id: sig.group_id,
+                                        channel_id: sig.channel_id,
+                                        session_id: sig.session_id,
+                                        signal_type: sig.type_pb as i32,
+                                        username: sig.username.to_string(),
+                                        cf_meeting_id: sig.cf_meeting_id.to_string(),
+                                    }).await;
+                                }
+                                _ => {}
+                            }
+                        }
+                    });
+                }
+            }) as Box<dyn FnMut(MessageEvent)>);
+
+            ws.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
+            onmessage_callback.forget();
+
+            let state_clone = state_holder.clone();
+            let is_init_clone = is_initialized_atomic.clone();
+            let onopen_callback = Closure::wrap(Box::new(move || {
+                let st = state_clone.clone();
+                let init = is_init_clone.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    *st.write().await = "Connected".to_string();
+                    init.store(true, Ordering::Relaxed);
+                });
+            }) as Box<dyn FnMut()>);
+            ws.set_onopen(Some(onopen_callback.as_ref().unchecked_ref()));
+            onopen_callback.forget();
+
+            let state_clone2 = state_holder.clone();
+            let is_init_clone2 = is_initialized_atomic.clone();
+            let onclose_callback = Closure::wrap(Box::new(move || {
+                let st = state_clone2.clone();
+                let init = is_init_clone2.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    *st.write().await = "Disconnected".to_string();
+                    init.store(false, Ordering::Relaxed);
+                });
+            }) as Box<dyn FnMut()>);
+            ws.set_onclose(Some(onclose_callback.as_ref().unchecked_ref()));
+            onclose_callback.forget();
+
+            *ws_holder.write().await = Some(ws);
+
+            // Sync groups from server
+            let groups_url = format!("{}/groups", base_url);
+            if let Ok(resp) = HTTP_CLIENT.get(&groups_url).bearer_auth(&token).send().await {
+                if resp.status().is_success() {
+                    if let Ok(bytes) = resp.bytes().await {
+                        if let Ok(groups) = deserialize_proto::<firefly::Groups<'_>>(&bytes) {
+                            for g in groups.groups {
+                                let _ = group_info_store.set(g.id, g.name.to_string(), g.description.to_string(), Vec::new()).await;
+                            }
+                        }
+                    }
+                }
+            }
+
+            Ok(JsValue::NULL)
+        })
     }
 
-    #[napi]
+    #[wasm_bindgen]
+    pub fn is_initialized(&self) -> bool {
+        self.is_initialized.load(Ordering::Relaxed)
+    }
+
+    #[wasm_bindgen]
     pub fn get_connection_state(&self) -> String {
-        match self.inner.get_connection_state() {
-            ConnectionState::Disconnected => "Disconnected".to_string(),
-            ConnectionState::Initializing => "Initializing".to_string(),
-            ConnectionState::Retrying => "Retrying".to_string(),
-            ConnectionState::Connected => "Connected".to_string(),
-            ConnectionState::CheckingSetup => "CheckingSetup".to_string(),
+        let state = self.connection_state.clone();
+        if let Ok(guard) = state.try_read() {
+            guard.clone()
+        } else {
+            "Disconnected".to_string()
         }
     }
 
-    #[napi]
-    pub fn is_initialized(&self) -> bool {
-        self.inner.is_initialized()
-    }
+    #[wasm_bindgen]
+    pub fn dispose(&self) -> js_sys::Promise {
+        let ws_holder = self.ws.clone();
+        let disposed = self.disposed.clone();
+        let is_init = self.is_initialized.clone();
 
-    #[napi]
-    pub async fn get_conversations(&self, token: String) -> Result<Vec<NapiConversation>> {
-        let conversations = self.inner.get_conversations(token).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))?;
-        Ok(conversations.into_iter().map(|c| NapiConversation {
-            other: c.other,
-            settings: c.settings as f64,
-        }).collect())
-    }
-
-    #[napi]
-    pub async fn create_group(&self, name: String, description: String, settings: Option<u32>) -> Result<NapiGroupInfoDB> {
-        let group = self.inner.create_group(name, description, settings.unwrap_or(0)).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))?;
-        Ok(NapiGroupInfoDB {
-            id: group.id as f64,
-            name: group.name,
-            description: group.description,
+        future_to_promise(async move {
+            disposed.store(true, Ordering::Relaxed);
+            is_init.store(false, Ordering::Relaxed);
+            if let Some(ws) = ws_holder.write().await.take() {
+                let _ = ws.close();
+            }
+            Ok(JsValue::NULL)
         })
     }
 
-    #[napi]
-    pub async fn encrypt_and_send_group(&self, group_id: f64, payload: Vec<u8>) -> Result<f64> {
-        let res = self.inner.encrypt_and_send_group(group_id as u64, payload).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))?;
-        Ok(res as f64)
+    #[wasm_bindgen]
+    pub fn encrypt_and_send(&self, to: String, payload: Vec<u8>) -> js_sys::Promise {
+        let key_stores = self.key_stores.clone();
+        let user_messages_store = self.user_messages_store.clone();
+        let ws_holder = self.ws.clone();
+        let callbacks = self.callbacks.clone();
+        let address_id_atomic = self.address_id.clone();
+        let device_id_atomic = self.device_id.clone();
+        let base_url = self.firefly_base_url.clone();
+        let next_request_id = self.next_request_id.clone();
+
+        future_to_promise(async move {
+            let address_id = address_id_atomic.load(Ordering::Relaxed);
+            let device_id = device_id_atomic.load(Ordering::Relaxed) as u8;
+            let mut ks = key_stores.write().await;
+
+            let mut other_addresses = ks.address_store.get(&to).await.unwrap_or_default();
+            if other_addresses.is_empty() {
+                let token = callbacks.get_access_token().await.unwrap_or_default();
+                let url = format!("{}/user/preKeyBundles?other={}", base_url, to);
+                if let Ok(resp) = HTTP_CLIENT.get(&url).bearer_auth(&token).send().await {
+                    if resp.status().is_success() {
+                        if let Ok(bytes) = resp.bytes().await {
+                            if let Ok(entries) = deserialize_proto::<firefly::PreKeyBundleEntries>(&bytes) {
+                                for entry in entries.entries {
+                                    if let Some(bundle) = entry.bundle {
+                                        let _ = ks.process_pre_key_bundle(entry.username.to_string(), bundle.into()).await;
+                                        let _ = ks.address_store.add(entry.address, &entry.username, entry.device_id as u8).await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                other_addresses = ks.address_store.get(&to).await.unwrap_or_default();
+            }
+
+            let target_device_id = other_addresses.first().map(|a| a.device_id).unwrap_or(1);
+            let target_address_id = other_addresses.first().map(|a| a.address_id).unwrap_or(0);
+
+            let other_addr = ProtocolAddress::new(
+                to.clone(),
+                DeviceId::new(target_device_id).unwrap_or_else(|_| DeviceId::new(1).unwrap()),
+            );
+            let encrypted = ks
+                .encrypt(other_addr, payload.clone())
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            let msg_id = firefly_client::utils::get_current_timestamp_millis_since_epoch();
+
+            let user_msg = firefly::UserMessage {
+                id: msg_id,
+                toId: target_address_id,
+                fromId: address_id,
+                text: encrypted.cipher_text.clone().into(),
+                type_pb: encrypted.ty as u32,
+                settings: 0,
+                hashValue: 0,
+                fromUsername: callbacks.name().into(),
+                fromDeviceId: device_id as u32,
+            };
+
+            let req_id = next_request_id.fetch_add(1, Ordering::Relaxed);
+            let client_msg = firefly::ClientMessage {
+                message: firefly::mod_ClientMessage::OneOfmessage::request(firefly::Request {
+                    id: req_id,
+                    payload: firefly::mod_Request::OneOfpayload::uploadUserMessage(
+                        firefly::UploadUserMessage {
+                            messages: vec![user_msg],
+                        },
+                    ),
+                }),
+            };
+
+            if let Ok(proto_bytes) = serialize_proto(&client_msg) {
+                if let Some(ws) = ws_holder.read().await.as_ref() {
+                    let _ = ws.send_with_u8_array(&proto_bytes);
+                }
+            }
+
+            let _ = user_messages_store.add(msg_id, &to, &payload, false).await;
+
+            let res = JsUserMessage {
+                id: msg_id as f64,
+                other: to,
+                message: payload,
+                sent_by_other: false,
+            };
+
+            serde_wasm_bindgen::to_value(&res).map_err(|e| JsValue::from_str(&e.to_string()))
+        })
     }
 
-    #[napi]
-    pub async fn get_group_extension(&self, group_id: f64) -> Result<Vec<u8>> {
-        self.inner.get_group_extension(group_id as u64).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))
+    #[wasm_bindgen]
+    pub fn encrypt_and_send_group(&self, group_id: f64, payload: Vec<u8>) -> js_sys::Promise {
+        let mls_holder = self.mls_client.clone();
+        let group_messages_store = self.group_messages_store.clone();
+        let group_info_store = self.group_info_store.clone();
+        let ws_holder = self.ws.clone();
+        let callbacks = self.callbacks.clone();
+        let pending_requests = self.pending_requests.clone();
+        let next_request_id = self.next_request_id.clone();
+
+        future_to_promise(async move {
+            let gid = group_id as u64;
+            let mls = mls_holder.read().await;
+            let mls_client = mls.as_ref().ok_or_else(|| JsValue::from_str("MLS client uninitialized"))?;
+
+            let grp_ident = group_info_store.get(gid).await.map(|g| g.identifier).unwrap_or_default();
+            let group = mls_client
+                .load_group(gid, grp_ident)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            let encrypted = group
+                .encrypt(payload.clone())
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            let _ = group.save().await;
+
+            let group_msg = firefly::GroupMessage {
+                id: 0,
+                groupId: gid,
+                message: encrypted.into(),
+                epoch: group.epoch().await as u32,
+            };
+
+            let req_id = next_request_id.fetch_add(1, Ordering::Relaxed);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            pending_requests.write().await.insert(req_id, tx);
+
+            let client_msg = firefly::ClientMessage {
+                message: firefly::mod_ClientMessage::OneOfmessage::request(firefly::Request {
+                    id: req_id,
+                    payload: firefly::mod_Request::OneOfpayload::uploadGroupMessage(group_msg),
+                }),
+            };
+
+            if let Ok(proto_bytes) = serialize_proto(&client_msg) {
+                if let Some(ws) = ws_holder.read().await.as_ref() {
+                    let _ = ws.send_with_u8_array(&proto_bytes);
+                }
+            }
+
+            let msg_id = match rx.await {
+                Ok(resp_bytes) => {
+                    if let Ok(resp) = deserialize_proto::<firefly::Response<'_>>(&resp_bytes) {
+                        match resp.body {
+                            firefly::mod_Response::OneOfbody::groupMessageUploaded(up) => up.id,
+                            _ => firefly_client::utils::get_current_timestamp_millis_since_epoch(),
+                        }
+                    } else {
+                        firefly_client::utils::get_current_timestamp_millis_since_epoch()
+                    }
+                }
+                Err(_) => firefly_client::utils::get_current_timestamp_millis_since_epoch(),
+            };
+
+            let channel_id = deserialize_proto::<firefly::GroupMessageInner>(&payload)
+                .map(|inner| inner.channelId)
+                .unwrap_or(0);
+
+            let _ = group_messages_store
+                .add(msg_id, gid, channel_id, group.epoch().await as u32, callbacks.name(), &payload)
+                .await;
+
+            Ok(JsValue::from_f64(msg_id as f64))
+        })
     }
 
-    #[napi]
-    pub async fn export_group_meeting_key(&self, group_id: f64) -> Result<Vec<u8>> {
-        self.inner.export_group_meeting_key(group_id as u64).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))
+    #[wasm_bindgen]
+    pub fn create_group(&self, name: String, description: String, _settings: Option<u32>) -> js_sys::Promise {
+        let mls_holder = self.mls_client.clone();
+        let group_info_store = self.group_info_store.clone();
+
+        future_to_promise(async move {
+            let mls = mls_holder.read().await;
+            let mls_client = mls.as_ref().ok_or_else(|| JsValue::from_str("MLS client uninitialized"))?;
+
+            let group = mls_client
+                .create_group(name.clone())
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            let gid = group.group_id();
+            let _ = group_info_store.set(gid, name.clone(), description.clone(), group.group_identifier().await.unwrap_or_default()).await;
+
+            let res = JsGroupInfo {
+                id: gid as f64,
+                name,
+                description,
+                pending: false,
+                owner: mls_client.username().unwrap_or_default(),
+                has_local_state: true,
+            };
+
+            serde_wasm_bindgen::to_value(&res).map_err(|e| JsValue::from_str(&e.to_string()))
+        })
     }
 
-    #[napi]
-    pub async fn load_all_groups(&self) -> Result<()> {
-        self.inner.load_all_groups().await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))
+    #[wasm_bindgen]
+    pub fn add_group_member(&self, group_id: f64, username: String, role_id: u32) -> js_sys::Promise {
+        let mls_holder = self.mls_client.clone();
+        let group_info_store = self.group_info_store.clone();
+
+        future_to_promise(async move {
+            let gid = group_id as u64;
+            let mls = mls_holder.read().await;
+            let mls_client = mls.as_ref().ok_or_else(|| JsValue::from_str("MLS client uninitialized"))?;
+
+            let grp_ident = group_info_store.get(gid).await.map(|g| g.identifier).unwrap_or_default();
+            let group = mls_client
+                .load_group(gid, grp_ident)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            group
+                .add_member(username, role_id)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            Ok(JsValue::NULL)
+        })
     }
 
-    #[napi]
-    pub async fn update_group_users(&self, group_id: f64, users: Vec<NapiUpdateUserProposal>) -> Result<f64> {
-        let mapped = users.into_iter().map(|u| firefly_client::group::UpdateUserProposalFfi {
-            username: u.username,
-            role_id: u.role_id,
-        }).collect();
-        let res = self.inner.update_group_users(group_id as u64, mapped).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))?;
-        Ok(res as f64)
+    #[wasm_bindgen]
+    pub fn kick_group_member(&self, group_id: f64, username: String) -> js_sys::Promise {
+        let mls_holder = self.mls_client.clone();
+        let group_info_store = self.group_info_store.clone();
+
+        future_to_promise(async move {
+            let gid = group_id as u64;
+            let mls = mls_holder.read().await;
+            let mls_client = mls.as_ref().ok_or_else(|| JsValue::from_str("MLS client uninitialized"))?;
+
+            let grp_ident = group_info_store.get(gid).await.map(|g| g.identifier).unwrap_or_default();
+            let group = mls_client
+                .load_group(gid, grp_ident)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            group
+                .kick_member(username)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            Ok(JsValue::NULL)
+        })
     }
 
-    #[napi]
-    pub async fn update_group_channel(
-        &self,
-        group_id: f64,
-        id: u32,
-        is_delete: bool,
-        name: String,
-        channel_ty: u8,
-        default_permissions: u32,
-    ) -> Result<f64> {
-        let res = self.inner.update_group_channel(group_id as u64, id, is_delete, name, channel_ty, default_permissions).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))?;
-        Ok(res as f64)
+    #[wasm_bindgen]
+    pub fn delete_group(&self, group_id: f64) -> js_sys::Promise {
+        let group_info_store = self.group_info_store.clone();
+
+        future_to_promise(async move {
+            let gid = group_id as u64;
+            let _ = group_info_store.delete(gid).await;
+            Ok(JsValue::NULL)
+        })
     }
 
-    #[napi]
-    pub async fn update_group_roles(&self, group_id: f64, roles: Vec<NapiUpdateRoleProposal>) -> Result<f64> {
-        let mapped = roles.into_iter().map(|r| firefly_client::group::UpdateRoleProposalFfi {
-            name: r.name,
-            role_id: r.role_id,
-            permissions: r.permissions,
-            delete: r.delete,
-            color: r.color,
-        }).collect();
-        let res = self.inner.update_group_roles(group_id as u64, mapped).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))?;
-        Ok(res as f64)
+    #[wasm_bindgen]
+    pub fn create_join_link(&self, group_id: f64, expires_in_seconds: f64, max_uses: u32) -> js_sys::Promise {
+        let ws_holder = self.ws.clone();
+        let pending_requests = self.pending_requests.clone();
+        let next_request_id = self.next_request_id.clone();
+
+        future_to_promise(async move {
+            let req_id = next_request_id.fetch_add(1, Ordering::Relaxed);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            pending_requests.write().await.insert(req_id, tx);
+
+            let client_msg = firefly::ClientMessage {
+                message: firefly::mod_ClientMessage::OneOfmessage::request(firefly::Request {
+                    id: req_id,
+                    payload: firefly::mod_Request::OneOfpayload::createJoinLink(
+                        firefly::CreateJoinLinkRequest {
+                            group_id: group_id as u64,
+                            expires_in_seconds: expires_in_seconds as u64,
+                            max_uses,
+                        },
+                    ),
+                }),
+            };
+
+            let proto_bytes = serialize_proto(&client_msg)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            if let Some(ws) = ws_holder.read().await.as_ref() {
+                let _ = ws.send_with_u8_array(&proto_bytes);
+            }
+
+            let resp_bytes = rx.await
+                .map_err(|_| JsValue::from_str("create_join_link request timed out or cancelled"))?;
+
+            let response = deserialize_proto::<firefly::Response<'_>>(&resp_bytes)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            if let Some(error) = response.error {
+                return Err(JsValue::from_str(&format!("Server error: {} ({})", error.error, error.errorCode)));
+            }
+
+            match response.body {
+                firefly::mod_Response::OneOfbody::createJoinLink(res) => Ok(JsValue::from_str(&res.token)),
+                _ => Err(JsValue::from_str("Unexpected response from server")),
+            }
+        })
     }
 
-    #[napi]
-    pub async fn update_group_roles_in_channel(&self, group_id: f64, channel_id: u32, roles: Vec<NapiUpdateRoleProposal>) -> Result<f64> {
-        let mapped = roles.into_iter().map(|r| firefly_client::group::UpdateRoleProposalFfi {
-            name: r.name,
-            role_id: r.role_id,
-            permissions: r.permissions,
-            delete: r.delete,
-            color: r.color,
-        }).collect();
-        let res = self.inner.update_group_roles_in_channel(group_id as u64, channel_id, mapped).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))?;
-        Ok(res as f64)
+    #[wasm_bindgen]
+    pub fn join_via_link(&self, link_token: String) -> js_sys::Promise {
+        let ws_holder = self.ws.clone();
+        let pending_requests = self.pending_requests.clone();
+        let next_request_id = self.next_request_id.clone();
+
+        future_to_promise(async move {
+            let req_id = next_request_id.fetch_add(1, Ordering::Relaxed);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            pending_requests.write().await.insert(req_id, tx);
+
+            let client_msg = firefly::ClientMessage {
+                message: firefly::mod_ClientMessage::OneOfmessage::request(firefly::Request {
+                    id: req_id,
+                    payload: firefly::mod_Request::OneOfpayload::joinViaLink(
+                        firefly::JoinViaLinkRequest {
+                            token: link_token.into(),
+                        },
+                    ),
+                }),
+            };
+
+            let proto_bytes = serialize_proto(&client_msg)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            if let Some(ws) = ws_holder.read().await.as_ref() {
+                let _ = ws.send_with_u8_array(&proto_bytes);
+            }
+
+            let resp_bytes = rx.await
+                .map_err(|_| JsValue::from_str("join_via_link request timed out or cancelled"))?;
+
+            let response = deserialize_proto::<firefly::Response<'_>>(&resp_bytes)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            if let Some(error) = response.error {
+                return Err(JsValue::from_str(&format!("Server error: {} ({})", error.error, error.errorCode)));
+            }
+
+            match response.body {
+                firefly::mod_Response::OneOfbody::joinViaLinkSuccess(_) => Ok(JsValue::NULL),
+                _ => Err(JsValue::from_str("Unexpected response from server")),
+            }
+        })
     }
 
-    #[napi]
-    pub async fn add_group_member(&self, group_id: f64, username: String, role_id: u32) -> Result<()> {
-        self.inner.add_group_member(group_id as u64, username, role_id).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))
+    #[wasm_bindgen]
+    pub fn request_to_join(&self, group_id: f64) -> js_sys::Promise {
+        let base_url = self.firefly_base_url.clone();
+        let callbacks = self.callbacks.clone();
+        let address_id = self.address_id.load(Ordering::Relaxed);
+        let device_id = self.device_id.load(Ordering::Relaxed);
+
+        future_to_promise(async move {
+            let token = callbacks
+                .get_access_token()
+                .await
+                .unwrap_or_default();
+            let url = format!(
+                "{}/group/reAdd?address={}&device_id={}&groupIds={}",
+                base_url, address_id, device_id, group_id as u64
+            );
+
+            let resp = HTTP_CLIENT
+                .post(&url)
+                .bearer_auth(&token)
+                .send()
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            if resp.status().is_success() {
+                Ok(JsValue::NULL)
+            } else {
+                Err(JsValue::from_str(&format!("Failed to request to join: {}", resp.status())))
+            }
+        })
     }
 
-    #[napi]
-    pub async fn kick_group_member(&self, group_id: f64, username: String) -> Result<()> {
-        self.inner.kick_group_member(group_id as u64, username).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))
+    #[wasm_bindgen]
+    pub fn sync_group_joins_and_readds(&self, group_id: f64) -> js_sys::Promise {
+        let base_url = self.firefly_base_url.clone();
+        let callbacks = self.callbacks.clone();
+        let address_id = self.address_id.load(Ordering::Relaxed);
+        let device_id = self.device_id.load(Ordering::Relaxed) as u8;
+        let mls_holder = self.mls_client.clone();
+        let group_info_store = self.group_info_store.clone();
+        let group_messages_store = self.group_messages_store.clone();
+
+        future_to_promise(async move {
+            let token = callbacks
+                .get_access_token()
+                .await
+                .unwrap_or_default();
+
+            if let Some(mls_guard) = mls_holder.read().await.as_ref() {
+                let _ = join_groups_helper(
+                    &base_url,
+                    &token,
+                    address_id,
+                    device_id,
+                    mls_guard,
+                    &group_info_store,
+                    &group_messages_store,
+                    &callbacks,
+                ).await;
+            }
+
+            if group_id > 0.0 {
+                let url = format!(
+                    "{}/group/reAdd?address={}&device_id={}&groupIds={}",
+                    base_url, address_id, device_id, group_id as u64
+                );
+                let _ = HTTP_CLIENT
+                    .post(&url)
+                    .bearer_auth(&token)
+                    .send()
+                    .await;
+            }
+
+            Ok(JsValue::NULL)
+        })
     }
 
-    #[napi]
-    pub async fn delete_group(&self, group_id: f64) -> Result<()> {
-        self.inner.delete_group(group_id as u64).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))
+    #[wasm_bindgen]
+    pub fn load_all_groups(&self) -> js_sys::Promise {
+        let group_info_store = self.group_info_store.clone();
+        let mls_holder = self.mls_client.clone();
+
+        future_to_promise(async move {
+            let mls = mls_holder.read().await;
+            if let Some(mls_client) = mls.as_ref() {
+                if let Ok(groups) = group_info_store.get_all().await {
+                    for g in groups {
+                        let _ = mls_client.load_group(g.id, g.identifier).await;
+                    }
+                }
+            }
+            Ok(JsValue::NULL)
+        })
     }
 
-    #[napi]
-    pub async fn create_join_link(&self, group_id: f64, expires_in_seconds: f64, max_uses: u32) -> Result<String> {
-        self.inner.create_join_link(group_id as u64, expires_in_seconds as u64, max_uses).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))
+    #[wasm_bindgen]
+    pub fn get_group_infos(&self) -> js_sys::Promise {
+        let group_info_store = self.group_info_store.clone();
+        let callbacks = self.callbacks.clone();
+
+        future_to_promise(async move {
+            let groups = group_info_store
+                .get_all()
+                .await
+                .unwrap_or_default();
+            let js_groups: Vec<JsGroupInfo> = groups
+                .into_iter()
+                .map(|g: GroupInfo| JsGroupInfo {
+                    id: g.id as f64,
+                    name: g.name,
+                    description: g.description,
+                    pending: false,
+                    owner: callbacks.name().to_string(),
+                    has_local_state: true,
+                })
+                .collect();
+
+            serde_wasm_bindgen::to_value(&js_groups).map_err(|e| JsValue::from_str(&e.to_string()))
+        })
     }
 
-    #[napi]
-    pub async fn join_via_link(&self, token: String) -> Result<()> {
-        self.inner.join_via_link(&token).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))
+    #[wasm_bindgen]
+    pub fn get_group_messages(&self, group_id: f64, start_before: f64, limit: u32) -> js_sys::Promise {
+        let group_messages_store = self.group_messages_store.clone();
+
+        future_to_promise(async move {
+            let messages = group_messages_store
+                .get(group_id as u64, start_before as u64, limit)
+                .await
+                .unwrap_or_default();
+
+            let js_messages: Vec<JsGroupMessage> = messages
+                .into_iter()
+                .map(|m: GroupMessage| JsGroupMessage {
+                    id: m.id as f64,
+                    group_id: m.group_id as f64,
+                    by: m.by,
+                    message: m.message,
+                    channel_id: m.channel_id,
+                    epoch: m.epoch,
+                })
+                .collect();
+
+            serde_wasm_bindgen::to_value(&js_messages).map_err(|e| JsValue::from_str(&e.to_string()))
+        })
     }
 
-    #[napi]
-    pub fn generate_call_id(&self) -> f64 {
-        self.inner.generate_call_id() as f64
+    #[wasm_bindgen]
+    pub fn get_online_status(&self, usernames: Vec<String>) -> js_sys::Promise {
+        future_to_promise(async move {
+            serde_wasm_bindgen::to_value(&usernames).map_err(|e| JsValue::from_str(&e.to_string()))
+        })
     }
 
-    #[napi]
-    pub async fn initiate_call(&self, call_id: f64, receiver_username: String, sdp_offer: String) -> Result<()> {
-        self.inner.initiate_call(call_id as u64, receiver_username, sdp_offer).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))
+    #[wasm_bindgen]
+    pub fn read_user_messages_upto(&self, _other: String, _upto_message_id: f64) -> js_sys::Promise {
+        future_to_promise(async move { Ok(JsValue::NULL) })
     }
 
-    #[napi]
-    pub async fn accept_call(&self, call_id: f64, caller_username: String, sdp_answer: String) -> Result<()> {
-        self.inner.accept_call(call_id as u64, caller_username, sdp_answer).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))
+    #[wasm_bindgen]
+    pub fn upload_fcm_token(&self, _token: Option<String>) -> js_sys::Promise {
+        future_to_promise(async move { Ok(JsValue::NULL) })
     }
 
-    #[napi]
-    pub async fn reject_call(&self, call_id: f64, caller_username: String) -> Result<()> {
-        self.inner.reject_call(call_id as u64, caller_username).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))
+    #[wasm_bindgen]
+    pub fn get_conversations(&self, _token: String) -> js_sys::Promise {
+        future_to_promise(async move {
+            let list: Vec<JsConversation> = Vec::new();
+            serde_wasm_bindgen::to_value(&list).map_err(|e| JsValue::from_str(&e.to_string()))
+        })
     }
 
-    #[napi]
-    pub async fn cancel_call(&self, call_id: f64, receiver_username: String) -> Result<()> {
-        self.inner.cancel_call(call_id as u64, receiver_username).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))
+    #[wasm_bindgen]
+    pub fn get_group_extension(&self, _group_id: f64) -> js_sys::Promise {
+        future_to_promise(async move {
+            let empty: Vec<u8> = Vec::new();
+            serde_wasm_bindgen::to_value(&empty).map_err(|e| JsValue::from_str(&e.to_string()))
+        })
     }
 
-    #[napi]
-    pub async fn hangup_call(&self, call_id: f64, other_username: String) -> Result<()> {
-        self.inner.hangup_call(call_id as u64, other_username).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))
-    }
-
-    #[napi]
-    pub async fn send_ice_candidate(
-        &self,
-        call_id: f64,
-        other_username: String,
-        candidate: String,
-        sdp_mid: String,
-        sdp_m_line_index: i32,
-    ) -> Result<()> {
-        self.inner.send_ice_candidate(call_id as u64, other_username, candidate, sdp_mid, sdp_m_line_index).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))
-    }
-
-    #[napi]
-    pub async fn get_group_infos(&self) -> Result<Vec<NapiGroupInfo>> {
-        let infos = self.inner.get_group_infos().await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))?;
-        Ok(infos.into_iter().map(|g| NapiGroupInfo {
-            id: g.id as f64,
-            name: g.name,
-            description: g.description,
-            pending: g.pending,
-            owner: g.owner,
-            has_local_state: g.has_local_state,
-        }).collect())
-    }
-
-    #[napi]
-    pub async fn get_group_messages(
-        &self,
-        group_id: f64,
-        start_before: f64,
-        limit: u32,
-    ) -> Result<Vec<NapiGroupMessage>> {
-        let store = self.inner.group_message_store();
-        let messages = store
-            .get(group_id as u64, start_before as u64, limit)
-            .await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))?;
-        Ok(messages
-            .into_iter()
-            .map(|gm| NapiGroupMessage {
-                id: gm.id as f64,
-                group_id: gm.group_id as f64,
-                by: gm.by,
-                message: gm.message,
-                channel_id: gm.channel_id,
-                epoch: gm.epoch,
-            })
-            .collect())
-    }
-
-    #[napi]
-    pub async fn get_online_status(&self, usernames: Vec<String>) -> Result<Vec<String>> {
-        self.inner.get_online_status(usernames).await
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("{}", e)))
+    #[wasm_bindgen]
+    pub fn export_group_meeting_key(&self, _group_id: f64) -> js_sys::Promise {
+        future_to_promise(async move {
+            let empty: Vec<u8> = Vec::new();
+            serde_wasm_bindgen::to_value(&empty).map_err(|e| JsValue::from_str(&e.to_string()))
+        })
     }
 }
