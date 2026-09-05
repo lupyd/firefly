@@ -18,8 +18,9 @@ function sleep(ms: number) {
 test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000 }, async (t) => {
   process.env.EMULATOR_MODE = 'true';
   process.env.NO_TOKEN_VERIFICATION = 'true';
-  process.env.FIREFLY_BASE_URL = 'http://127.0.0.1:39305';
-  const port = 39305;
+  const baseUrl = process.env.FIREFLY_BASE_URL || 'http://127.0.0.1:39305';
+  const wsUrl = process.env.FIREFLY_WS_URL || baseUrl.replace(/^http:\/\//, 'ws://').replace(/^https:\/\//, 'wss://') + '/';
+  const port = process.env.PORT ? parseInt(process.env.PORT) : 39305;
   const dbSuffix = Math.floor(Math.random() * 100000);
 
   const testDir = `/tmp/firefly/ts_test_${dbSuffix}`;
@@ -33,8 +34,8 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
     return new FireflyClient({
       username,
       emulatorMode: true,
-      apiBaseUrl: `http://127.0.0.1:${port}`,
-      wsUrl: `ws://127.0.0.1:${port}/`,
+      apiBaseUrl: baseUrl,
+      wsUrl: wsUrl,
       dbFile,
       sessionFile,
     });
@@ -48,35 +49,45 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
     } catch (e) {}
   };
 
-  console.log('Spawning Firefly MLS Server on port', port);
-  const serverBin =
-    process.env.FIREFLY_SERVER_PATH ||
-    (fs.existsSync('/home/ash/lupyd/firefly-mls-server/target/debug/firefly-server')
-      ? '/home/ash/lupyd/firefly-mls-server/target/debug/firefly-server'
-      : '/home/ash/.cargo/target/debug/firefly-server');
+  const shouldSpawnServer =
+    process.env.SPAWN_SERVER === 'true' ||
+    (!process.env.FIREFLY_BASE_URL &&
+      (process.env.FIREFLY_SERVER_PATH ||
+        fs.existsSync('/home/ash/lupyd/firefly-mls-server/target/debug/firefly-server') ||
+        fs.existsSync('/home/ash/.cargo/target/debug/firefly-server')));
 
-  const serverProcess = spawn(serverBin, [], {
-    cwd: path.resolve(__dirname, '..'),
-    env: {
-      ...process.env,
-      EMULATOR_MODE: 'true',
-      NO_TOKEN_VERIFICATION: 'true',
-      PORT: String(port),
-      FIREFLY_BASE_URL: `http://127.0.0.1:${port}`,
-      RUST_LOG: 'info',
-    },
-  });
+  let serverProcess: any = null;
+  if (shouldSpawnServer) {
+    console.log('Spawning Firefly MLS Server on port', port);
+    const serverBin =
+      process.env.FIREFLY_SERVER_PATH ||
+      (fs.existsSync('/home/ash/lupyd/firefly-mls-server/target/debug/firefly-server')
+        ? '/home/ash/lupyd/firefly-mls-server/target/debug/firefly-server'
+        : '/home/ash/.cargo/target/debug/firefly-server');
 
-  serverProcess.stdout.on('data', (data) => {
-    // console.log('[SERVER STDOUT]', data.toString().trim());
-  });
-  serverProcess.stderr.on('data', (data) => {
-    // console.error('[SERVER STDERR]', data.toString().trim());
-  });
+    serverProcess = spawn(serverBin, [], {
+      cwd: path.resolve(__dirname, '..'),
+      env: {
+        ...process.env,
+        EMULATOR_MODE: 'true',
+        NO_TOKEN_VERIFICATION: 'true',
+        PORT: String(port),
+        FIREFLY_BASE_URL: `http://127.0.0.1:${port}`,
+        RUST_LOG: 'info',
+      },
+    });
+
+    serverProcess.stdout.on('data', () => {});
+    serverProcess.stderr.on('data', () => {});
+  } else {
+    console.log('Connecting to existing Firefly MLS Server at', baseUrl);
+  }
 
   const killServer = () => {
-    console.log('Killing Firefly MLS Server...');
-    serverProcess.kill('SIGKILL');
+    if (serverProcess) {
+      console.log('Killing Firefly MLS Server...');
+      serverProcess.kill('SIGKILL');
+    }
   };
 
   process.on('exit', killServer);

@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  pull_request:
+
+jobs:
+  test:
+    name: Run All Tests (Rust & TypeScript)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Start PostgreSQL container
+        run: |
+          docker run -d \
+            --name postgres \
+            -p 54321:5432 \
+            -e POSTGRES_DB=firefly \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=postgres \
+            -v ${{ github.workspace }}/initdb.sql:/docker-entrypoint-initdb.d/init.sql \
+            postgres:16-alpine
+
+          echo "Waiting for PostgreSQL to become ready..."
+          until docker exec postgres pg_isready -U postgres -d firefly; do
+            sleep 1
+          done
+          echo "PostgreSQL is ready!"
+
+      - name: Pull and start Firefly MLS Server container
+        run: |
+          docker pull hashtag438/firefly-mls-server:latest
+          docker run -d \
+            --name firefly-server \
+            --network host \
+            -v ${{ github.workspace }}/initdb.sql:/app/initdb.sql \
+            -v ${{ github.workspace }}/initdb.sql:/initdb.sql \
+            --env-file .env.test \
+            hashtag438/firefly-mls-server:latest
+
+          echo "Waiting for Firefly MLS Server to start..."
+          for i in $(seq 1 30); do
+            if curl -s http://127.0.0.1:39209/ > /dev/null 2>&1 || curl -s http://127.0.0.1:39209/health > /dev/null 2>&1; then
+              echo "Firefly MLS Server is up!"
+              break
+            fi
+            sleep 1
+          done
+          docker logs firefly-server
+
+      - name: Run Rust tests
+        run: |
+          export EMULATOR_MODE=true
+          export RUST_LOG=info
+          export FIREFLY_BASE_URL=http://127.0.0.1:39209
+          export FIREFLY_WS_URL=ws://127.0.0.1:39209
+          cargo test -- --test-threads=1
+
+      - name: Build WASM and JS packages
+        run: |
+          cd crates/client-node
+          npm install
+          npm run build
+
+          cd ../firefly-client-js
+          npm install
+          npm run build
+
+      - name: Run TypeScript integration tests
+        run: |
+          cd examples/chatbot
+          bun install
+          FIREFLY_BASE_URL=http://127.0.0.1:39209 FIREFLY_WS_URL=ws://127.0.0.1:39209/ SPAWN_SERVER=false bun test
+
+      - name: Dump Docker logs on failure
+        if: failure()
+        run: |
+          echo "=== Postgres Logs ==="
+          docker logs postgres || true
+          echo "=== Firefly MLS Server Logs ==="
+          docker logs firefly-server || true
