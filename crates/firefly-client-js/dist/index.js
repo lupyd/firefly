@@ -92,6 +92,8 @@ class FireflyClient {
     sessionFile;
     dbFile;
     commands;
+    messageHandlers;
+    groupMessageHandlers;
     client;
     session;
     constructor(options = {}) {
@@ -107,6 +109,8 @@ class FireflyClient {
         this.sessionFile = options.sessionFile || path.resolve(process.cwd(), 'client-session.json');
         this.dbFile = options.dbFile || path.resolve(process.cwd(), 'client-store.db');
         this.commands = new Map();
+        this.messageHandlers = [];
+        this.groupMessageHandlers = [];
         this.client = null;
         this.session = {
             access_token: null,
@@ -119,6 +123,14 @@ class FireflyClient {
     command(name, handler) {
         const trigger = name.startsWith('/') ? name.toLowerCase() : `/${name.toLowerCase()}`;
         this.commands.set(trigger, handler);
+    }
+    // Registers a general direct message handler
+    onMessage(handler) {
+        this.messageHandlers.push(handler);
+    }
+    // Registers a general group message handler
+    onGroupMessage(handler) {
+        this.groupMessageHandlers.push(handler);
     }
     // Fetch members' online status and last connected timestamp
     async getGroupMembersOnlineStatus(groupId) {
@@ -253,6 +265,13 @@ class FireflyClient {
             throw new Error('Client not initialized');
         }
         return await this.client.getOnlineStatus(usernames);
+    }
+    // Dispose client
+    async dispose() {
+        if (this.client) {
+            await this.client.dispose();
+            this.client = null;
+        }
     }
     // Load and save session
     _loadSession() {
@@ -413,14 +432,15 @@ class FireflyClient {
     }
     // Handles parsed message routing to command registry
     async _handleMessage({ text, sender, isGroup, groupId, channelId }) {
-        if (!text || !text.startsWith('/'))
+        if (!text)
             return;
-        const parts = text.trim().split(/\s+/);
-        const commandName = parts[0].toLowerCase();
-        const args = parts.slice(1);
-        const handler = this.commands.get(commandName);
-        if (!handler)
-            return;
+        let commandName = '';
+        let args = [];
+        if (text.startsWith('/')) {
+            const parts = text.trim().split(/\s+/);
+            commandName = parts[0].toLowerCase();
+            args = parts.slice(1);
+        }
         const ctx = {
             client: this,
             bot: this,
@@ -458,11 +478,34 @@ class FireflyClient {
                 }
             }
         };
-        try {
-            await handler(ctx);
+        if (isGroup) {
+            for (const handler of this.groupMessageHandlers) {
+                try {
+                    await handler(ctx);
+                }
+                catch (err) {
+                    console.error('Error executing group message handler:', err);
+                }
+            }
         }
-        catch (err) {
-            console.error(`Error executing command ${commandName}:`, err);
+        else {
+            for (const handler of this.messageHandlers) {
+                try {
+                    await handler(ctx);
+                }
+                catch (err) {
+                    console.error('Error executing message handler:', err);
+                }
+            }
+        }
+        if (commandName && this.commands.has(commandName)) {
+            const handler = this.commands.get(commandName);
+            try {
+                await handler(ctx);
+            }
+            catch (err) {
+                console.error(`Error executing command ${commandName}:`, err);
+            }
         }
     }
     // Initializes FFI connection

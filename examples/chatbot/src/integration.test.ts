@@ -5,7 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { FireflyClient, protos, initLogger } from 'firefly-client-js';
 
-// Initialize the native Rust client logger to write all internal logs to js-test.log
+// Initialize the native Rust client logger
 initLogger('/tmp/firefly/js-test.log');
 
 const GroupMessageInner = protos.GroupMessageInner;
@@ -15,31 +15,46 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-test('Firefly JS Client Integration Test - DM, Group Invite, and Group Messaging', { timeout: 60000 }, async (t) => {
+test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000 }, async (t) => {
   process.env.EMULATOR_MODE = 'true';
   process.env.NO_TOKEN_VERIFICATION = 'true';
   process.env.FIREFLY_BASE_URL = 'http://127.0.0.1:39305';
   const port = 39305;
   const dbSuffix = Math.floor(Math.random() * 100000);
-  const aliceDb = path.resolve(process.cwd(), `alice-test-${dbSuffix}.db`);
-  const bobDb = path.resolve(process.cwd(), `bob-test-${dbSuffix}.db`);
-  const aliceSession = path.resolve(process.cwd(), `alice-session-${dbSuffix}.json`);
-  const bobSession = path.resolve(process.cwd(), `bob-session-${dbSuffix}.json`);
 
-  // Cleanup pre-existing files
-  const cleanupFiles = () => {
-    [aliceDb, bobDb, aliceSession, bobSession].forEach((f) => {
-      if (fs.existsSync(f)) {
-        try {
-          fs.unlinkSync(f);
-        } catch (e) {}
-      }
+  const testDir = `/tmp/firefly/ts_test_${dbSuffix}`;
+  if (!fs.existsSync(testDir)) {
+    fs.mkdirSync(testDir, { recursive: true });
+  }
+
+  const createClientHelper = (username: string) => {
+    const dbFile = path.resolve(testDir, `${username}.db`);
+    const sessionFile = path.resolve(testDir, `${username}-session.json`);
+    return new FireflyClient({
+      username,
+      emulatorMode: true,
+      apiBaseUrl: `http://127.0.0.1:${port}`,
+      wsUrl: `ws://127.0.0.1:${port}/`,
+      dbFile,
+      sessionFile,
     });
   };
-  cleanupFiles();
+
+  const cleanupFiles = () => {
+    try {
+      if (fs.existsSync(testDir)) {
+        fs.rmSync(testDir, { recursive: true, force: true });
+      }
+    } catch (e) {}
+  };
 
   console.log('Spawning Firefly MLS Server on port', port);
-  const serverBin = process.env.FIREFLY_SERVER_PATH || (fs.existsSync('/home/ash/lupyd/firefly-mls-server/target/debug/firefly-server') ? '/home/ash/lupyd/firefly-mls-server/target/debug/firefly-server' : '/home/ash/.cargo/target/debug/firefly-server');
+  const serverBin =
+    process.env.FIREFLY_SERVER_PATH ||
+    (fs.existsSync('/home/ash/lupyd/firefly-mls-server/target/debug/firefly-server')
+      ? '/home/ash/lupyd/firefly-mls-server/target/debug/firefly-server'
+      : '/home/ash/.cargo/target/debug/firefly-server');
+
   const serverProcess = spawn(serverBin, [], {
     cwd: path.resolve(__dirname, '..'),
     env: {
@@ -53,13 +68,12 @@ test('Firefly JS Client Integration Test - DM, Group Invite, and Group Messaging
   });
 
   serverProcess.stdout.on('data', (data) => {
-    console.log('[SERVER STDOUT]', data.toString().trim());
+    // console.log('[SERVER STDOUT]', data.toString().trim());
   });
   serverProcess.stderr.on('data', (data) => {
-    console.error('[SERVER STDERR]', data.toString().trim());
+    // console.error('[SERVER STDERR]', data.toString().trim());
   });
 
-  // Make sure we kill the server on any exit
   const killServer = () => {
     console.log('Killing Firefly MLS Server...');
     serverProcess.kill('SIGKILL');
@@ -68,30 +82,16 @@ test('Firefly JS Client Integration Test - DM, Group Invite, and Group Messaging
   process.on('exit', killServer);
 
   try {
-    // Wait for the server to start up
+    // Wait for server to bind
     await sleep(4000);
 
-    console.log('Initializing Alice Client...');
-    const alice = new FireflyClient({
-      username: 'alice',
-      emulatorMode: true,
-      apiBaseUrl: `http://127.0.0.1:${port}`,
-      wsUrl: `ws://127.0.0.1:${port}/`,
-      dbFile: aliceDb,
-      sessionFile: aliceSession,
-    });
+    // =========================================================================
+    // SCENARIO 1 & 2: Direct Messaging (DM) + Group Messaging Flow
+    // =========================================================================
+    console.log('\n--- Running Scenario 1 & 2: DM and Group Flow ---');
+    const alice = createClientHelper('alice');
+    const bob = createClientHelper('bob');
 
-    console.log('Initializing Bob Client...');
-    const bob = new FireflyClient({
-      username: 'bob',
-      emulatorMode: true,
-      apiBaseUrl: `http://127.0.0.1:${port}`,
-      wsUrl: `ws://127.0.0.1:${port}/`,
-      dbFile: bobDb,
-      sessionFile: bobSession,
-    });
-
-    // Registrations for DMs
     let aliceReceivedPing = false;
     let bobReceivedPong = false;
 
@@ -106,122 +106,323 @@ test('Firefly JS Client Integration Test - DM, Group Invite, and Group Messaging
       bobReceivedPong = true;
     });
 
-    // Registrations for Group Messages
     let aliceReceivedGroupPing = false;
     let bobReceivedGroupPong = false;
 
     alice.command('groupping', async (ctx) => {
-      console.log('Alice received /groupping group command from', ctx.sender);
+      console.log('Alice received /groupping from', ctx.sender);
       aliceReceivedGroupPing = true;
       await ctx.reply('/grouppong');
     });
 
     bob.command('grouppong', async (ctx) => {
-      console.log('Bob received /grouppong group reply from', ctx.sender);
+      console.log('Bob received /grouppong from', ctx.sender);
       bobReceivedGroupPong = true;
     });
 
-    console.log('Starting Alice...');
     await alice.start();
-    console.log('Alice started!');
-
-    console.log('Starting Bob...');
     await bob.start();
-    console.log('Bob started!');
-
-    // Wait a bit for both to sync keys
     await sleep(2000);
 
-    // ----------------------------------------------------
-    // TEST 1: Direct Messaging (DM)
-    // ----------------------------------------------------
-    console.log('Bob sending DM (/ping) to Alice...');
-    const dmPayload = {
-      messagePayload: {
-        text: '/ping',
-        files: undefined,
-        replyingTo: 0n,
-      },
-      nonce: Math.floor(Math.random() * 9_999_999),
-    };
-    const dmBytes = UserMessageInner.encode(dmPayload).finish();
-    await bob.client.encryptAndSend('alice', Array.from(dmBytes));
+    // 1. DM Ping-Pong
+    console.log('Testing Direct Message (Bob -> Alice)...');
+    await bob.sendUserMessage('alice', '/ping');
 
-    // Wait and verify
     for (let i = 0; i < 20; i++) {
       if (aliceReceivedPing && bobReceivedPong) break;
       await sleep(500);
     }
+    assert.ok(aliceReceivedPing, 'Alice should have received Bob DM');
+    assert.ok(bobReceivedPong, 'Bob should have received Alice reply DM');
+    console.log('✓ Direct messaging flow passed!');
 
-    assert.ok(aliceReceivedPing, 'Alice should have received Bob\'s DM');
-    assert.ok(bobReceivedPong, 'Bob should have received Alice\'s reply DM');
-    console.log('Direct messaging integration test passed!');
-
-    // ----------------------------------------------------
-    // TEST 2: Group Creation and Invitation
-    // ----------------------------------------------------
-    console.log('Alice creating a group...');
-    const groupInfo = await alice.client.createGroup('IntegrationGroup', 'Group for integration testing');
-    const groupId = groupInfo.id;
+    // 2. Group Creation & Invitation
+    console.log('Testing Group Creation and Member Invite (Alice -> Bob)...');
+    const groupInfo = await alice.createGroup('IntegrationGroup', 'Group for integration testing');
+    const groupId = Number(groupInfo.id);
     console.log('Group created with ID:', groupId);
 
-    console.log('Alice inviting Bob to the group...');
-    await alice.client.addGroupMember(groupId, 'bob', 0);
-
-    console.log('Bob checking setup to fetch and join the group...');
+    await alice.addGroupMember(groupId, 'bob', 0);
     await bob.client.checkSetup();
-
-    // Wait a bit for both to update group states and epochs
     await sleep(2000);
 
-    // ----------------------------------------------------
-    // TEST 2.5: Group Members Online Status and Last Connected
-    // ----------------------------------------------------
-    console.log('Alice fetching group members online status...');
-    const memberStatus = await alice.getGroupMembersOnlineStatus(Number(groupId));
-    console.log('Group members status received:', JSON.stringify(memberStatus, (k, v) => typeof v === 'bigint' ? v.toString() : v));
+    // Group Ping-Pong
+    console.log('Testing Group Message exchange...');
+    await bob.sendGroupMessage(groupId, '/groupping', 1);
 
-    assert.ok(memberStatus.members && memberStatus.members.length >= 2, 'Should have at least 2 members in group');
-    
-    const aliceStatus = memberStatus.members.find((m: any) => m.username === 'alice');
-    const bobStatus = memberStatus.members.find((m: any) => m.username === 'bob');
-
-    assert.ok(aliceStatus, 'Alice should be in the member status list');
-    assert.ok(bobStatus, 'Bob should be in the member status list');
-
-    assert.ok(aliceStatus.isOnline, 'Alice should be online');
-    assert.ok(bobStatus.isOnline, 'Bob should be online');
-
-    assert.ok(aliceStatus.lastConnectedAt > 0n, 'Alice last connected timestamp should be set');
-    assert.ok(bobStatus.lastConnectedAt > 0n, 'Bob last connected timestamp should be set');
-
-    console.log('Group members online status test passed!');
-
-    // ----------------------------------------------------
-    // TEST 3: Group Messaging
-    // ----------------------------------------------------
-    console.log('Bob sending group message (/groupping)...');
-    const grpPayload = {
-      messagePayload: {
-        text: '/groupping',
-        files: undefined,
-        replyingTo: 0n,
-      },
-      channelId: 1,
-    };
-    const grpBytes = GroupMessageInner.encode(grpPayload).finish();
-    await bob.client.encryptAndSendGroup(groupId, Array.from(grpBytes));
-
-    // Wait and verify
     for (let i = 0; i < 20; i++) {
       if (aliceReceivedGroupPing && bobReceivedGroupPong) break;
       await sleep(500);
     }
+    assert.ok(aliceReceivedGroupPing, 'Alice should have received Bob group message');
+    assert.ok(bobReceivedGroupPong, 'Bob should have received Alice group reply');
+    console.log('✓ Group messaging flow passed!');
 
-    assert.ok(aliceReceivedGroupPing, 'Alice should have received Bob\'s group message');
-    assert.ok(bobReceivedGroupPong, 'Bob should have received Alice\'s group reply');
-    console.log('Group messaging integration test passed!');
+    // =========================================================================
+    // SCENARIO 3: Online Status Flow (Individual + Group Members)
+    // =========================================================================
+    console.log('\n--- Running Scenario 3: Online Status Flow ---');
+    console.log('Querying online status for [alice, bob, charlie_offline]...');
+    const onlineList1 = await alice.getOnlineStatus(['alice', 'bob', 'charlie_offline']);
+    console.log('Online list:', onlineList1);
+    assert.ok(onlineList1.includes('alice'), 'Alice should be online');
+    assert.ok(onlineList1.includes('bob'), 'Bob should be online');
+    assert.ok(!onlineList1.includes('charlie_offline'), 'charlie_offline should be offline');
 
+    console.log('Fetching group members online status...');
+    const memberStatus = await alice.getGroupMembersOnlineStatus(groupId);
+    assert.ok(memberStatus.members && memberStatus.members.length >= 2);
+    const aliceSt = memberStatus.members.find((m: any) => m.username === 'alice');
+    const bobSt = memberStatus.members.find((m: any) => m.username === 'bob');
+    assert.ok(aliceSt && aliceSt.isOnline, 'Alice should show online in group status');
+    assert.ok(bobSt && bobSt.isOnline, 'Bob should show online in group status');
+    assert.ok(aliceSt.lastConnectedAt > 0n);
+    assert.ok(bobSt.lastConnectedAt > 0n);
+
+    // Disconnect Bob and re-check
+    console.log('Disposing Bob client to test disconnect detection...');
+    await bob.dispose();
+    await sleep(2000);
+
+    const onlineList2 = await alice.getOnlineStatus(['alice', 'bob', 'charlie_offline']);
+    console.log('Online list after Bob disposed:', onlineList2);
+    assert.ok(onlineList2.includes('alice'), 'Alice should still be online');
+    assert.ok(!onlineList2.includes('bob'), 'Bob should now be offline');
+    console.log('✓ Online status flow passed!');
+
+    // Dispose Alice before next scenarios
+    await alice.dispose();
+
+    // =========================================================================
+    // SCENARIO 4: Kick Member & Permission Authorization Flow
+    // =========================================================================
+    console.log('\n--- Running Scenario 4: Kick Member & Permission Authorization ---');
+    const kickOwner = createClientHelper('kick_alice');
+    const kickBob = createClientHelper('kick_bob');
+    const kickCharlie = createClientHelper('kick_charlie');
+
+    let kickAliceReceivedMsg: string | null = null;
+    let kickBobReceivedMsg: string | null = null;
+    let kickCharlieReceivedMsg: string | null = null;
+
+    kickOwner.onGroupMessage(async (ctx) => {
+      console.log('[kickOwner received group message]', ctx.text, 'from', ctx.sender);
+      kickAliceReceivedMsg = ctx.text;
+    });
+    kickBob.onGroupMessage(async (ctx) => {
+      console.log('[kickBob received group message]', ctx.text, 'from', ctx.sender);
+      kickBobReceivedMsg = ctx.text;
+    });
+    kickCharlie.onGroupMessage(async (ctx) => {
+      console.log('[kickCharlie received group message]', ctx.text, 'from', ctx.sender);
+      kickCharlieReceivedMsg = ctx.text;
+    });
+
+    await kickOwner.start();
+    await kickBob.start();
+    await kickCharlie.start();
+    await sleep(2000);
+
+    const kickGroup = await kickOwner.createGroup('Kick Test Group', 'Testing permissions & kicks');
+    const kickGroupId = Number(kickGroup.id);
+
+    console.log('Adding Bob and Charlie to Kick Test Group...');
+    await kickOwner.addGroupMember(kickGroupId, 'kick_bob', 0);
+    await kickOwner.addGroupMember(kickGroupId, 'kick_charlie', 0);
+
+    await kickBob.client.checkSetup();
+    await kickCharlie.client.checkSetup();
+    await sleep(2000);
+
+    // Charlie (role 0) attempts to kick Alice (owner) - MUST FAIL!
+    console.log('Testing: Charlie attempts to kick Owner Alice (must fail)...');
+    let charlieKickAliceFailed = false;
+    try {
+      await kickCharlie.kickGroupMember(kickGroupId, 'kick_alice');
+    } catch (err) {
+      charlieKickAliceFailed = true;
+      console.log('Charlie kick Alice correctly failed with error:', String(err));
+    }
+    assert.ok(charlieKickAliceFailed, 'Non-admin member should not be able to kick owner');
+
+    // Charlie (role 0) attempts to kick Bob - MUST FAIL!
+    console.log('Testing: Charlie attempts to kick Bob (must fail)...');
+    let charlieKickBobFailed = false;
+    try {
+      await kickCharlie.kickGroupMember(kickGroupId, 'kick_bob');
+    } catch (err) {
+      charlieKickBobFailed = true;
+      console.log('Charlie kick Bob correctly failed with error:', String(err));
+    }
+    assert.ok(charlieKickBobFailed, 'Non-admin member should not be able to kick peer member');
+
+    // Alice kicks Bob
+    console.log('Owner Alice kicking Bob...');
+    await kickOwner.kickGroupMember(kickGroupId, 'kick_bob');
+    await sleep(2000);
+
+    // Charlie syncs kick
+    console.log('Charlie syncing group setup...');
+    await kickCharlie.client.checkSetup();
+    await sleep(1000);
+
+    // Bob attempts to send message
+    console.log('Kicked Bob attempting to send group message...');
+    let bobSendFailed = false;
+    try {
+      await kickBob.sendGroupMessage(kickGroupId, 'Hello from kicked Bob!', 0);
+    } catch (err) {
+      bobSendFailed = true;
+      console.log('Bob send immediately rejected by server:', (err as Error).message);
+    }
+
+    // Wait and verify Alice and Charlie do not receive anything from Bob
+    await sleep(3000);
+    assert.ok(
+      kickAliceReceivedMsg !== 'Hello from kicked Bob!',
+      'Alice should NOT receive messages from kicked Bob'
+    );
+    assert.ok(
+      kickCharlieReceivedMsg !== 'Hello from kicked Bob!',
+      'Charlie should NOT receive messages from kicked Bob'
+    );
+
+    // Charlie sends message to group -> Alice receives it
+    console.log('Charlie sending group message to verify active group membership...');
+    await kickCharlie.sendGroupMessage(kickGroupId, 'Hello from Charlie, still here!', 0);
+
+    for (let i = 0; i < 20; i++) {
+      if (kickAliceReceivedMsg === 'Hello from Charlie, still here!') break;
+      await sleep(500);
+    }
+    assert.strictEqual(
+      kickAliceReceivedMsg,
+      'Hello from Charlie, still here!',
+      'Alice should receive message from Charlie'
+    );
+    console.log('✓ Kick member and permissions flow passed!');
+
+    await kickOwner.dispose();
+    await kickBob.dispose();
+    await kickCharlie.dispose();
+
+    // =========================================================================
+    // SCENARIO 5: Public Join Link Flow
+    // =========================================================================
+    console.log('\n--- Running Scenario 5: Public Join Link Flow ---');
+    const linkOwner = createClientHelper('link_alice');
+    const linkBob = createClientHelper('link_bob');
+    const linkCharlie = createClientHelper('link_charlie');
+    const linkDave = createClientHelper('link_dave');
+
+    let linkBobReceivedAliceMsg = false;
+    let linkAliceReceivedBobMsg = false;
+
+    linkOwner.onGroupMessage(async (ctx) => {
+      console.log('[linkOwner received group message]', ctx.text, 'from', ctx.sender);
+      if (ctx.text === 'Hello from Bob via link!') {
+        linkAliceReceivedBobMsg = true;
+      }
+    });
+
+    linkBob.onGroupMessage(async (ctx) => {
+      console.log('[linkBob received group message]', ctx.text, 'from', ctx.sender);
+      if (ctx.text === 'Hello to public group from Alice!') {
+        linkBobReceivedAliceMsg = true;
+      }
+    });
+
+    await linkOwner.start();
+    await linkBob.start();
+    await sleep(2000);
+
+    const pubGroup = await linkOwner.createGroup('Public Link Group', 'Test join links');
+    const pubGroupId = Number(pubGroup.id);
+
+    console.log('Owner Alice creating join link (expires: 3600s, max_uses: 10)...');
+    const joinToken = await linkOwner.createJoinLink(pubGroupId, 3600, 10);
+    console.log('Created join link token:', joinToken);
+
+    console.log('Bob joining via link...');
+    await linkBob.joinViaLink(joinToken);
+
+    // Wait for Alice to receive groupJoinRequests and auto-process it
+    console.log('Waiting for owner Alice to auto-process join request...');
+    await sleep(4000);
+
+    console.log('Owner Alice sending message to group...');
+    await linkOwner.sendGroupMessage(pubGroupId, 'Hello to public group from Alice!', 0);
+
+    for (let i = 0; i < 20; i++) {
+      if (linkBobReceivedAliceMsg) break;
+      await sleep(500);
+    }
+    assert.ok(linkBobReceivedAliceMsg, 'Bob should receive Alice message in link-joined group');
+
+    console.log('Bob sending message to group...');
+    await linkBob.sendGroupMessage(pubGroupId, 'Hello from Bob via link!', 0);
+
+    for (let i = 0; i < 20; i++) {
+      if (linkAliceReceivedBobMsg) break;
+      await sleep(500);
+    }
+    assert.ok(linkAliceReceivedBobMsg, 'Alice should receive Bob message');
+
+    // Test max uses limit = 1
+    console.log('Testing max_uses limit (max_uses: 1)...');
+    const maxUseToken = await linkOwner.createJoinLink(pubGroupId, 3600, 1);
+
+    await linkCharlie.start();
+    await linkDave.start();
+    await sleep(2000);
+
+    console.log('Charlie joins via 1-use token (should succeed)...');
+    await linkCharlie.joinViaLink(maxUseToken);
+
+    console.log('Dave joins via already used 1-use token (must fail)...');
+    let daveJoinFailed = false;
+    try {
+      await linkDave.joinViaLink(maxUseToken);
+    } catch (err) {
+      daveJoinFailed = true;
+      const errStr = String(err);
+      console.log('Dave join correctly failed with error:', errStr);
+      assert.ok(
+        errStr.includes('Invalid link'),
+        'Error should indicate invalid link'
+      );
+    }
+    assert.ok(daveJoinFailed, 'Dave should fail to join with exhausted link');
+
+    // Test link expiry
+    console.log('Testing link expiry (expires_in_seconds: 1)...');
+    const expiryToken = await linkOwner.createJoinLink(pubGroupId, 1, 10);
+    await sleep(2500); // wait for link to expire
+
+    console.log('Dave joins via expired token (must fail)...');
+    let daveExpiryFailed = false;
+    try {
+      await linkDave.joinViaLink(expiryToken);
+    } catch (err) {
+      daveExpiryFailed = true;
+      const errStr = String(err);
+      console.log('Dave join expired link correctly failed with error:', errStr);
+      assert.ok(
+        errStr.includes('Invalid link'),
+        'Error should indicate invalid link'
+      );
+    }
+    assert.ok(daveExpiryFailed, 'Dave should fail to join expired link');
+    console.log('✓ Public join link flow passed!');
+
+    await linkOwner.dispose();
+    await linkBob.dispose();
+    await linkCharlie.dispose();
+    await linkDave.dispose();
+
+    console.log('\n=============================================');
+    console.log('ALL INTEGRATION TEST SCENARIOS PASSED!');
+    console.log('=============================================\n');
   } finally {
     process.off('exit', killServer);
     killServer();

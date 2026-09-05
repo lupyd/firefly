@@ -103,6 +103,8 @@ export class FireflyClient {
   private dbFile: string;
 
   public commands: Map<string, CommandHandler>;
+  public messageHandlers: Array<(ctx: ClientContext & BotContext) => Promise<void> | void>;
+  public groupMessageHandlers: Array<(ctx: ClientContext & BotContext) => Promise<void> | void>;
   public client: any;
   public session: {
     access_token: string | null;
@@ -127,6 +129,8 @@ export class FireflyClient {
     this.dbFile = options.dbFile || path.resolve(process.cwd(), 'client-store.db');
 
     this.commands = new Map();
+    this.messageHandlers = [];
+    this.groupMessageHandlers = [];
     this.client = null;
     this.session = {
       access_token: null,
@@ -140,6 +144,16 @@ export class FireflyClient {
   command(name: string, handler: CommandHandler): void {
     const trigger = name.startsWith('/') ? name.toLowerCase() : `/${name.toLowerCase()}`;
     this.commands.set(trigger, handler);
+  }
+
+  // Registers a general direct message handler
+  onMessage(handler: (ctx: ClientContext & BotContext) => Promise<void> | void): void {
+    this.messageHandlers.push(handler);
+  }
+
+  // Registers a general group message handler
+  onGroupMessage(handler: (ctx: ClientContext & BotContext) => Promise<void> | void): void {
+    this.groupMessageHandlers.push(handler);
   }
 
   // Fetch members' online status and last connected timestamp
@@ -293,6 +307,14 @@ export class FireflyClient {
       throw new Error('Client not initialized');
     }
     return await this.client.getOnlineStatus(usernames);
+  }
+
+  // Dispose client
+  async dispose(): Promise<void> {
+    if (this.client) {
+      await this.client.dispose();
+      this.client = null;
+    }
   }
 
   // Load and save session
@@ -481,14 +503,15 @@ export class FireflyClient {
     groupId: number | null;
     channelId: number | null;
   }): Promise<void> {
-    if (!text || !text.startsWith('/')) return;
+    if (!text) return;
 
-    const parts = text.trim().split(/\s+/);
-    const commandName = parts[0].toLowerCase();
-    const args = parts.slice(1);
-
-    const handler = this.commands.get(commandName);
-    if (!handler) return;
+    let commandName = '';
+    let args: string[] = [];
+    if (text.startsWith('/')) {
+      const parts = text.trim().split(/\s+/);
+      commandName = parts[0].toLowerCase();
+      args = parts.slice(1);
+    }
 
     const ctx: ClientContext & BotContext = {
       client: this,
@@ -527,10 +550,31 @@ export class FireflyClient {
       }
     };
 
-    try {
-      await handler(ctx);
-    } catch (err) {
-      console.error(`Error executing command ${commandName}:`, err);
+    if (isGroup) {
+      for (const handler of this.groupMessageHandlers) {
+        try {
+          await handler(ctx);
+        } catch (err) {
+          console.error('Error executing group message handler:', err);
+        }
+      }
+    } else {
+      for (const handler of this.messageHandlers) {
+        try {
+          await handler(ctx);
+        } catch (err) {
+          console.error('Error executing message handler:', err);
+        }
+      }
+    }
+
+    if (commandName && this.commands.has(commandName)) {
+      const handler = this.commands.get(commandName)!;
+      try {
+        await handler(ctx);
+      } catch (err) {
+        console.error(`Error executing command ${commandName}:`, err);
+      }
     }
   }
 

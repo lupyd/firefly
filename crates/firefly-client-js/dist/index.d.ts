@@ -48,6 +48,8 @@ export declare class FireflyClient {
     private sessionFile;
     private dbFile;
     commands: Map<string, CommandHandler>;
+    messageHandlers: Array<(ctx: ClientContext & BotContext) => Promise<void> | void>;
+    groupMessageHandlers: Array<(ctx: ClientContext & BotContext) => Promise<void> | void>;
     client: any;
     session: {
         access_token: string | null;
@@ -57,6 +59,8 @@ export declare class FireflyClient {
     };
     constructor(options?: ClientConfig);
     command(name: string, handler: CommandHandler): void;
+    onMessage(handler: (ctx: ClientContext & BotContext) => Promise<void> | void): void;
+    onGroupMessage(handler: (ctx: ClientContext & BotContext) => Promise<void> | void): void;
     getGroupMembersOnlineStatus(groupId: number): Promise<any>;
     readUserMessagesUpto(other: string, uptoMessageId: bigint | number): Promise<void>;
     sendUserMessage(to: string, text: string): Promise<any>;
@@ -74,6 +78,7 @@ export declare class FireflyClient {
     getGroupInfos(): Promise<any[]>;
     getGroupMessages(groupId: number, startBefore?: number, limit?: number): Promise<any[]>;
     getOnlineStatus(usernames: string[]): Promise<string[]>;
+    dispose(): Promise<void>;
     private _loadSession;
     private _saveSession;
     private _exchangeCodeForTokens;

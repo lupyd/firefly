@@ -673,6 +673,30 @@ impl FireflyClientNode {
                                         }
                                     }
                                 }
+                                firefly::mod_ServerMessage::OneOfmessage::groupJoinRequests(requests) => {
+                                    if let Some(mls_guard) = mls.read().await.as_ref() {
+                                        for request in requests.requests {
+                                            let grp_ident = gis.get(request.group_id).await.map(|g| g.identifier).unwrap_or_default();
+                                            if let Ok(group) = mls_guard.load_group(request.group_id, grp_ident).await {
+                                                if let Ok(id) = group.add_member(request.username.to_string(), 0).await {
+                                                    let _ = gms.update_cursor(id, request.group_id, group.epoch().await as u32).await;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                firefly::mod_ServerMessage::OneOfmessage::groupReAddRequests(requests) => {
+                                    if let Some(mls_guard) = mls.read().await.as_ref() {
+                                        for request in requests.requests {
+                                            let grp_ident = gis.get(request.group_id).await.map(|g| g.identifier).unwrap_or_default();
+                                            if let Ok(group) = mls_guard.load_group(request.group_id, grp_ident).await {
+                                                if let Ok(id) = group.add_member(request.username.to_string(), 0).await {
+                                                    let _ = gms.update_cursor(id, request.group_id, group.epoch().await as u32).await;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 firefly::mod_ServerMessage::OneOfmessage::response(resp) => {
                                     let mut pr_guard = pr.write().await;
                                     if let Some(sender) = pr_guard.remove(&resp.id) {
@@ -1297,8 +1321,62 @@ impl FireflyClientNode {
 
     #[wasm_bindgen]
     pub fn get_online_status(&self, usernames: Vec<String>) -> js_sys::Promise {
+        let ws_holder = self.ws.clone();
+        let pending_requests = self.pending_requests.clone();
+        let next_request_id = self.next_request_id.clone();
+
         future_to_promise(async move {
-            serde_wasm_bindgen::to_value(&usernames).map_err(|e| JsValue::from_str(&e.to_string()))
+            if usernames.is_empty() {
+                return serde_wasm_bindgen::to_value(&Vec::<String>::new()).map_err(|e| JsValue::from_str(&e.to_string()));
+            }
+
+            let req_id = next_request_id.fetch_add(1, Ordering::Relaxed);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            pending_requests.write().await.insert(req_id, tx);
+
+            let client_msg = firefly::ClientMessage {
+                message: firefly::mod_ClientMessage::OneOfmessage::request(firefly::Request {
+                    id: req_id,
+                    payload: firefly::mod_Request::OneOfpayload::userOnlineStatus(
+                        firefly::UserOnlineStatusRequest {
+                            usernames: usernames.iter().map(|s| std::borrow::Cow::Borrowed(s.as_str())).collect(),
+                        },
+                    ),
+                }),
+            };
+
+            let proto_bytes = serialize_proto(&client_msg)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            if let Some(ws) = ws_holder.read().await.as_ref() {
+                let _ = ws.send_with_u8_array(&proto_bytes);
+            }
+
+            let resp_bytes = rx.await
+                .map_err(|_| JsValue::from_str("get_online_status request timed out or cancelled"))?;
+
+            let response = deserialize_proto::<firefly::Response<'_>>(&resp_bytes)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            if let Some(error) = response.error {
+                return Err(JsValue::from_str(&format!("Server error: {} ({})", error.error, error.errorCode)));
+            }
+
+            match response.body {
+                firefly::mod_Response::OneOfbody::userOnlineStatus(res) => {
+                    let mut online_users = Vec::new();
+                    for (i, username) in usernames.iter().enumerate() {
+                        if i >= 32 {
+                            break;
+                        }
+                        if (res.online_bits & (1 << i)) != 0 {
+                            online_users.push(username.clone());
+                        }
+                    }
+                    serde_wasm_bindgen::to_value(&online_users).map_err(|e| JsValue::from_str(&e.to_string()))
+                }
+                _ => Err(JsValue::from_str("Unexpected response body for userOnlineStatus")),
+            }
         })
     }
 
