@@ -15,12 +15,6 @@ import {
   GroupInfoStorage,
   KeyValueStorage,
   StorageProviders,
-  FireflyStorageAdapter,
-  UserMessageStorageAdapter,
-  GroupMessageStorageAdapter,
-  GroupInfoStorageAdapter,
-  KeyValueStorageAdapter,
-  MlsStorageAdapter,
   RawUserMessage,
   RawGroupMessage,
   RawGroupInfo,
@@ -35,12 +29,6 @@ export type {
   GroupInfoStorage,
   KeyValueStorage,
   StorageProviders,
-  FireflyStorageAdapter,
-  UserMessageStorageAdapter,
-  GroupMessageStorageAdapter,
-  GroupInfoStorageAdapter,
-  KeyValueStorageAdapter,
-  MlsStorageAdapter,
   RawUserMessage,
   RawGroupMessage,
   RawGroupInfo,
@@ -98,7 +86,7 @@ export interface ClientConfig {
   username?: string;
   sessionFile?: string;
   dbFile?: string;
-  storage?: StorageProviders | FireflyStorageAdapter;
+  storage?: StorageProviders;
   storageProviders?: StorageProviders;
 }
 
@@ -661,7 +649,7 @@ export class FireflyClient {
         try {
           const msg = JSON.parse(msgJson);
           const other = msg.other;
-          const sentByOther = msg.sent_by_other;
+          const sentByOther = msg.sentByOther ?? msg.sent_by_other;
           const message = msg.message;
 
           console.log(`[onMessage] msg received from: ${other}, sentByOther: ${sentByOther}`);
@@ -695,9 +683,9 @@ export class FireflyClient {
         try {
           const msg = JSON.parse(msgJson);
           const by = msg.by;
-          const groupId = msg.group_id;
+          const groupId = msg.groupId ?? msg.group_id;
           const message = msg.message;
-          const channelId = msg.channel_id;
+          const channelId = msg.channelId ?? msg.channel_id;
 
           console.log(`[onGroupMessage] msg received from: ${by}, group: ${groupId}`);
           if (by === this.session.username) return; // skip outgoing

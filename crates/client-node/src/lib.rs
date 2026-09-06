@@ -23,7 +23,7 @@ use firefly_core::storage_provider::{
 use firefly_client::utils::{deserialize_proto, serialize_proto, HTTP_CLIENT};
 use firefly_protos::firefly::{self};
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = initLogger)]
 pub fn init_logger(_file_path: String) {
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("Rust panic: {}", info);
@@ -32,6 +32,7 @@ pub fn init_logger(_file_path: String) {
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct JsUserMessage {
     pub id: f64,
     pub other: String,
@@ -40,6 +41,7 @@ pub struct JsUserMessage {
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct JsGroupMessage {
     pub id: f64,
     pub group_id: f64,
@@ -50,6 +52,7 @@ pub struct JsGroupMessage {
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct JsGroupInfo {
     pub id: f64,
     pub name: String,
@@ -60,6 +63,7 @@ pub struct JsGroupInfo {
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct JsConversation {
     pub other: String,
     pub settings: f64,
@@ -982,31 +986,31 @@ impl FireflyClientNode {
                 Arc<dyn MlsGroupStateStorage>,
                 Arc<dyn MlsPreSharedKeyStorage>,
             ) = if let Some(ref s_obj) = storage_obj {
-                let ums_obj = get_sub_obj(s_obj, &["userMessageStorage", "userMessages", "user_messages"]);
-                let gms_obj = get_sub_obj(s_obj, &["groupMessageStorage", "groupMessages", "group_messages"]);
-                let gis_obj = get_sub_obj(s_obj, &["groupInfoStorage", "groupInfo", "group_info"]);
-                let kvs_obj = get_sub_obj(s_obj, &["keyValueStorage", "keyValue", "key_value"]);
-                let kp_obj = get_sub_obj(s_obj, &["mlsKeyPackageStorage", "keyPackageStorage", "key_packages", "mls"]);
-                let gs_obj = get_sub_obj(s_obj, &["mlsGroupStateStorage", "groupStateStorage", "group_state", "mls"]);
-                let psk_obj = get_sub_obj(s_obj, &["mlsPreSharedKeyStorage", "preSharedKeyStorage", "psk", "mls"]);
+                let ums_obj = get_sub_obj(s_obj, &["userMessageStorage"]);
+                let gms_obj = get_sub_obj(s_obj, &["groupMessageStorage"]);
+                let gis_obj = get_sub_obj(s_obj, &["groupInfoStorage"]);
+                let kvs_obj = get_sub_obj(s_obj, &["keyValueStorage"]);
+                let kp_obj = get_sub_obj(s_obj, &["mlsKeyPackageStorage"]);
+                let gs_obj = get_sub_obj(s_obj, &["mlsGroupStateStorage"]);
+                let psk_obj = get_sub_obj(s_obj, &["mlsPreSharedKeyStorage"]);
 
                 let ums: Arc<dyn UserMessageStorage> = Arc::new(JsUserMessageStorage {
                     js_add: ums_obj.as_ref().and_then(|o| get_js_fn(o, &["add"])),
-                    js_get: ums_obj.as_ref().and_then(|o| get_js_fn(o, &["get_last_messages_of", "getLastMessagesOf", "get"])),
+                    js_get: ums_obj.as_ref().and_then(|o| get_js_fn(o, &["getLastMessagesOf", "get"])),
                     fallback: default_user_messages,
                 });
 
                 let gms: Arc<dyn GroupMessageStorage> = Arc::new(JsGroupMessageStorage {
                     js_add: gms_obj.as_ref().and_then(|o| get_js_fn(o, &["add"])),
                     js_get: gms_obj.as_ref().and_then(|o| get_js_fn(o, &["get"])),
-                    js_get_last: gms_obj.as_ref().and_then(|o| get_js_fn(o, &["get_last_message_of_group", "getLastMessageOfGroup"])),
-                    js_delete_by_group: gms_obj.as_ref().and_then(|o| get_js_fn(o, &["delete_by_group_id", "deleteByGroupId"])),
-                    js_update_cursor: gms_obj.as_ref().and_then(|o| get_js_fn(o, &["update_cursor", "updateCursor"])),
+                    js_get_last: gms_obj.as_ref().and_then(|o| get_js_fn(o, &["getLastMessageOfGroup"])),
+                    js_delete_by_group: gms_obj.as_ref().and_then(|o| get_js_fn(o, &["deleteByGroupId"])),
+                    js_update_cursor: gms_obj.as_ref().and_then(|o| get_js_fn(o, &["updateCursor"])),
                     fallback: default_group_messages,
                 });
 
                 let gis: Arc<dyn GroupInfoStorage> = Arc::new(JsGroupInfoStorage {
-                    js_get_all: gis_obj.as_ref().and_then(|o| get_js_fn(o, &["get_all", "getAll"])),
+                    js_get_all: gis_obj.as_ref().and_then(|o| get_js_fn(o, &["getAll"])),
                     js_get: gis_obj.as_ref().and_then(|o| get_js_fn(o, &["get"])),
                     js_set: gis_obj.as_ref().and_then(|o| get_js_fn(o, &["set"])),
                     js_delete: gis_obj.as_ref().and_then(|o| get_js_fn(o, &["delete"])),
@@ -1016,27 +1020,27 @@ impl FireflyClientNode {
                 let kvs: Arc<dyn KeyValueStorage> = Arc::new(JsKeyValueStorage {
                     js_get: kvs_obj.as_ref().and_then(|o| get_js_fn(o, &["get"])),
                     js_set: kvs_obj.as_ref().and_then(|o| get_js_fn(o, &["set"])),
-                    js_update_last_received_message_id: kvs_obj.as_ref().and_then(|o| get_js_fn(o, &["update_last_received_message_id", "updateLastReceivedMessageId"])),
+                    js_update_last_received_message_id: kvs_obj.as_ref().and_then(|o| get_js_fn(o, &["updateLastReceivedMessageId"])),
                     fallback: default_key_value,
                 });
 
                 let kp: Arc<dyn MlsKeyPackageStorage> = Arc::new(JsMlsKeyPackageStorage {
-                    js_insert: kp_obj.as_ref().and_then(|o| get_js_fn(o, &["insert", "keyPackageInsert"])),
-                    js_delete: kp_obj.as_ref().and_then(|o| get_js_fn(o, &["delete", "keyPackageDelete"])),
-                    js_get: kp_obj.as_ref().and_then(|o| get_js_fn(o, &["get", "keyPackageGet"])),
+                    js_insert: kp_obj.as_ref().and_then(|o| get_js_fn(o, &["insert"])),
+                    js_delete: kp_obj.as_ref().and_then(|o| get_js_fn(o, &["delete"])),
+                    js_get: kp_obj.as_ref().and_then(|o| get_js_fn(o, &["get"])),
                     fallback: default_kp,
                 });
 
                 let gs: Arc<dyn MlsGroupStateStorage> = Arc::new(JsMlsGroupStateStorage {
-                    js_state: gs_obj.as_ref().and_then(|o| get_js_fn(o, &["state", "groupState"])),
-                    js_epoch: gs_obj.as_ref().and_then(|o| get_js_fn(o, &["epoch", "groupEpoch"])),
-                    js_write: gs_obj.as_ref().and_then(|o| get_js_fn(o, &["write", "groupWrite"])),
-                    js_max_epoch_id: gs_obj.as_ref().and_then(|o| get_js_fn(o, &["max_epoch_id", "maxEpochId", "groupMaxEpochId"])),
+                    js_state: gs_obj.as_ref().and_then(|o| get_js_fn(o, &["state"])),
+                    js_epoch: gs_obj.as_ref().and_then(|o| get_js_fn(o, &["epoch"])),
+                    js_write: gs_obj.as_ref().and_then(|o| get_js_fn(o, &["write"])),
+                    js_max_epoch_id: gs_obj.as_ref().and_then(|o| get_js_fn(o, &["maxEpochId"])),
                     fallback: default_gs,
                 });
 
                 let psk: Arc<dyn MlsPreSharedKeyStorage> = Arc::new(JsMlsPreSharedKeyStorage {
-                    js_get: psk_obj.as_ref().and_then(|o| get_js_fn(o, &["get", "pskGet"])),
+                    js_get: psk_obj.as_ref().and_then(|o| get_js_fn(o, &["get"])),
                     fallback: default_psk,
                 });
 
@@ -1081,12 +1085,12 @@ impl FireflyClientNode {
         })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = setAccessToken)]
     pub fn set_access_token(&self, token: String) {
         *self.token.lock().unwrap() = Some(token);
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = checkSetup)]
     pub fn check_setup(&self) -> js_sys::Promise {
         let callbacks = self.callbacks.clone();
         let key_stores = self.key_stores.clone();
@@ -1243,7 +1247,7 @@ impl FireflyClientNode {
         })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = initializeWithRetrying)]
     pub fn initialize_with_retrying(&self) -> js_sys::Promise {
         let callbacks = self.callbacks.clone();
         let base_ws_url = self.firefly_base_ws_url.clone();
@@ -1528,12 +1532,12 @@ impl FireflyClientNode {
         })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = isInitialized)]
     pub fn is_initialized(&self) -> bool {
         self.is_initialized.load(Ordering::Relaxed)
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = getConnectionState)]
     pub fn get_connection_state(&self) -> String {
         let state = self.connection_state.clone();
         if let Ok(guard) = state.try_read() {
@@ -1559,7 +1563,7 @@ impl FireflyClientNode {
         })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = encryptAndSend)]
     pub fn encrypt_and_send(&self, to: String, payload: Vec<u8>) -> js_sys::Promise {
         let key_stores = self.key_stores.clone();
         let user_messages_store = self.user_messages_store.clone();
@@ -1653,7 +1657,7 @@ impl FireflyClientNode {
         })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = encryptAndSendGroup)]
     pub fn encrypt_and_send_group(&self, group_id: f64, payload: Vec<u8>) -> js_sys::Promise {
         let mls_holder = self.mls_client.clone();
         let group_messages_store = self.group_messages_store.clone();
@@ -1731,7 +1735,7 @@ impl FireflyClientNode {
         })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = createGroup)]
     pub fn create_group(&self, name: String, description: String, _settings: Option<u32>) -> js_sys::Promise {
         let mls_holder = self.mls_client.clone();
         let group_info_store = self.group_info_store.clone();
@@ -1761,7 +1765,7 @@ impl FireflyClientNode {
         })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = addGroupMember)]
     pub fn add_group_member(&self, group_id: f64, username: String, role_id: u32) -> js_sys::Promise {
         let mls_holder = self.mls_client.clone();
         let group_info_store = self.group_info_store.clone();
@@ -1786,7 +1790,7 @@ impl FireflyClientNode {
         })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = kickGroupMember)]
     pub fn kick_group_member(&self, group_id: f64, username: String) -> js_sys::Promise {
         let mls_holder = self.mls_client.clone();
         let group_info_store = self.group_info_store.clone();
@@ -1811,7 +1815,7 @@ impl FireflyClientNode {
         })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = deleteGroup)]
     pub fn delete_group(&self, group_id: f64) -> js_sys::Promise {
         let group_info_store = self.group_info_store.clone();
 
@@ -1822,7 +1826,7 @@ impl FireflyClientNode {
         })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = createJoinLink)]
     pub fn create_join_link(&self, group_id: f64, expires_in_seconds: f64, max_uses: u32) -> js_sys::Promise {
         let ws_holder = self.ws.clone();
         let pending_requests = self.pending_requests.clone();
@@ -1870,7 +1874,7 @@ impl FireflyClientNode {
         })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = joinViaLink)]
     pub fn join_via_link(&self, link_token: String) -> js_sys::Promise {
         let ws_holder = self.ws.clone();
         let pending_requests = self.pending_requests.clone();
@@ -1916,7 +1920,7 @@ impl FireflyClientNode {
         })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = requestToJoin)]
     pub fn request_to_join(&self, group_id: f64) -> js_sys::Promise {
         let base_url = self.firefly_base_url.clone();
         let callbacks = self.callbacks.clone();
@@ -1948,7 +1952,7 @@ impl FireflyClientNode {
         })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = syncGroupJoinsAndReadds)]
     pub fn sync_group_joins_and_readds(&self, group_id: f64) -> js_sys::Promise {
         let base_url = self.firefly_base_url.clone();
         let callbacks = self.callbacks.clone();
@@ -1993,7 +1997,7 @@ impl FireflyClientNode {
         })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = loadAllGroups)]
     pub fn load_all_groups(&self) -> js_sys::Promise {
         let group_info_store = self.group_info_store.clone();
         let mls_holder = self.mls_client.clone();
@@ -2011,7 +2015,7 @@ impl FireflyClientNode {
         })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = getGroupInfos)]
     pub fn get_group_infos(&self) -> js_sys::Promise {
         let group_info_store = self.group_info_store.clone();
         let callbacks = self.callbacks.clone();
@@ -2037,7 +2041,7 @@ impl FireflyClientNode {
         })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = getGroupMessages)]
     pub fn get_group_messages(&self, group_id: f64, start_before: f64, limit: u32) -> js_sys::Promise {
         let group_messages_store = self.group_messages_store.clone();
 
@@ -2063,7 +2067,7 @@ impl FireflyClientNode {
         })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = getOnlineStatus)]
     pub fn get_online_status(&self, usernames: Vec<String>) -> js_sys::Promise {
         let ws_holder = self.ws.clone();
         let pending_requests = self.pending_requests.clone();
@@ -2124,17 +2128,17 @@ impl FireflyClientNode {
         })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = readUserMessagesUpto)]
     pub fn read_user_messages_upto(&self, _other: String, _upto_message_id: f64) -> js_sys::Promise {
         future_to_promise(async move { Ok(JsValue::NULL) })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = uploadFcmToken)]
     pub fn upload_fcm_token(&self, _token: Option<String>) -> js_sys::Promise {
         future_to_promise(async move { Ok(JsValue::NULL) })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = getConversations)]
     pub fn get_conversations(&self, _token: String) -> js_sys::Promise {
         future_to_promise(async move {
             let list: Vec<JsConversation> = Vec::new();
@@ -2142,7 +2146,7 @@ impl FireflyClientNode {
         })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = getGroupExtension)]
     pub fn get_group_extension(&self, _group_id: f64) -> js_sys::Promise {
         future_to_promise(async move {
             let empty: Vec<u8> = Vec::new();
@@ -2150,7 +2154,7 @@ impl FireflyClientNode {
         })
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = exportGroupMeetingKey)]
     pub fn export_group_meeting_key(&self, _group_id: f64) -> js_sys::Promise {
         future_to_promise(async move {
             let empty: Vec<u8> = Vec::new();
