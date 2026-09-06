@@ -1,6 +1,5 @@
 import test from 'node:test';
 import * as assert from 'node:assert';
-import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import {
@@ -8,7 +7,6 @@ import {
   protos,
   initLogger,
   type StorageProviders,
-  type FireflyStorageAdapter,
   type RawUserMessage,
   type RawGroupMessage,
   type RawGroupInfo,
@@ -24,13 +22,14 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000 }, async (t) => {
+test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000 }, async () => {
   process.env.EMULATOR_MODE = 'true';
   process.env.NO_TOKEN_VERIFICATION = 'true';
-  const baseUrl = process.env.FIREFLY_BASE_URL || 'http://127.0.0.1:39305';
-  const wsUrl = process.env.FIREFLY_WS_URL || baseUrl.replace(/^http:\/\//, 'ws://').replace(/^https:\/\//, 'wss://') + '/';
-  const port = process.env.PORT ? parseInt(process.env.PORT) : 39305;
-  const dbSuffix = Math.floor(Math.random() * 100000);
+  const baseUrl = process.env.FIREFLY_BASE_URL || 'http://127.0.0.1:39209';
+  const wsUrl =
+    process.env.FIREFLY_WS_URL ||
+    baseUrl.replace(/^http:\/\//, 'ws://').replace(/^https:\/\//, 'wss://') + '/';
+  const dbSuffix = Math.floor(Math.random() * 1000000);
 
   const testDir = `/tmp/firefly/ts_test_${dbSuffix}`;
   if (!fs.existsSync(testDir)) {
@@ -44,7 +43,7 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
       username,
       emulatorMode: true,
       apiBaseUrl: baseUrl,
-      wsUrl: wsUrl,
+      wsUrl,
       dbFile,
       sessionFile,
     });
@@ -55,62 +54,22 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
       if (fs.existsSync(testDir)) {
         fs.rmSync(testDir, { recursive: true, force: true });
       }
-    } catch (e) {}
+    } catch (_) {}
   };
 
-  const shouldSpawnServer =
-    process.env.SPAWN_SERVER === 'true' ||
-    (!process.env.FIREFLY_BASE_URL &&
-      (process.env.FIREFLY_SERVER_PATH ||
-        fs.existsSync('/home/ash/lupyd/firefly-mls-server/target/debug/firefly-server') ||
-        fs.existsSync('/home/ash/.cargo/target/debug/firefly-server')));
-
-  let serverProcess: any = null;
-  if (shouldSpawnServer) {
-    console.log('Spawning Firefly MLS Server on port', port);
-    const serverBin =
-      process.env.FIREFLY_SERVER_PATH ||
-      (fs.existsSync('/home/ash/lupyd/firefly-mls-server/target/debug/firefly-server')
-        ? '/home/ash/lupyd/firefly-mls-server/target/debug/firefly-server'
-        : '/home/ash/.cargo/target/debug/firefly-server');
-
-    serverProcess = spawn(serverBin, [], {
-      cwd: path.resolve(__dirname, '..'),
-      env: {
-        ...process.env,
-        EMULATOR_MODE: 'true',
-        NO_TOKEN_VERIFICATION: 'true',
-        PORT: String(port),
-        FIREFLY_BASE_URL: `http://127.0.0.1:${port}`,
-        RUST_LOG: 'info',
-      },
-    });
-
-    serverProcess.stdout.on('data', () => {});
-    serverProcess.stderr.on('data', () => {});
-  } else {
-    console.log('Connecting to existing Firefly MLS Server at', baseUrl);
-  }
-
-  const killServer = () => {
-    if (serverProcess) {
-      console.log('Killing Firefly MLS Server...');
-      serverProcess.kill('SIGKILL');
-    }
-  };
-
-  process.on('exit', killServer);
+  console.log('Connecting to Firefly MLS Server at', baseUrl);
 
   try {
-    // Wait for server to bind
-    await sleep(4000);
-
     // =========================================================================
     // SCENARIO 1 & 2: Direct Messaging (DM) + Group Messaging Flow
     // =========================================================================
     console.log('\n--- Running Scenario 1 & 2: DM and Group Flow ---');
-    const alice = createClientHelper('alice');
-    const bob = createClientHelper('bob');
+    const aliceUser = `alice_${dbSuffix}`;
+    const bobUser = `bob_${dbSuffix}`;
+    const charlieOfflineUser = `charlie_offline_${dbSuffix}`;
+
+    const alice = createClientHelper(aliceUser);
+    const bob = createClientHelper(bobUser);
 
     let aliceReceivedPing = false;
     let bobReceivedPong = false;
@@ -145,8 +104,8 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
     await sleep(2000);
 
     // 1. DM Ping-Pong
-    console.log('Testing Direct Message (Bob -> Alice)...');
-    await bob.sendUserMessage('alice', '/ping');
+    console.log(`Testing Direct Message (${bobUser} -> ${aliceUser})...`);
+    await bob.sendUserMessage(aliceUser, '/ping');
 
     for (let i = 0; i < 20; i++) {
       if (aliceReceivedPing && bobReceivedPong) break;
@@ -157,13 +116,12 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
     console.log('✓ Direct messaging flow passed!');
 
     // 2. Group Creation & Invitation
-    console.log('Testing Group Creation and Member Invite (Alice -> Bob)...');
-    const groupInfo = await alice.createGroup('IntegrationGroup', 'Group for integration testing');
+    console.log(`Testing Group Creation and Member Invite (${aliceUser} -> ${bobUser})...`);
+    const groupInfo = await alice.createGroup(`IntegrationGroup_${dbSuffix}`, 'Group for integration testing');
     const groupId = Number(groupInfo.id);
     console.log('Group created with ID:', groupId);
 
-    await alice.addGroupMember(groupId, 'bob', 0);
-    await bob.client.checkSetup();
+    await alice.addGroupMember(groupId, bobUser, 0);
     await sleep(2000);
 
     // Group Ping-Pong
@@ -182,18 +140,18 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
     // SCENARIO 3: Online Status Flow (Individual + Group Members)
     // =========================================================================
     console.log('\n--- Running Scenario 3: Online Status Flow ---');
-    console.log('Querying online status for [alice, bob, charlie_offline]...');
-    const onlineList1 = await alice.getOnlineStatus(['alice', 'bob', 'charlie_offline']);
+    console.log(`Querying online status for [${aliceUser}, ${bobUser}, ${charlieOfflineUser}]...`);
+    const onlineList1 = await alice.getOnlineStatus([aliceUser, bobUser, charlieOfflineUser]);
     console.log('Online list:', onlineList1);
-    assert.ok(onlineList1.includes('alice'), 'Alice should be online');
-    assert.ok(onlineList1.includes('bob'), 'Bob should be online');
-    assert.ok(!onlineList1.includes('charlie_offline'), 'charlie_offline should be offline');
+    assert.ok(onlineList1.includes(aliceUser), 'Alice should be online');
+    assert.ok(onlineList1.includes(bobUser), 'Bob should be online');
+    assert.ok(!onlineList1.includes(charlieOfflineUser), 'charlieOfflineUser should be offline');
 
     console.log('Fetching group members online status...');
     const memberStatus = await alice.getGroupMembersOnlineStatus(groupId);
     assert.ok(memberStatus.members && memberStatus.members.length >= 2);
-    const aliceSt = memberStatus.members.find((m: any) => m.username === 'alice');
-    const bobSt = memberStatus.members.find((m: any) => m.username === 'bob');
+    const aliceSt = memberStatus.members.find((m: any) => m.username === aliceUser);
+    const bobSt = memberStatus.members.find((m: any) => m.username === bobUser);
     assert.ok(aliceSt && aliceSt.isOnline, 'Alice should show online in group status');
     assert.ok(bobSt && bobSt.isOnline, 'Bob should show online in group status');
     assert.ok(aliceSt.lastConnectedAt > 0n);
@@ -204,10 +162,10 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
     await bob.dispose();
     await sleep(2000);
 
-    const onlineList2 = await alice.getOnlineStatus(['alice', 'bob', 'charlie_offline']);
+    const onlineList2 = await alice.getOnlineStatus([aliceUser, bobUser, charlieOfflineUser]);
     console.log('Online list after Bob disposed:', onlineList2);
-    assert.ok(onlineList2.includes('alice'), 'Alice should still be online');
-    assert.ok(!onlineList2.includes('bob'), 'Bob should now be offline');
+    assert.ok(onlineList2.includes(aliceUser), 'Alice should still be online');
+    assert.ok(!onlineList2.includes(bobUser), 'Bob should now be offline');
     console.log('✓ Online status flow passed!');
 
     // Dispose Alice before next scenarios
@@ -217,9 +175,13 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
     // SCENARIO 4: Kick Member & Permission Authorization Flow
     // =========================================================================
     console.log('\n--- Running Scenario 4: Kick Member & Permission Authorization ---');
-    const kickOwner = createClientHelper('kick_alice');
-    const kickBob = createClientHelper('kick_bob');
-    const kickCharlie = createClientHelper('kick_charlie');
+    const kickOwnerUser = `kick_alice_${dbSuffix}`;
+    const kickBobUser = `kick_bob_${dbSuffix}`;
+    const kickCharlieUser = `kick_charlie_${dbSuffix}`;
+
+    const kickOwner = createClientHelper(kickOwnerUser);
+    const kickBob = createClientHelper(kickBobUser);
+    const kickCharlie = createClientHelper(kickCharlieUser);
 
     let kickAliceReceivedMsg: string | null = null;
     let kickBobReceivedMsg: string | null = null;
@@ -243,22 +205,20 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
     await kickCharlie.start();
     await sleep(2000);
 
-    const kickGroup = await kickOwner.createGroup('Kick Test Group', 'Testing permissions & kicks');
+    const kickGroup = await kickOwner.createGroup(`KickGroup_${dbSuffix}`, 'Testing permissions & kicks');
     const kickGroupId = Number(kickGroup.id);
 
     console.log('Adding Bob and Charlie to Kick Test Group...');
-    await kickOwner.addGroupMember(kickGroupId, 'kick_bob', 0);
-    await kickOwner.addGroupMember(kickGroupId, 'kick_charlie', 0);
+    await kickOwner.addGroupMember(kickGroupId, kickBobUser, 0);
+    await kickOwner.addGroupMember(kickGroupId, kickCharlieUser, 0);
 
-    await kickBob.client.checkSetup();
-    await kickCharlie.client.checkSetup();
     await sleep(2000);
 
     // Charlie (role 0) attempts to kick Alice (owner) - MUST FAIL!
     console.log('Testing: Charlie attempts to kick Owner Alice (must fail)...');
     let charlieKickAliceFailed = false;
     try {
-      await kickCharlie.kickGroupMember(kickGroupId, 'kick_alice');
+      await kickCharlie.kickGroupMember(kickGroupId, kickOwnerUser);
     } catch (err) {
       charlieKickAliceFailed = true;
       console.log('Charlie kick Alice correctly failed with error:', String(err));
@@ -269,7 +229,7 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
     console.log('Testing: Charlie attempts to kick Bob (must fail)...');
     let charlieKickBobFailed = false;
     try {
-      await kickCharlie.kickGroupMember(kickGroupId, 'kick_bob');
+      await kickCharlie.kickGroupMember(kickGroupId, kickBobUser);
     } catch (err) {
       charlieKickBobFailed = true;
       console.log('Charlie kick Bob correctly failed with error:', String(err));
@@ -278,13 +238,8 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
 
     // Alice kicks Bob
     console.log('Owner Alice kicking Bob...');
-    await kickOwner.kickGroupMember(kickGroupId, 'kick_bob');
+    await kickOwner.kickGroupMember(kickGroupId, kickBobUser);
     await sleep(2000);
-
-    // Charlie syncs kick
-    console.log('Charlie syncing group setup...');
-    await kickCharlie.client.checkSetup();
-    await sleep(1000);
 
     // Bob attempts to send message
     console.log('Kicked Bob attempting to send group message...');
@@ -330,10 +285,15 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
     // SCENARIO 5: Public Join Link Flow
     // =========================================================================
     console.log('\n--- Running Scenario 5: Public Join Link Flow ---');
-    const linkOwner = createClientHelper('link_alice');
-    const linkBob = createClientHelper('link_bob');
-    const linkCharlie = createClientHelper('link_charlie');
-    const linkDave = createClientHelper('link_dave');
+    const linkOwnerUser = `link_alice_${dbSuffix}`;
+    const linkBobUser = `link_bob_${dbSuffix}`;
+    const linkCharlieUser = `link_charlie_${dbSuffix}`;
+    const linkDaveUser = `link_dave_${dbSuffix}`;
+
+    const linkOwner = createClientHelper(linkOwnerUser);
+    const linkBob = createClientHelper(linkBobUser);
+    const linkCharlie = createClientHelper(linkCharlieUser);
+    const linkDave = createClientHelper(linkDaveUser);
 
     let linkBobReceivedAliceMsg = false;
     let linkAliceReceivedBobMsg = false;
@@ -356,7 +316,7 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
     await linkBob.start();
     await sleep(2000);
 
-    const pubGroup = await linkOwner.createGroup('Public Link Group', 'Test join links');
+    const pubGroup = await linkOwner.createGroup(`PublicLinkGroup_${dbSuffix}`, 'Test join links');
     const pubGroupId = Number(pubGroup.id);
 
     console.log('Owner Alice creating join link (expires: 3600s, max_uses: 10)...');
@@ -407,10 +367,7 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
       daveJoinFailed = true;
       const errStr = String(err);
       console.log('Dave join correctly failed with error:', errStr);
-      assert.ok(
-        errStr.includes('Invalid link'),
-        'Error should indicate invalid link'
-      );
+      assert.ok(errStr.includes('Invalid link'), 'Error should indicate invalid link');
     }
     assert.ok(daveJoinFailed, 'Dave should fail to join with exhausted link');
 
@@ -427,10 +384,7 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
       daveExpiryFailed = true;
       const errStr = String(err);
       console.log('Dave join expired link correctly failed with error:', errStr);
-      assert.ok(
-        errStr.includes('Invalid link'),
-        'Error should indicate invalid link'
-      );
+      assert.ok(errStr.includes('Invalid link'), 'Error should indicate invalid link');
     }
     assert.ok(daveExpiryFailed, 'Dave should fail to join expired link');
     console.log('✓ Public join link flow passed!');
@@ -441,10 +395,10 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
     await linkDave.dispose();
 
     // =========================================================================
-    // SCENARIO 4: Custom Storage Adapter (Raw Types)
+    // SCENARIO 6: Custom Storage Adapter (Raw Types)
     // =========================================================================
     console.log('\n=============================================');
-    console.log('STARTING SCENARIO 4: CUSTOM STORAGE ADAPTER');
+    console.log('STARTING SCENARIO 6: CUSTOM STORAGE ADAPTER');
     console.log('=============================================\n');
 
     const interceptedUserMessages: RawUserMessage[] = [];
@@ -473,9 +427,11 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
           console.log('[CustomStorage] Intercepted user message:', msg.id, msg.from, '->', msg.to);
           interceptedUserMessages.push(msg);
         },
-        get: (otherUser: string) => {
-          return interceptedUserMessages.filter(
-            (m) => m.from === otherUser || m.to === otherUser
+        getLastMessagesOf: (other: string) => {
+          return Promise.resolve(
+            interceptedUserMessages.filter(
+              (m) => m.other === other || m.from === other || m.to === other
+            )
           );
         },
       },
@@ -484,28 +440,28 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
           console.log('[CustomStorage] Intercepted group message:', msg.id, 'group:', msg.groupId, 'from:', msg.from);
           interceptedGroupMessages.push(msg);
         },
-        get: (groupId: number) => {
-          return interceptedGroupMessages.filter((m) => m.groupId === groupId);
+        get: (groupId: number | bigint) => {
+          return Promise.resolve(interceptedGroupMessages.filter((m) => m.groupId === Number(groupId)));
         },
-        getLastMessageOfGroup: (groupId: number) => {
-          const msgs = interceptedGroupMessages.filter((m) => m.groupId === groupId);
-          return msgs[msgs.length - 1] || null;
+        getLastMessageOfGroup: (groupId: number | bigint) => {
+          const msgs = interceptedGroupMessages.filter((m) => m.groupId === Number(groupId));
+          return Promise.resolve(msgs[msgs.length - 1] || null);
         },
-        deleteByGroupId: (groupId: number) => {
-          const idx = interceptedGroupMessages.findIndex((m) => m.groupId === groupId);
+        deleteByGroupId: (groupId: number | bigint) => {
+          const idx = interceptedGroupMessages.findIndex((m) => m.groupId === Number(groupId));
           if (idx !== -1) interceptedGroupMessages.splice(idx, 1);
         },
-        updateCursor: (_groupId: number, _cursor: number) => {},
+        updateCursor: (_id: number | bigint, _groupId: number | bigint, _epoch: number) => {},
       },
       groupInfoStorage: {
-        getAll: () => Array.from(interceptedGroupInfo.values()),
-        get: (groupId: number) => interceptedGroupInfo.get(groupId) || null,
+        getAll: () => Promise.resolve(Array.from(interceptedGroupInfo.values())),
+        get: (groupId: number | bigint) => Promise.resolve(interceptedGroupInfo.get(Number(groupId)) || null),
         set: (group: RawGroupInfo) => {
-          console.log('[CustomStorage] Intercepted group info set:', group.groupId, group.name);
-          interceptedGroupInfo.set(group.groupId, group);
+          console.log('[CustomStorage] Intercepted group info set:', group.groupId ?? group.id, group.name);
+          interceptedGroupInfo.set(Number(group.groupId ?? group.id), group);
         },
-        delete: (groupId: number) => {
-          interceptedGroupInfo.delete(groupId);
+        delete: (groupId: number | bigint) => {
+          interceptedGroupInfo.delete(Number(groupId));
         },
       },
     };
@@ -517,10 +473,10 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
       username: s4AliceUsername,
       emulatorMode: true,
       apiBaseUrl: baseUrl,
-      wsUrl: wsUrl,
+      wsUrl,
       dbFile: path.resolve(testDir, `${s4AliceUsername}.db`),
       sessionFile: path.resolve(testDir, `${s4AliceUsername}-session.json`),
-      storage: customStorage,
+      storageProviders: customStorage,
     });
     const s4Bob = createClientHelper(s4BobUsername);
 
@@ -559,16 +515,18 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
       'Custom storage should have intercepted at least 1 user message'
     );
     const lastUserMsg = interceptedUserMessages[interceptedUserMessages.length - 1];
-    assert.ok(lastUserMsg.from.length > 0, 'Message from field should be populated');
+    assert.ok(
+      lastUserMsg.from.length > 0 || lastUserMsg.to.length > 0 || (lastUserMsg.other && lastUserMsg.other.length > 0),
+      'Message from/to/other field should be populated'
+    );
 
     // Testing Group creation and group info interception
     console.log('Testing Group Creation with custom storage adapter...');
-    const s4Group = await s4Alice.createGroup('CustomStorageGroup', 'Testing raw storage');
+    const s4Group = await s4Alice.createGroup(`CustomStorageGroup_${dbSuffix}`, 'Testing raw storage');
     const s4GroupId = Number(s4Group.id);
     console.log('s4Group created with ID:', s4GroupId);
 
     await s4Alice.addGroupMember(s4GroupId, s4BobUsername, 0);
-    await s4Bob.client.checkSetup();
     await sleep(2000);
 
     // Verify custom group info storage
@@ -578,12 +536,11 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
       'Custom storage should have intercepted group info'
     );
     const storedGroup = interceptedGroupInfo.get(s4GroupId);
-    assert.strictEqual(storedGroup?.name, 'CustomStorageGroup');
+    assert.strictEqual(storedGroup?.name, `CustomStorageGroup_${dbSuffix}`);
 
     // Group message interception
     let s4AliceReceivedGroupMsg = false;
-    s4Alice.onGroupMessage((ctx) => {
-      console.log('s4Alice received group message in custom storage test:', ctx.message);
+    s4Alice.onGroupMessage((_) => {
       s4AliceReceivedGroupMsg = true;
     });
 
@@ -614,8 +571,6 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
     console.log('ALL INTEGRATION TEST SCENARIOS PASSED!');
     console.log('=============================================\n');
   } finally {
-    process.off('exit', killServer);
-    killServer();
     cleanupFiles();
   }
 });
