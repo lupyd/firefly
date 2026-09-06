@@ -14,6 +14,11 @@ use firefly_core::{
 use firefly_protos::firefly::{FireflyGroupMember, FireflyGroupRole};
 use mls_rs::identity::SigningIdentity;
 
+use firefly_core::storage_provider::{
+    MlsGroupStateStorage, MlsKeyPackageStorage, MlsPreSharedKeyStorage,
+};
+use crate::storage::{GroupInfoStorage, KeyValueStorage};
+
 #[cfg(not(target_arch = "wasm32"))]
 use sqlx::SqlitePool;
 
@@ -50,10 +55,7 @@ pub enum FireflyMlsReceivedMessage {
 pub struct FfiMlsClient {
     client: FireflyMlsClient,
     base_url: Arc<str>,
-    #[cfg(not(target_arch = "wasm32"))]
-    group_info_state: GroupInfoStore,
-    #[cfg(target_arch = "wasm32")]
-    group_info_state: GenericGroupInfoStore,
+    group_info_state: Arc<dyn GroupInfoStorage>,
 
     // figure out a better way to sync groups
     loaded_groups: std::sync::Mutex<HashMap<u64, Arc<FfiMlsGroup>>>,
@@ -139,7 +141,8 @@ impl FfiMlsClient {
             }),
         )?;
 
-        let group_info_state = GroupInfoStore::new(pool.clone()).await?;
+        let group_info_state: Arc<dyn GroupInfoStorage> =
+            Arc::new(GroupInfoStore::new(pool.clone()).await?);
 
         Ok(Self {
             client,
@@ -224,7 +227,8 @@ impl FfiMlsClient {
         )?;
 
         #[cfg(target_arch = "wasm32")]
-        let group_info_state = crate::storage::GenericGroupInfoStore::new(storage.clone());
+        let group_info_state: Arc<dyn GroupInfoStorage> =
+            Arc::new(crate::storage::GenericGroupInfoStore::new(storage.clone()));
 
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -233,6 +237,89 @@ impl FfiMlsClient {
         }
 
         #[cfg(target_arch = "wasm32")]
+        Ok(Self {
+            client,
+            base_url,
+            group_info_state,
+            loaded_groups: Default::default(),
+        })
+    }
+
+    pub async fn initialize_with_stores(
+        device_id: u8,
+        address_id: u64,
+        callbacks: Arc<dyn FireflyWsClientCallback>,
+        key_value_store: Arc<dyn KeyValueStorage>,
+        key_package_storage: Arc<dyn MlsKeyPackageStorage>,
+        group_state_storage: Arc<dyn MlsGroupStateStorage>,
+        psk_storage: Arc<dyn MlsPreSharedKeyStorage>,
+        group_info_state: Arc<dyn GroupInfoStorage>,
+        base_url: String,
+    ) -> anyhow::Result<Self> {
+        const GROUP_IDENTITY_KEY: &str = "group_identity_b64";
+        let base_url: Arc<str> = base_url.into();
+
+        let identity = if let Ok(identity_b64) = key_value_store.get(GROUP_IDENTITY_KEY).await {
+            let identity = BASE64_URL_SAFE_NO_PAD.decode(&identity_b64)?;
+            let identity = FireflyIdentity::from_vec(identity)?;
+
+            let current_timestamp_seconds = firefly_core::utils::get_current_timestamp_in_secs();
+
+            if identity.is_valid_until_secs().unwrap_or_default() > current_timestamp_seconds + 5 {
+                identity
+            } else if let Some(token) = callbacks.get_access_token().await {
+                let identity = FireflyIdentity::generate(
+                    token.clone(),
+                    base_url.clone(),
+                    device_id,
+                    address_id,
+                )
+                .await?;
+
+                let serialized_identity = identity.to_vec()?;
+                let serialized_base64_identity =
+                    BASE64_URL_SAFE_NO_PAD.encode(&serialized_identity);
+
+                key_value_store
+                    .set(GROUP_IDENTITY_KEY, &serialized_base64_identity)
+                    .await?;
+
+                identity
+            } else {
+                identity
+            }
+        } else {
+            log::info!("no group identity found in storage, generating...");
+            let token = callbacks
+                .get_access_token()
+                .await
+                .context("token not found")?;
+
+            let identity =
+                FireflyIdentity::generate(token.clone(), base_url.clone(), device_id, address_id)
+                    .await?;
+
+            let serialized_identity = identity.to_vec()?;
+            let serialized_base64_identity = BASE64_URL_SAFE_NO_PAD.encode(&serialized_identity);
+
+            key_value_store
+                .set(GROUP_IDENTITY_KEY, &serialized_base64_identity)
+                .await?;
+
+            identity
+        };
+
+        let client = FireflyMlsClient::load(
+            base_url.to_string(),
+            identity.into(),
+            key_package_storage,
+            group_state_storage,
+            psk_storage,
+            Arc::new(AuthCallback {
+                callbacks: callbacks.clone(),
+            }),
+        )?;
+
         Ok(Self {
             client,
             base_url,

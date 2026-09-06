@@ -31,6 +31,8 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 tokio = { workspace = true, features = ["sync", "macros"] }
 futures = { workspace = true }
+send_wrapper = { version = "0.6.0", features = ["futures"] }
+zeroize.workspace = true
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false

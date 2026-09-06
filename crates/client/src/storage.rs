@@ -192,6 +192,16 @@ pub const KEY_LAST_RECEIVED_MESSAGE_ID: &str = "last_received_message_id";
 pub const KEY_LAST_RECEIVED_GROUP_MESSAGE_ID: &str = "last_received_group_message_id";
 pub const KEY_FCM_TOKEN: &str = "fcm_token";
 
+#[async_trait::async_trait]
+pub trait KeyValueStorage: Send + Sync {
+    async fn get(&self, key: &str) -> anyhow::Result<String>;
+    async fn set(&self, key: &str, value: &str) -> anyhow::Result<()>;
+    async fn update_last_received_message_id(
+        &self,
+        last_received_message_id: u64,
+    ) -> anyhow::Result<()>;
+}
+
 #[derive(Clone)]
 pub struct GenericKeyValueStore {
     storage: Arc<dyn FireflyStorage>,
@@ -201,8 +211,11 @@ impl GenericKeyValueStore {
     pub fn new(storage: Arc<dyn FireflyStorage>) -> Self {
         Self { storage }
     }
+}
 
-    pub async fn get(&self, key: &str) -> anyhow::Result<String> {
+#[async_trait::async_trait]
+impl KeyValueStorage for GenericKeyValueStore {
+    async fn get(&self, key: &str) -> anyhow::Result<String> {
         let val = self
             .storage
             .get("key_value_store", key)
@@ -211,14 +224,14 @@ impl GenericKeyValueStore {
         String::from_utf8(val).map_err(|e| anyhow::anyhow!(e))
     }
 
-    pub async fn set(&self, key: &str, value: &str) -> anyhow::Result<()> {
+    async fn set(&self, key: &str, value: &str) -> anyhow::Result<()> {
         self.storage
             .set("key_value_store", key, value.as_bytes().to_vec())
             .await;
         Ok(())
     }
 
-    pub async fn update_last_received_message_id(
+    async fn update_last_received_message_id(
         &self,
         last_received_message_id: u64,
     ) -> anyhow::Result<()> {
@@ -280,8 +293,22 @@ pub struct AddressIdAndDeviceId {
 }
 
 // ---------------------------------------------------------------------------
-// Generic Group Info Store
+// Group Info Store Trait & Generic Store
 // ---------------------------------------------------------------------------
+
+#[async_trait::async_trait]
+pub trait GroupInfoStorage: Send + Sync {
+    async fn get_all(&self) -> anyhow::Result<Vec<GroupInfo>>;
+    async fn get(&self, id: u64) -> anyhow::Result<GroupInfo>;
+    async fn set(
+        &self,
+        id: u64,
+        name: String,
+        description: String,
+        group_state_id: Vec<u8>,
+    ) -> anyhow::Result<()>;
+    async fn delete(&self, id: u64) -> anyhow::Result<()>;
+}
 
 #[derive(Clone)]
 pub struct GenericGroupInfoStore {
@@ -292,8 +319,11 @@ impl GenericGroupInfoStore {
     pub fn new(storage: Arc<dyn FireflyStorage>) -> Self {
         Self { storage }
     }
+}
 
-    pub async fn get_all(&self) -> anyhow::Result<Vec<GroupInfo>> {
+#[async_trait::async_trait]
+impl GroupInfoStorage for GenericGroupInfoStore {
+    async fn get_all(&self) -> anyhow::Result<Vec<GroupInfo>> {
         let rows = self.storage.get_all("group_infos").await;
         let mut list = Vec::new();
         for (_, bytes) in rows {
@@ -304,7 +334,7 @@ impl GenericGroupInfoStore {
         Ok(list)
     }
 
-    pub async fn get(&self, id: u64) -> anyhow::Result<GroupInfo> {
+    async fn get(&self, id: u64) -> anyhow::Result<GroupInfo> {
         let bytes = self
             .storage
             .get("group_infos", &id.to_string())
@@ -313,7 +343,7 @@ impl GenericGroupInfoStore {
         serde_json::from_slice(&bytes).map_err(|e| anyhow::anyhow!(e))
     }
 
-    pub async fn set(
+    async fn set(
         &self,
         id: u64,
         name: String,
@@ -331,15 +361,37 @@ impl GenericGroupInfoStore {
         Ok(())
     }
 
-    pub async fn delete(&self, id: u64) -> anyhow::Result<()> {
+    async fn delete(&self, id: u64) -> anyhow::Result<()> {
         self.storage.delete("group_infos", &id.to_string()).await;
         Ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
-// Generic Group Messages Store
+// Group Messages Store Trait & Generic Store
 // ---------------------------------------------------------------------------
+
+#[async_trait::async_trait]
+pub trait GroupMessageStorage: Send + Sync {
+    async fn add(
+        &self,
+        id: u64,
+        group_id: u64,
+        channel_id: u32,
+        epoch: u32,
+        by: &str,
+        message: &[u8],
+    ) -> anyhow::Result<()>;
+    async fn get(
+        &self,
+        group_id: u64,
+        start_before: u64,
+        limit: u32,
+    ) -> anyhow::Result<Vec<GroupMessage>>;
+    async fn get_last_message_of_group(&self, group_id: u64) -> anyhow::Result<GroupMessage>;
+    async fn delete_by_group_id(&self, group_id: u64) -> anyhow::Result<()>;
+    async fn update_cursor(&self, id: u64, group_id: u64, epoch: u32) -> anyhow::Result<()>;
+}
 
 #[derive(Clone)]
 pub struct GenericGroupMessagesStore {
@@ -350,8 +402,11 @@ impl GenericGroupMessagesStore {
     pub fn new(storage: Arc<dyn FireflyStorage>) -> Self {
         Self { storage }
     }
+}
 
-    pub async fn add(
+#[async_trait::async_trait]
+impl GroupMessageStorage for GenericGroupMessagesStore {
+    async fn add(
         &self,
         id: u64,
         group_id: u64,
@@ -374,7 +429,7 @@ impl GenericGroupMessagesStore {
         Ok(())
     }
 
-    pub async fn get(
+    async fn get(
         &self,
         group_id: u64,
         start_before: u64,
@@ -393,14 +448,14 @@ impl GenericGroupMessagesStore {
         Ok(matching)
     }
 
-    pub async fn get_last_message_of_group(&self, group_id: u64) -> anyhow::Result<GroupMessage> {
+    async fn get_last_message_of_group(&self, group_id: u64) -> anyhow::Result<GroupMessage> {
         let res = self.get(group_id, u64::MAX, 1).await?;
         res.into_iter()
             .next()
             .ok_or_else(|| anyhow::anyhow!("no group messages"))
     }
 
-    pub async fn delete_by_group_id(&self, group_id: u64) -> anyhow::Result<()> {
+    async fn delete_by_group_id(&self, group_id: u64) -> anyhow::Result<()> {
         let prefix = format!("{}:", group_id);
         let all = self.storage.get_all("group_messages").await;
         for (k, _) in all {
@@ -411,7 +466,7 @@ impl GenericGroupMessagesStore {
         Ok(())
     }
 
-    pub async fn update_cursor(&self, id: u64, group_id: u64, epoch: u32) -> anyhow::Result<()> {
+    async fn update_cursor(&self, id: u64, group_id: u64, epoch: u32) -> anyhow::Result<()> {
         let cursor = serde_json::json!({ "id": id, "epoch": epoch });
         let key = format!("cursor:{}", group_id);
         let bytes = serde_json::to_vec(&cursor)?;
@@ -421,8 +476,25 @@ impl GenericGroupMessagesStore {
 }
 
 // ---------------------------------------------------------------------------
-// Generic User Messages Store
+// User Messages Store Trait & Generic Store
 // ---------------------------------------------------------------------------
+
+#[async_trait::async_trait]
+pub trait UserMessageStorage: Send + Sync {
+    async fn add(
+        &self,
+        id: u64,
+        other: &str,
+        message: &[u8],
+        sent_by_other: bool,
+    ) -> anyhow::Result<()>;
+    async fn get_last_messages_of(
+        &self,
+        other: &str,
+        before: i64,
+        limit: i64,
+    ) -> anyhow::Result<Vec<UserMessage>>;
+}
 
 #[derive(Clone)]
 pub struct GenericMessagesStore {
@@ -433,8 +505,11 @@ impl GenericMessagesStore {
     pub fn new(storage: Arc<dyn FireflyStorage>) -> Self {
         Self { storage }
     }
+}
 
-    pub async fn add(
+#[async_trait::async_trait]
+impl UserMessageStorage for GenericMessagesStore {
+    async fn add(
         &self,
         id: u64,
         other: &str,
@@ -453,7 +528,7 @@ impl GenericMessagesStore {
         Ok(())
     }
 
-    pub async fn get_last_messages_of(
+    async fn get_last_messages_of(
         &self,
         other: &str,
         before: i64,
@@ -568,7 +643,7 @@ impl GenericSelfGroupKeyPackageStore {
 }
 
 // ---------------------------------------------------------------------------
-// Generic Conversation Store
+// Conversation Store Trait & Generic Store
 // ---------------------------------------------------------------------------
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -582,6 +657,19 @@ impl ConversationSettings {
     }
 }
 
+#[async_trait::async_trait]
+pub trait ConversationStorage: Send + Sync {
+    async fn get_conversation(
+        &self,
+        username: &str,
+    ) -> anyhow::Result<Option<ConversationSettings>>;
+    async fn set_conversation(
+        &self,
+        username: &str,
+        settings: ConversationSettings,
+    ) -> anyhow::Result<()>;
+}
+
 #[derive(Clone)]
 pub struct GenericConversationStore {
     storage: Arc<dyn FireflyStorage>,
@@ -591,8 +679,11 @@ impl GenericConversationStore {
     pub fn new(storage: Arc<dyn FireflyStorage>) -> Self {
         Self { storage }
     }
+}
 
-    pub async fn get_conversation(
+#[async_trait::async_trait]
+impl ConversationStorage for GenericConversationStore {
+    async fn get_conversation(
         &self,
         username: &str,
     ) -> anyhow::Result<Option<ConversationSettings>> {
@@ -604,7 +695,7 @@ impl GenericConversationStore {
         }
     }
 
-    pub async fn set_conversation(
+    async fn set_conversation(
         &self,
         username: &str,
         settings: ConversationSettings,

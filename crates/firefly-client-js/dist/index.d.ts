@@ -1,4 +1,5 @@
-import { FireflyClientNode, protos, initLogger } from 'firefly-client-node';
+import { FireflyClientNode, protos, initLogger, FireflyStorageAdapter, UserMessageStorageAdapter, GroupMessageStorageAdapter, GroupInfoStorageAdapter, KeyValueStorageAdapter, MlsStorageAdapter, RawUserMessage, RawGroupMessage, RawGroupInfo } from 'firefly-client-node';
+export type { FireflyStorageAdapter, UserMessageStorageAdapter, GroupMessageStorageAdapter, GroupInfoStorageAdapter, KeyValueStorageAdapter, MlsStorageAdapter, RawUserMessage, RawGroupMessage, RawGroupInfo, };
 export interface ClientConfig {
     port?: number;
     auth0Domain?: string;
@@ -10,6 +11,7 @@ export interface ClientConfig {
     username?: string;
     sessionFile?: string;
     dbFile?: string;
+    storage?: FireflyStorageAdapter;
 }
 export type BotConfig = ClientConfig;
 export interface ClientContext {
@@ -36,6 +38,7 @@ export interface BotContext {
 }
 export type CommandHandler = (ctx: ClientContext & BotContext) => Promise<void>;
 export declare class FireflyClient {
+    private config;
     private port;
     private auth0Domain;
     private auth0ClientId;

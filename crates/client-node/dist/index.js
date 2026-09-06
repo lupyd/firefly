@@ -48,8 +48,12 @@ class FireflyClientNode {
     constructor(inner) {
         this.inner = inner;
     }
-    static async create(fireflyBaseUrl, fireflyBaseWsUrl, retryIntervalInMs, callbacksObj, keyStoresPathname, requestTimeoutInMs) {
-        const raw = await wasmPkg.FireflyClientNode.create(fireflyBaseUrl, fireflyBaseWsUrl, retryIntervalInMs, callbacksObj, keyStoresPathname, requestTimeoutInMs);
+    static async create(fireflyBaseUrl, fireflyBaseWsUrl, retryIntervalInMs, callbacksObj, keyStoresPathname, requestTimeoutInMs, storage) {
+        const cb = { ...callbacksObj };
+        if (storage) {
+            cb.storage = storage;
+        }
+        const raw = await wasmPkg.FireflyClientNode.create(fireflyBaseUrl, fireflyBaseWsUrl, retryIntervalInMs, cb, keyStoresPathname, requestTimeoutInMs);
         return new FireflyClientNode(raw);
     }
     setAccessToken(token) {

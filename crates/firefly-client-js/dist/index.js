@@ -80,6 +80,7 @@ function openBrowser(url) {
     });
 }
 class FireflyClient {
+    config;
     port;
     auth0Domain;
     auth0ClientId;
@@ -97,6 +98,7 @@ class FireflyClient {
     client;
     session;
     constructor(options = {}) {
+        this.config = options;
         this.port = options.port || 38295;
         this.auth0Domain = options.auth0Domain || 'https://auth.lupyd.com';
         this.auth0ClientId = options.auth0ClientId || 'GnfEyGY0JdD0Oige2HSpeErcaWLrvObm';
@@ -614,7 +616,7 @@ class FireflyClient {
             onGroupMeetingSignal: () => { },
             onReadUserMessagesUpto: () => { },
         };
-        this.client = await firefly_client_node_1.FireflyClientNode.create(this.apiBaseUrl, this.wsUrl, 2000, callbacks, this.dbFile, 15000);
+        this.client = await firefly_client_node_1.FireflyClientNode.create(this.apiBaseUrl, this.wsUrl, 2000, callbacks, this.dbFile, 15000, this.config.storage);
         console.log('Connecting to Firefly MLS network...');
         try {
             console.log('Running checkSetup()...');

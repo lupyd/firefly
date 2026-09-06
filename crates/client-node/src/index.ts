@@ -2,6 +2,73 @@
 import * as wasmPkg from '../wasm/firefly_client_node.js';
 export * as protos from './protos/message';
 
+export interface RawUserMessage {
+  id: number;
+  other: string;
+  message: Uint8Array;
+  sentByOther: boolean;
+}
+
+export interface RawGroupMessage {
+  id: number;
+  groupId: number;
+  by: string;
+  message: Uint8Array;
+  channelId: number;
+  epoch: number;
+}
+
+export interface RawGroupInfo {
+  id: number;
+  name: string;
+  description: string;
+  identifier: Uint8Array;
+}
+
+export interface UserMessageStorageAdapter {
+  add?: (id: number, other: string, message: Uint8Array, sentByOther: boolean) => Promise<void> | void;
+  get?: (other: string, startBefore: number, limit: number) => Promise<RawUserMessage[]>;
+}
+
+export interface GroupMessageStorageAdapter {
+  add?: (id: number, groupId: number, channelId: number, epoch: number, by: string, message: Uint8Array) => Promise<void> | void;
+  get?: (groupId: number, startBefore: number, limit: number) => Promise<RawGroupMessage[]>;
+  getLastMessageOfGroup?: (groupId: number) => Promise<RawGroupMessage | null>;
+  deleteByGroupId?: (groupId: number) => Promise<void> | void;
+  updateCursor?: (id: number, groupId: number, epoch: number) => Promise<void> | void;
+}
+
+export interface GroupInfoStorageAdapter {
+  getAll?: () => Promise<RawGroupInfo[]>;
+  get?: (id: number) => Promise<RawGroupInfo | null>;
+  set?: (id: number, name: string, description: string, identifier: Uint8Array) => Promise<void> | void;
+  delete?: (id: number) => Promise<void> | void;
+}
+
+export interface KeyValueStorageAdapter {
+  get?: (key: string) => Promise<string | null>;
+  set?: (key: string, value: string) => Promise<void> | void;
+}
+
+export interface MlsStorageAdapter {
+  keyPackageInsert?: (id: Uint8Array, data: Uint8Array) => Promise<boolean> | boolean;
+  keyPackageDelete?: (id: Uint8Array) => Promise<boolean> | boolean;
+  keyPackageGet?: (id: Uint8Array) => Promise<Uint8Array | null>;
+  groupState?: (groupId: Uint8Array) => Promise<Uint8Array | null>;
+  groupEpoch?: (groupId: Uint8Array, epochId: number) => Promise<Uint8Array | null>;
+  groupWrite?: (groupId: Uint8Array, stateData: Uint8Array, epochInserts: Record<string, Uint8Array>, epochUpdates: Record<string, Uint8Array>) => Promise<boolean> | boolean;
+  groupMaxEpochId?: (groupId: Uint8Array) => Promise<number | null>;
+  pskGet?: (id: Uint8Array) => Promise<Uint8Array | null>;
+}
+
+export interface FireflyStorageAdapter {
+  userMessages?: UserMessageStorageAdapter;
+  groupMessages?: GroupMessageStorageAdapter;
+  groupInfo?: GroupInfoStorageAdapter;
+  keyValue?: KeyValueStorageAdapter;
+  mls?: MlsStorageAdapter;
+}
+
 export const initLogger = (filePath: string) => {
   if (typeof (wasmPkg as any).init_logger === 'function') {
     (wasmPkg as any).init_logger(filePath);
@@ -21,13 +88,18 @@ export class FireflyClientNode {
     retryIntervalInMs: number,
     callbacksObj: any,
     keyStoresPathname: string,
-    requestTimeoutInMs: number
+    requestTimeoutInMs: number,
+    storage?: FireflyStorageAdapter
   ): Promise<FireflyClientNode> {
+    const cb = { ...callbacksObj };
+    if (storage) {
+      cb.storage = storage;
+    }
     const raw = await wasmPkg.FireflyClientNode.create(
       fireflyBaseUrl,
       fireflyBaseWsUrl,
       retryIntervalInMs,
-      callbacksObj,
+      cb,
       keyStoresPathname,
       requestTimeoutInMs
     );

@@ -3,7 +3,15 @@ import * as assert from 'node:assert';
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { FireflyClient, protos, initLogger } from 'firefly-client-js';
+import {
+  FireflyClient,
+  protos,
+  initLogger,
+  type FireflyStorageAdapter,
+  type RawUserMessage,
+  type RawGroupMessage,
+  type RawGroupInfo,
+} from 'firefly-client-js';
 
 // Initialize the native Rust client logger
 initLogger('/tmp/firefly/js-test.log');
@@ -430,6 +438,155 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
     await linkBob.dispose();
     await linkCharlie.dispose();
     await linkDave.dispose();
+
+    // =========================================================================
+    // SCENARIO 4: Custom Storage Adapter (Raw Types)
+    // =========================================================================
+    console.log('\n=============================================');
+    console.log('STARTING SCENARIO 4: CUSTOM STORAGE ADAPTER');
+    console.log('=============================================\n');
+
+    const interceptedUserMessages: RawUserMessage[] = [];
+    const interceptedGroupMessages: RawGroupMessage[] = [];
+    const interceptedGroupInfo = new Map<number, RawGroupInfo>();
+
+    const customStorage: FireflyStorageAdapter = {
+      userMessages: {
+        add: (msg: RawUserMessage) => {
+          console.log('[CustomStorage] Intercepted user message:', msg.id, msg.from, '->', msg.to);
+          interceptedUserMessages.push(msg);
+        },
+        get: (otherUser: string) => {
+          return interceptedUserMessages.filter(
+            (m) => m.from === otherUser || m.to === otherUser
+          );
+        },
+      },
+      groupMessages: {
+        add: (msg: RawGroupMessage) => {
+          console.log('[CustomStorage] Intercepted group message:', msg.id, 'group:', msg.groupId, 'from:', msg.from);
+          interceptedGroupMessages.push(msg);
+        },
+        get: (groupId: number) => {
+          return interceptedGroupMessages.filter((m) => m.groupId === groupId);
+        },
+        getLastMessageOfGroup: (groupId: number) => {
+          const msgs = interceptedGroupMessages.filter((m) => m.groupId === groupId);
+          return msgs[msgs.length - 1] || null;
+        },
+        deleteByGroupId: (groupId: number) => {
+          const idx = interceptedGroupMessages.findIndex((m) => m.groupId === groupId);
+          if (idx !== -1) interceptedGroupMessages.splice(idx, 1);
+        },
+        updateCursor: (_groupId: number, _cursor: number) => {},
+      },
+      groupInfo: {
+        getAll: () => Array.from(interceptedGroupInfo.values()),
+        get: (groupId: number) => interceptedGroupInfo.get(groupId) || null,
+        set: (group: RawGroupInfo) => {
+          console.log('[CustomStorage] Intercepted group info set:', group.groupId, group.name);
+          interceptedGroupInfo.set(group.groupId, group);
+        },
+        delete: (groupId: number) => {
+          interceptedGroupInfo.delete(groupId);
+        },
+      },
+    };
+
+    const s4AliceUsername = `s4_alice_${dbSuffix}`;
+    const s4BobUsername = `s4_bob_${dbSuffix}`;
+
+    const s4Alice = new FireflyClient({
+      username: s4AliceUsername,
+      emulatorMode: true,
+      apiBaseUrl: baseUrl,
+      wsUrl: wsUrl,
+      dbFile: path.resolve(testDir, `${s4AliceUsername}.db`),
+      sessionFile: path.resolve(testDir, `${s4AliceUsername}-session.json`),
+      storage: customStorage,
+    });
+    const s4Bob = createClientHelper(s4BobUsername);
+
+    let s4AliceReceivedPing = false;
+    let s4BobReceivedPong = false;
+
+    s4Alice.command('ping', async (ctx) => {
+      console.log('s4Alice received /ping command from', ctx.sender);
+      s4AliceReceivedPing = true;
+      await ctx.reply('/pong');
+    });
+
+    s4Bob.command('pong', async (ctx) => {
+      console.log('s4Bob received /pong reply from', ctx.sender);
+      s4BobReceivedPong = true;
+    });
+
+    await s4Alice.start();
+    await s4Bob.start();
+    await sleep(2000);
+
+    console.log('Testing DM with custom storage adapter...');
+    await s4Bob.sendUserMessage(s4AliceUsername, '/ping');
+
+    for (let i = 0; i < 20; i++) {
+      if (s4AliceReceivedPing && s4BobReceivedPong) break;
+      await sleep(500);
+    }
+    assert.ok(s4AliceReceivedPing, 's4Alice should receive ping DM');
+    assert.ok(s4BobReceivedPong, 's4Bob should receive pong reply');
+
+    // Verify custom storage intercepted user messages
+    console.log('Intercepted user messages count:', interceptedUserMessages.length);
+    assert.ok(
+      interceptedUserMessages.length >= 1,
+      'Custom storage should have intercepted at least 1 user message'
+    );
+    const lastUserMsg = interceptedUserMessages[interceptedUserMessages.length - 1];
+    assert.ok(lastUserMsg.from.length > 0, 'Message from field should be populated');
+
+    // Testing Group creation and group info interception
+    console.log('Testing Group Creation with custom storage adapter...');
+    const s4Group = await s4Alice.createGroup('CustomStorageGroup', 'Testing raw storage');
+    const s4GroupId = Number(s4Group.id);
+    console.log('s4Group created with ID:', s4GroupId);
+
+    await s4Alice.addGroupMember(s4GroupId, s4BobUsername, 0);
+    await s4Bob.client.checkSetup();
+    await sleep(2000);
+
+    // Verify custom group info storage
+    console.log('Intercepted group info size:', interceptedGroupInfo.size);
+    assert.ok(
+      interceptedGroupInfo.has(s4GroupId),
+      'Custom storage should have intercepted group info'
+    );
+    const storedGroup = interceptedGroupInfo.get(s4GroupId);
+    assert.strictEqual(storedGroup?.name, 'CustomStorageGroup');
+
+    // Group message interception
+    let s4AliceReceivedGroupMsg = false;
+    s4Alice.onGroupMessage((ctx) => {
+      console.log('s4Alice received group message in custom storage test:', ctx.message);
+      s4AliceReceivedGroupMsg = true;
+    });
+
+    await s4Bob.sendGroupMessage(s4GroupId, 'Hello with custom storage!', 1);
+    for (let i = 0; i < 20; i++) {
+      if (s4AliceReceivedGroupMsg) break;
+      await sleep(500);
+    }
+    assert.ok(s4AliceReceivedGroupMsg, 's4Alice should receive group message');
+
+    console.log('Intercepted group messages count:', interceptedGroupMessages.length);
+    assert.ok(
+      interceptedGroupMessages.length >= 1,
+      'Custom storage should have intercepted at least 1 group message'
+    );
+    assert.strictEqual(interceptedGroupMessages[0].groupId, s4GroupId);
+    console.log('✓ Custom raw storage adapter flow passed!');
+
+    await s4Alice.dispose();
+    await s4Bob.dispose();
 
     console.log('\n=============================================');
     console.log('ALL INTEGRATION TEST SCENARIOS PASSED!');

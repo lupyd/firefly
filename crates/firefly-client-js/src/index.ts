@@ -3,7 +3,32 @@ import * as path from 'path';
 import * as http from 'http';
 import * as crypto from 'crypto';
 import { exec } from 'child_process';
-import { FireflyClientNode, protos, initLogger } from 'firefly-client-node';
+import {
+  FireflyClientNode,
+  protos,
+  initLogger,
+  FireflyStorageAdapter,
+  UserMessageStorageAdapter,
+  GroupMessageStorageAdapter,
+  GroupInfoStorageAdapter,
+  KeyValueStorageAdapter,
+  MlsStorageAdapter,
+  RawUserMessage,
+  RawGroupMessage,
+  RawGroupInfo,
+} from 'firefly-client-node';
+
+export type {
+  FireflyStorageAdapter,
+  UserMessageStorageAdapter,
+  GroupMessageStorageAdapter,
+  GroupInfoStorageAdapter,
+  KeyValueStorageAdapter,
+  MlsStorageAdapter,
+  RawUserMessage,
+  RawGroupMessage,
+  RawGroupInfo,
+};
 
 const GroupMessageInner = protos.GroupMessageInner;
 const UserMessageInner = protos.UserMessageInner;
@@ -57,6 +82,7 @@ export interface ClientConfig {
   username?: string;
   sessionFile?: string;
   dbFile?: string;
+  storage?: FireflyStorageAdapter;
 }
 
 export type BotConfig = ClientConfig;
@@ -88,6 +114,7 @@ export interface BotContext {
 export type CommandHandler = (ctx: ClientContext & BotContext) => Promise<void>;
 
 export class FireflyClient {
+  private config: ClientConfig;
   private port: number;
   private auth0Domain: string;
   private auth0ClientId: string;
@@ -114,6 +141,7 @@ export class FireflyClient {
   };
 
   constructor(options: ClientConfig = {}) {
+    this.config = options;
     this.port = options.port || 38295;
     this.auth0Domain = options.auth0Domain || 'https://auth.lupyd.com';
     this.auth0ClientId = options.auth0ClientId || 'GnfEyGY0JdD0Oige2HSpeErcaWLrvObm';
@@ -695,7 +723,8 @@ export class FireflyClient {
       2000,
       callbacks,
       this.dbFile,
-      15000
+      15000,
+      this.config.storage
     );
 
     console.log('Connecting to Firefly MLS network...');

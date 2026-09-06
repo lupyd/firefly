@@ -13,8 +13,13 @@ use firefly_client::group::FfiMlsClient;
 use firefly_client::libsignal_protocol::{DeviceId, ProtocolAddress};
 use firefly_client::storage::{
     FireflyStorage, GenericGroupInfoStore, GenericGroupMessagesStore, GenericKeyStores,
-    GenericKeyValueStore, GenericMessagesStore, GenericSelfGroupKeyPackageStore, GroupInfo, GroupMessage, MemoryStorage,
-    UserMessage,
+    GenericKeyValueStore, GenericMessagesStore, GenericMlsGroupStateStorage,
+    GenericMlsKeyPackageStorage, GenericMlsPreSharedKeyStorage, GenericSelfGroupKeyPackageStore,
+    GroupInfo, GroupInfoStorage, GroupMessage, GroupMessageStorage, KeyValueStorage,
+    MemoryStorage, UserMessage, UserMessageStorage, KEY_LAST_RECEIVED_MESSAGE_ID,
+};
+use firefly_core::storage_provider::{
+    MlsGroupStateStorage, MlsKeyPackageStorage, MlsPreSharedKeyStorage,
 };
 use firefly_client::utils::{deserialize_proto, serialize_proto, HTTP_CLIENT};
 use firefly_protos::firefly::{self};
@@ -166,14 +171,588 @@ impl FireflyWsClientCallback for WasmClientCallbacks {
     }
 }
 
+
+async fn call_js_async(fn_val: &js_sys::Function, args: &[JsValue]) -> Result<JsValue, JsValue> {
+    let this = JsValue::NULL;
+    let res = match args.len() {
+        0 => fn_val.call0(&this)?,
+        1 => fn_val.call1(&this, &args[0])?,
+        2 => fn_val.call2(&this, &args[0], &args[1])?,
+        3 => fn_val.call3(&this, &args[0], &args[1], &args[2])?,
+        _ => {
+            let arr = js_sys::Array::new();
+            for a in args {
+                arr.push(a);
+            }
+            fn_val.apply(&this, &arr)?
+        }
+    };
+    if res.is_instance_of::<js_sys::Promise>() {
+        let promise = js_sys::Promise::from(res);
+        send_wrapper::SendWrapper::new(wasm_bindgen_futures::JsFuture::from(promise)).await
+    } else {
+        Ok(res)
+    }
+}
+
+unsafe impl Send for JsUserMessageStorage {}
+unsafe impl Sync for JsUserMessageStorage {}
+unsafe impl Send for JsGroupMessageStorage {}
+unsafe impl Sync for JsGroupMessageStorage {}
+unsafe impl Send for JsGroupInfoStorage {}
+unsafe impl Sync for JsGroupInfoStorage {}
+unsafe impl Send for JsKeyValueStorage {}
+unsafe impl Sync for JsKeyValueStorage {}
+unsafe impl Send for JsMlsKeyPackageStorage {}
+unsafe impl Sync for JsMlsKeyPackageStorage {}
+unsafe impl Send for JsMlsGroupStateStorage {}
+unsafe impl Sync for JsMlsGroupStateStorage {}
+unsafe impl Send for JsMlsPreSharedKeyStorage {}
+unsafe impl Sync for JsMlsPreSharedKeyStorage {}
+
+
+pub struct JsUserMessageStorage {
+    js_add: Option<js_sys::Function>,
+    js_get: Option<js_sys::Function>,
+    fallback: Arc<dyn UserMessageStorage>,
+}
+
+#[async_trait::async_trait]
+impl UserMessageStorage for JsUserMessageStorage {
+    async fn add(
+        &self,
+        id: u64,
+        other: &str,
+        message: &[u8],
+        sent_by_other: bool,
+    ) -> anyhow::Result<()> {
+        if let Some(ref f) = self.js_add {
+            let msg_arr = js_sys::Uint8Array::from(message);
+            let _ = call_js_async(
+                f,
+                &[
+                    JsValue::from_f64(id as f64),
+                    JsValue::from_str(other),
+                    msg_arr.into(),
+                    JsValue::from_bool(sent_by_other),
+                ],
+            )
+            .await;
+        }
+        self.fallback.add(id, other, message, sent_by_other).await
+    }
+
+    async fn get_last_messages_of(
+        &self,
+        other: &str,
+        before: i64,
+        limit: i64,
+    ) -> anyhow::Result<Vec<UserMessage>> {
+        if let Some(ref f) = self.js_get {
+            if let Ok(res) = call_js_async(
+                f,
+                &[
+                    JsValue::from_str(other),
+                    JsValue::from_f64(before as f64),
+                    JsValue::from_f64(limit as f64),
+                ],
+            )
+            .await
+            {
+                if js_sys::Array::is_array(&res) {
+                    let arr = js_sys::Array::from(&res);
+                    let mut list = Vec::new();
+                    for i in 0..arr.length() {
+                        let obj = arr.get(i);
+                        let id = js_sys::Reflect::get(&obj, &"id".into())
+                            .ok()
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0) as u64;
+                        let other_str = js_sys::Reflect::get(&obj, &"other".into())
+                            .ok()
+                            .and_then(|v| v.as_string())
+                            .unwrap_or_else(|| other.to_string());
+                        let sent_by_other = js_sys::Reflect::get(&obj, &"sentByOther".into())
+                            .ok()
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let msg_bytes = js_sys::Reflect::get(&obj, &"message".into())
+                            .ok()
+                            .map(|v| js_sys::Uint8Array::from(v).to_vec())
+                            .unwrap_or_default();
+                        list.push(UserMessage {
+                            id,
+                            other: other_str,
+                            message: msg_bytes,
+                            sent_by_other,
+                        });
+                    }
+                    return Ok(list);
+                }
+            }
+        }
+        self.fallback.get_last_messages_of(other, before, limit).await
+    }
+}
+
+pub struct JsGroupMessageStorage {
+    js_add: Option<js_sys::Function>,
+    js_get: Option<js_sys::Function>,
+    js_get_last: Option<js_sys::Function>,
+    js_delete_by_group: Option<js_sys::Function>,
+    js_update_cursor: Option<js_sys::Function>,
+    fallback: Arc<dyn GroupMessageStorage>,
+}
+
+#[async_trait::async_trait]
+impl GroupMessageStorage for JsGroupMessageStorage {
+    async fn add(
+        &self,
+        id: u64,
+        group_id: u64,
+        channel_id: u32,
+        epoch: u32,
+        by: &str,
+        message: &[u8],
+    ) -> anyhow::Result<()> {
+        if let Some(ref f) = self.js_add {
+            let msg_arr = js_sys::Uint8Array::from(message);
+            let _ = call_js_async(
+                f,
+                &[
+                    JsValue::from_f64(id as f64),
+                    JsValue::from_f64(group_id as f64),
+                    JsValue::from_f64(channel_id as f64),
+                    JsValue::from_f64(epoch as f64),
+                    JsValue::from_str(by),
+                    msg_arr.into(),
+                ],
+            )
+            .await;
+        }
+        self.fallback
+            .add(id, group_id, channel_id, epoch, by, message)
+            .await
+    }
+
+    async fn get(
+        &self,
+        group_id: u64,
+        start_before: u64,
+        limit: u32,
+    ) -> anyhow::Result<Vec<GroupMessage>> {
+        if let Some(ref f) = self.js_get {
+            if let Ok(res) = call_js_async(
+                f,
+                &[
+                    JsValue::from_f64(group_id as f64),
+                    JsValue::from_f64(start_before as f64),
+                    JsValue::from_f64(limit as f64),
+                ],
+            )
+            .await
+            {
+                if js_sys::Array::is_array(&res) {
+                    let arr = js_sys::Array::from(&res);
+                    let mut list = Vec::new();
+                    for i in 0..arr.length() {
+                        let obj = arr.get(i);
+                        let id = js_sys::Reflect::get(&obj, &"id".into())
+                            .ok()
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0) as u64;
+                        let gid = js_sys::Reflect::get(&obj, &"groupId".into())
+                            .ok()
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(group_id as f64) as u64;
+                        let by_str = js_sys::Reflect::get(&obj, &"by".into())
+                            .ok()
+                            .and_then(|v| v.as_string())
+                            .unwrap_or_default();
+                        let channel_id = js_sys::Reflect::get(&obj, &"channelId".into())
+                            .ok()
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0) as u32;
+                        let epoch = js_sys::Reflect::get(&obj, &"epoch".into())
+                            .ok()
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0) as u32;
+                        let msg_bytes = js_sys::Reflect::get(&obj, &"message".into())
+                            .ok()
+                            .map(|v| js_sys::Uint8Array::from(v).to_vec())
+                            .unwrap_or_default();
+                        list.push(GroupMessage {
+                            id,
+                            group_id: gid,
+                            by: by_str,
+                            message: msg_bytes,
+                            channel_id,
+                            epoch,
+                        });
+                    }
+                    return Ok(list);
+                }
+            }
+        }
+        self.fallback.get(group_id, start_before, limit).await
+    }
+
+    async fn get_last_message_of_group(&self, group_id: u64) -> anyhow::Result<GroupMessage> {
+        if let Some(ref f) = self.js_get_last {
+            if let Ok(res) = call_js_async(f, &[JsValue::from_f64(group_id as f64)]).await {
+                if !res.is_null() && !res.is_undefined() {
+                    let id = js_sys::Reflect::get(&res, &"id".into())
+                        .ok()
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0) as u64;
+                    let gid = js_sys::Reflect::get(&res, &"groupId".into())
+                        .ok()
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(group_id as f64) as u64;
+                    let by_str = js_sys::Reflect::get(&res, &"by".into())
+                        .ok()
+                        .and_then(|v| v.as_string())
+                        .unwrap_or_default();
+                    let channel_id = js_sys::Reflect::get(&res, &"channelId".into())
+                        .ok()
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0) as u32;
+                    let epoch = js_sys::Reflect::get(&res, &"epoch".into())
+                        .ok()
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0) as u32;
+                    let msg_bytes = js_sys::Reflect::get(&res, &"message".into())
+                        .ok()
+                        .map(|v| js_sys::Uint8Array::from(v).to_vec())
+                        .unwrap_or_default();
+                    return Ok(GroupMessage {
+                        id,
+                        group_id: gid,
+                        by: by_str,
+                        message: msg_bytes,
+                        channel_id,
+                        epoch,
+                    });
+                }
+            }
+        }
+        self.fallback.get_last_message_of_group(group_id).await
+    }
+
+    async fn delete_by_group_id(&self, group_id: u64) -> anyhow::Result<()> {
+        if let Some(ref f) = self.js_delete_by_group {
+            let _ = call_js_async(f, &[JsValue::from_f64(group_id as f64)]).await;
+        }
+        self.fallback.delete_by_group_id(group_id).await
+    }
+
+    async fn update_cursor(&self, id: u64, group_id: u64, epoch: u32) -> anyhow::Result<()> {
+        if let Some(ref f) = self.js_update_cursor {
+            let _ = call_js_async(
+                f,
+                &[
+                    JsValue::from_f64(id as f64),
+                    JsValue::from_f64(group_id as f64),
+                    JsValue::from_f64(epoch as f64),
+                ],
+            )
+            .await;
+        }
+        self.fallback.update_cursor(id, group_id, epoch).await
+    }
+}
+
+pub struct JsGroupInfoStorage {
+    js_get_all: Option<js_sys::Function>,
+    js_get: Option<js_sys::Function>,
+    js_set: Option<js_sys::Function>,
+    js_delete: Option<js_sys::Function>,
+    fallback: Arc<dyn GroupInfoStorage>,
+}
+
+#[async_trait::async_trait]
+impl GroupInfoStorage for JsGroupInfoStorage {
+    async fn get_all(&self) -> anyhow::Result<Vec<GroupInfo>> {
+        if let Some(ref f) = self.js_get_all {
+            if let Ok(res) = call_js_async(f, &[]).await {
+                if js_sys::Array::is_array(&res) {
+                    let arr = js_sys::Array::from(&res);
+                    let mut list = Vec::new();
+                    for i in 0..arr.length() {
+                        let obj = arr.get(i);
+                        let id = js_sys::Reflect::get(&obj, &"id".into())
+                            .ok()
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0) as u64;
+                        let name = js_sys::Reflect::get(&obj, &"name".into())
+                            .ok()
+                            .and_then(|v| v.as_string())
+                            .unwrap_or_default();
+                        let description = js_sys::Reflect::get(&obj, &"description".into())
+                            .ok()
+                            .and_then(|v| v.as_string())
+                            .unwrap_or_default();
+                        let identifier = js_sys::Reflect::get(&obj, &"identifier".into())
+                            .ok()
+                            .map(|v| js_sys::Uint8Array::from(v).to_vec())
+                            .unwrap_or_default();
+                        list.push(GroupInfo {
+                            id,
+                            name,
+                            description,
+                            identifier,
+                        });
+                    }
+                    return Ok(list);
+                }
+            }
+        }
+        self.fallback.get_all().await
+    }
+
+    async fn get(&self, id: u64) -> anyhow::Result<GroupInfo> {
+        if let Some(ref f) = self.js_get {
+            if let Ok(res) = call_js_async(f, &[JsValue::from_f64(id as f64)]).await {
+                if !res.is_null() && !res.is_undefined() {
+                    let name = js_sys::Reflect::get(&res, &"name".into())
+                        .ok()
+                        .and_then(|v| v.as_string())
+                        .unwrap_or_default();
+                    let description = js_sys::Reflect::get(&res, &"description".into())
+                        .ok()
+                        .and_then(|v| v.as_string())
+                        .unwrap_or_default();
+                    let identifier = js_sys::Reflect::get(&res, &"identifier".into())
+                        .ok()
+                        .map(|v| js_sys::Uint8Array::from(v).to_vec())
+                        .unwrap_or_default();
+                    return Ok(GroupInfo {
+                        id,
+                        name,
+                        description,
+                        identifier,
+                    });
+                }
+            }
+        }
+        self.fallback.get(id).await
+    }
+
+    async fn set(
+        &self,
+        id: u64,
+        name: String,
+        description: String,
+        group_state_id: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        if let Some(ref f) = self.js_set {
+            let ident_arr = js_sys::Uint8Array::from(group_state_id.as_slice());
+            let _ = call_js_async(
+                f,
+                &[
+                    JsValue::from_f64(id as f64),
+                    JsValue::from_str(&name),
+                    JsValue::from_str(&description),
+                    ident_arr.into(),
+                ],
+            )
+            .await;
+        }
+        self.fallback
+            .set(id, name, description, group_state_id)
+            .await
+    }
+
+    async fn delete(&self, id: u64) -> anyhow::Result<()> {
+        if let Some(ref f) = self.js_delete {
+            let _ = call_js_async(f, &[JsValue::from_f64(id as f64)]).await;
+        }
+        self.fallback.delete(id).await
+    }
+}
+
+pub struct JsKeyValueStorage {
+    js_get: Option<js_sys::Function>,
+    js_set: Option<js_sys::Function>,
+    fallback: Arc<dyn KeyValueStorage>,
+}
+
+#[async_trait::async_trait]
+impl KeyValueStorage for JsKeyValueStorage {
+    async fn get(&self, key: &str) -> anyhow::Result<String> {
+        if let Some(ref f) = self.js_get {
+            if let Ok(res) = call_js_async(f, &[JsValue::from_str(key)]).await {
+                if let Some(s) = res.as_string() {
+                    return Ok(s);
+                }
+            }
+        }
+        self.fallback.get(key).await
+    }
+
+    async fn set(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        if let Some(ref f) = self.js_set {
+            let _ = call_js_async(f, &[JsValue::from_str(key), JsValue::from_str(value)]).await;
+        }
+        self.fallback.set(key, value).await
+    }
+
+    async fn update_last_received_message_id(
+        &self,
+        last_received_message_id: u64,
+    ) -> anyhow::Result<()> {
+        if let Ok(existing_str) = self.get(KEY_LAST_RECEIVED_MESSAGE_ID).await {
+            if let Ok(existing) = existing_str.parse::<u64>() {
+                if existing >= last_received_message_id {
+                    return Ok(());
+                }
+            }
+        }
+        self.set(KEY_LAST_RECEIVED_MESSAGE_ID, &last_received_message_id.to_string())
+            .await
+    }
+}
+
+pub struct JsMlsKeyPackageStorage {
+    js_insert: Option<js_sys::Function>,
+    js_delete: Option<js_sys::Function>,
+    js_get: Option<js_sys::Function>,
+    fallback: Arc<dyn MlsKeyPackageStorage>,
+}
+
+#[async_trait::async_trait]
+impl MlsKeyPackageStorage for JsMlsKeyPackageStorage {
+    async fn insert(&self, id: Vec<u8>, key_package_data: Vec<u8>) -> bool {
+        if let Some(ref f) = self.js_insert {
+            let id_arr = js_sys::Uint8Array::from(id.as_slice());
+            let data_arr = js_sys::Uint8Array::from(key_package_data.as_slice());
+            let _ = call_js_async(f, &[id_arr.into(), data_arr.into()]).await;
+        }
+        self.fallback.insert(id, key_package_data).await
+    }
+
+    async fn delete(&self, id: Vec<u8>) -> bool {
+        if let Some(ref f) = self.js_delete {
+            let id_arr = js_sys::Uint8Array::from(id.as_slice());
+            let _ = call_js_async(f, &[id_arr.into()]).await;
+        }
+        self.fallback.delete(id).await
+    }
+
+    async fn get(&self, id: Vec<u8>) -> Option<Vec<u8>> {
+        if let Some(ref f) = self.js_get {
+            let id_arr = js_sys::Uint8Array::from(id.as_slice());
+            if let Ok(res) = call_js_async(f, &[id_arr.into()]).await {
+                if !res.is_null() && !res.is_undefined() {
+                    return Some(js_sys::Uint8Array::from(res).to_vec());
+                }
+            }
+        }
+        self.fallback.get(id).await
+    }
+}
+
+pub struct JsMlsPreSharedKeyStorage {
+    js_get: Option<js_sys::Function>,
+    fallback: Arc<dyn MlsPreSharedKeyStorage>,
+}
+
+#[async_trait::async_trait]
+impl MlsPreSharedKeyStorage for JsMlsPreSharedKeyStorage {
+    async fn get(&self, id: Vec<u8>) -> Option<Vec<u8>> {
+        if let Some(ref f) = self.js_get {
+            let id_arr = js_sys::Uint8Array::from(id.as_slice());
+            if let Ok(res) = call_js_async(f, &[id_arr.into()]).await {
+                if !res.is_null() && !res.is_undefined() {
+                    return Some(js_sys::Uint8Array::from(res).to_vec());
+                }
+            }
+        }
+        self.fallback.get(id).await
+    }
+}
+
+pub struct JsMlsGroupStateStorage {
+    js_state: Option<js_sys::Function>,
+    js_epoch: Option<js_sys::Function>,
+    js_write: Option<js_sys::Function>,
+    js_max_epoch_id: Option<js_sys::Function>,
+    fallback: Arc<dyn MlsGroupStateStorage>,
+}
+
+#[async_trait::async_trait]
+impl MlsGroupStateStorage for JsMlsGroupStateStorage {
+    async fn state(&self, group_id: Vec<u8>) -> Option<zeroize::Zeroizing<Vec<u8>>> {
+        if let Some(ref f) = self.js_state {
+            let gid_arr = js_sys::Uint8Array::from(group_id.as_slice());
+            if let Ok(res) = call_js_async(f, &[gid_arr.into()]).await {
+                if !res.is_null() && !res.is_undefined() {
+                    return Some(zeroize::Zeroizing::new(js_sys::Uint8Array::from(res).to_vec()));
+                }
+            }
+        }
+        self.fallback.state(group_id).await
+    }
+
+    async fn epoch(&self, group_id: Vec<u8>, epoch_id: u64) -> Option<zeroize::Zeroizing<Vec<u8>>> {
+        if let Some(ref f) = self.js_epoch {
+            let gid_arr = js_sys::Uint8Array::from(group_id.as_slice());
+            if let Ok(res) = call_js_async(f, &[gid_arr.into(), JsValue::from_f64(epoch_id as f64)]).await {
+                if !res.is_null() && !res.is_undefined() {
+                    return Some(zeroize::Zeroizing::new(js_sys::Uint8Array::from(res).to_vec()));
+                }
+            }
+        }
+        self.fallback.epoch(group_id, epoch_id).await
+    }
+
+    async fn write(
+        &self,
+        group_id: Vec<u8>,
+        state_data: zeroize::Zeroizing<Vec<u8>>,
+        epoch_inserts: std::collections::HashMap<u64, zeroize::Zeroizing<Vec<u8>>>,
+        epoch_updates: std::collections::HashMap<u64, zeroize::Zeroizing<Vec<u8>>>,
+    ) -> bool {
+        if let Some(ref f) = self.js_write {
+            let gid_arr = js_sys::Uint8Array::from(group_id.as_slice());
+            let state_arr = js_sys::Uint8Array::from(state_data.as_slice());
+            let ins_obj = js_sys::Object::new();
+            for (k, v) in &epoch_inserts {
+                let _ = js_sys::Reflect::set(&ins_obj, &k.to_string().into(), &js_sys::Uint8Array::from(v.as_slice()).into());
+            }
+            let upd_obj = js_sys::Object::new();
+            for (k, v) in &epoch_updates {
+                let _ = js_sys::Reflect::set(&upd_obj, &k.to_string().into(), &js_sys::Uint8Array::from(v.as_slice()).into());
+            }
+            let _ = call_js_async(f, &[gid_arr.into(), state_arr.into(), ins_obj.into(), upd_obj.into()]).await;
+        }
+        self.fallback.write(group_id, state_data, epoch_inserts, epoch_updates).await
+    }
+
+    async fn max_epoch_id(&self, group_id: Vec<u8>) -> Option<u64> {
+        if let Some(ref f) = self.js_max_epoch_id {
+            let gid_arr = js_sys::Uint8Array::from(group_id.as_slice());
+            if let Ok(res) = call_js_async(f, &[gid_arr.into()]).await {
+                if let Some(n) = res.as_f64() {
+                    return Some(n as u64);
+                }
+            }
+        }
+        self.fallback.max_epoch_id(group_id).await
+    }
+}
+
 #[wasm_bindgen]
 pub struct FireflyClientNode {
     storage: Arc<dyn FireflyStorage>,
     key_stores: Arc<tokio::sync::RwLock<GenericKeyStores>>,
-    key_value_store: GenericKeyValueStore,
-    group_messages_store: GenericGroupMessagesStore,
-    user_messages_store: GenericMessagesStore,
-    group_info_store: GenericGroupInfoStore,
+    key_value_store: Arc<dyn KeyValueStorage>,
+    group_messages_store: Arc<dyn GroupMessageStorage>,
+    user_messages_store: Arc<dyn UserMessageStorage>,
+    group_info_store: Arc<dyn GroupInfoStorage>,
+    key_package_storage: Arc<dyn MlsKeyPackageStorage>,
+    group_state_storage: Arc<dyn MlsGroupStateStorage>,
+    psk_storage: Arc<dyn MlsPreSharedKeyStorage>,
     mls_client: Arc<tokio::sync::RwLock<Option<Arc<FfiMlsClient>>>>,
     callbacks: Arc<WasmClientCallbacks>,
     token: Arc<Mutex<Option<String>>>,
@@ -195,8 +774,8 @@ async fn join_groups_helper(
     address_id: u64,
     device_id: u8,
     mls: &Arc<FfiMlsClient>,
-    group_info_store: &GenericGroupInfoStore,
-    group_messages_store: &GenericGroupMessagesStore,
+    group_info_store: &Arc<dyn GroupInfoStorage>,
+    group_messages_store: &Arc<dyn GroupMessageStorage>,
     callbacks: &Arc<WasmClientCallbacks>,
 ) -> anyhow::Result<()> {
     let url = format!(
@@ -313,10 +892,99 @@ impl FireflyClientNode {
                     .await
                     .map_err(|e| JsValue::from_str(&e.to_string()))?,
             ));
-            let key_value_store = GenericKeyValueStore::new(storage.clone());
-            let group_messages_store = GenericGroupMessagesStore::new(storage.clone());
-            let user_messages_store = GenericMessagesStore::new(storage.clone());
-            let group_info_store = GenericGroupInfoStore::new(storage.clone());
+            let default_key_value = Arc::new(GenericKeyValueStore::new(storage.clone()));
+            let default_group_messages = Arc::new(GenericGroupMessagesStore::new(storage.clone()));
+            let default_user_messages = Arc::new(GenericMessagesStore::new(storage.clone()));
+            let default_group_info = Arc::new(GenericGroupInfoStore::new(storage.clone()));
+            let default_kp = Arc::new(GenericMlsKeyPackageStorage::new(storage.clone()));
+            let default_gs = Arc::new(GenericMlsGroupStateStorage::new(storage.clone()));
+            let default_psk = Arc::new(GenericMlsPreSharedKeyStorage::new(storage.clone()));
+
+            let storage_obj = js_sys::Reflect::get(&callbacks_obj, &"storage".into()).ok();
+            let (
+                key_value_store,
+                group_messages_store,
+                user_messages_store,
+                group_info_store,
+                key_package_storage,
+                group_state_storage,
+                psk_storage,
+            ): (
+                Arc<dyn KeyValueStorage>,
+                Arc<dyn GroupMessageStorage>,
+                Arc<dyn UserMessageStorage>,
+                Arc<dyn GroupInfoStorage>,
+                Arc<dyn MlsKeyPackageStorage>,
+                Arc<dyn MlsGroupStateStorage>,
+                Arc<dyn MlsPreSharedKeyStorage>,
+            ) = if let Some(ref s_obj) = storage_obj {
+                let ums_obj = js_sys::Reflect::get(s_obj, &"userMessages".into()).ok();
+                let gms_obj = js_sys::Reflect::get(s_obj, &"groupMessages".into()).ok();
+                let gis_obj = js_sys::Reflect::get(s_obj, &"groupInfo".into()).ok();
+                let kvs_obj = js_sys::Reflect::get(s_obj, &"keyValue".into()).ok();
+                let mls_obj = js_sys::Reflect::get(s_obj, &"mls".into()).ok();
+
+                let ums: Arc<dyn UserMessageStorage> = Arc::new(JsUserMessageStorage {
+                    js_add: ums_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"add".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    js_get: ums_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"get".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    fallback: default_user_messages,
+                });
+
+                let gms: Arc<dyn GroupMessageStorage> = Arc::new(JsGroupMessageStorage {
+                    js_add: gms_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"add".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    js_get: gms_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"get".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    js_get_last: gms_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"getLastMessageOfGroup".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    js_delete_by_group: gms_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"deleteByGroupId".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    js_update_cursor: gms_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"updateCursor".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    fallback: default_group_messages,
+                });
+
+                let gis: Arc<dyn GroupInfoStorage> = Arc::new(JsGroupInfoStorage {
+                    js_get_all: gis_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"getAll".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    js_get: gis_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"get".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    js_set: gis_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"set".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    js_delete: gis_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"delete".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    fallback: default_group_info,
+                });
+
+                let kvs: Arc<dyn KeyValueStorage> = Arc::new(JsKeyValueStorage {
+                    js_get: kvs_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"get".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    js_set: kvs_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"set".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    fallback: default_key_value,
+                });
+
+                let kp: Arc<dyn MlsKeyPackageStorage> = Arc::new(JsMlsKeyPackageStorage {
+                    js_insert: mls_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"keyPackageInsert".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    js_delete: mls_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"keyPackageDelete".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    js_get: mls_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"keyPackageGet".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    fallback: default_kp,
+                });
+
+                let gs: Arc<dyn MlsGroupStateStorage> = Arc::new(JsMlsGroupStateStorage {
+                    js_state: mls_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"groupState".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    js_epoch: mls_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"groupEpoch".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    js_write: mls_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"groupWrite".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    js_max_epoch_id: mls_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"groupMaxEpochId".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    fallback: default_gs,
+                });
+
+                let psk: Arc<dyn MlsPreSharedKeyStorage> = Arc::new(JsMlsPreSharedKeyStorage {
+                    js_get: mls_obj.as_ref().and_then(|o| js_sys::Reflect::get(o, &"pskGet".into()).ok()).and_then(|v| v.dyn_into::<js_sys::Function>().ok()),
+                    fallback: default_psk,
+                });
+
+                (kvs, gms, ums, gis, kp, gs, psk)
+            } else {
+                (
+                    default_key_value,
+                    default_group_messages,
+                    default_user_messages,
+                    default_group_info,
+                    default_kp,
+                    default_gs,
+                    default_psk,
+                )
+            };
 
             let client = FireflyClientNode {
                 storage,
@@ -325,6 +993,9 @@ impl FireflyClientNode {
                 group_messages_store,
                 user_messages_store,
                 group_info_store,
+                key_package_storage,
+                group_state_storage,
+                psk_storage,
                 mls_client: Arc::new(tokio::sync::RwLock::new(None)),
                 callbacks,
                 token,
@@ -360,6 +1031,10 @@ impl FireflyClientNode {
         let device_id_atomic = self.device_id.clone();
         let group_info_store = self.group_info_store.clone();
         let group_messages_store = self.group_messages_store.clone();
+        let key_value_store = self.key_value_store.clone();
+        let key_package_storage = self.key_package_storage.clone();
+        let group_state_storage = self.group_state_storage.clone();
+        let psk_storage = self.psk_storage.clone();
 
         future_to_promise(async move {
             let token = callbacks
@@ -439,11 +1114,15 @@ impl FireflyClientNode {
             }
 
             // Initialize MLS client
-            let mls = FfiMlsClient::initialize_with_storage(
+            let mls = FfiMlsClient::initialize_with_stores(
                 device_id,
                 address_id,
                 callbacks.clone(),
-                storage.clone(),
+                key_value_store.clone(),
+                key_package_storage.clone(),
+                group_state_storage.clone(),
+                psk_storage.clone(),
+                group_info_store.clone(),
                 base_url.clone(),
             )
             .await
