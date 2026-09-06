@@ -4,6 +4,8 @@ export interface RawUserMessage {
     other: string;
     message: Uint8Array;
     sentByOther: boolean;
+    from?: string;
+    to?: string;
 }
 export interface RawGroupMessage {
     id: number;
@@ -12,51 +14,82 @@ export interface RawGroupMessage {
     message: Uint8Array;
     channelId: number;
     epoch: number;
+    from?: string;
 }
 export interface RawGroupInfo {
     id: number;
     name: string;
     description: string;
     identifier: Uint8Array;
+    groupId?: number;
 }
-export interface UserMessageStorageAdapter {
-    add?: (id: number, other: string, message: Uint8Array, sentByOther: boolean) => Promise<void> | void;
-    get?: (other: string, startBefore: number, limit: number) => Promise<RawUserMessage[]>;
+export interface MlsKeyPackageStorage {
+    insert(id: Uint8Array, keyPackageData: Uint8Array): Promise<boolean> | boolean;
+    delete(id: Uint8Array): Promise<boolean> | boolean;
+    get(id: Uint8Array): Promise<Uint8Array | null | undefined> | Uint8Array | null | undefined;
 }
-export interface GroupMessageStorageAdapter {
-    add?: (id: number, groupId: number, channelId: number, epoch: number, by: string, message: Uint8Array) => Promise<void> | void;
-    get?: (groupId: number, startBefore: number, limit: number) => Promise<RawGroupMessage[]>;
-    getLastMessageOfGroup?: (groupId: number) => Promise<RawGroupMessage | null>;
-    deleteByGroupId?: (groupId: number) => Promise<void> | void;
-    updateCursor?: (id: number, groupId: number, epoch: number) => Promise<void> | void;
+export interface MlsGroupStateStorage {
+    state(groupId: Uint8Array): Promise<Uint8Array | null | undefined> | Uint8Array | null | undefined;
+    epoch(groupId: Uint8Array, epochId: number | bigint): Promise<Uint8Array | null | undefined> | Uint8Array | null | undefined;
+    write(groupId: Uint8Array, stateData: Uint8Array, epochInserts: Record<string, Uint8Array> | Map<number | bigint, Uint8Array>, epochUpdates: Record<string, Uint8Array> | Map<number | bigint, Uint8Array>): Promise<boolean> | boolean;
+    maxEpochId?(groupId: Uint8Array): Promise<number | bigint | null | undefined> | number | bigint | null | undefined;
+    max_epoch_id?(groupId: Uint8Array): Promise<number | bigint | null | undefined> | number | bigint | null | undefined;
 }
-export interface GroupInfoStorageAdapter {
-    getAll?: () => Promise<RawGroupInfo[]>;
-    get?: (id: number) => Promise<RawGroupInfo | null>;
-    set?: (id: number, name: string, description: string, identifier: Uint8Array) => Promise<void> | void;
-    delete?: (id: number) => Promise<void> | void;
+export interface MlsPreSharedKeyStorage {
+    get(id: Uint8Array): Promise<Uint8Array | null | undefined> | Uint8Array | null | undefined;
 }
-export interface KeyValueStorageAdapter {
-    get?: (key: string) => Promise<string | null>;
-    set?: (key: string, value: string) => Promise<void> | void;
+export interface UserMessageStorage {
+    add(id: number | bigint, other: string, message: Uint8Array, sentByOther: boolean): Promise<void> | void;
+    getLastMessagesOf?(other: string, before: number | bigint, limit: number | bigint): Promise<RawUserMessage[]>;
+    get_last_messages_of?(other: string, before: number | bigint, limit: number | bigint): Promise<RawUserMessage[]>;
+    get?(other: string, before: number | bigint, limit: number | bigint): Promise<RawUserMessage[]>;
 }
-export interface MlsStorageAdapter {
-    keyPackageInsert?: (id: Uint8Array, data: Uint8Array) => Promise<boolean> | boolean;
-    keyPackageDelete?: (id: Uint8Array) => Promise<boolean> | boolean;
-    keyPackageGet?: (id: Uint8Array) => Promise<Uint8Array | null>;
-    groupState?: (groupId: Uint8Array) => Promise<Uint8Array | null>;
-    groupEpoch?: (groupId: Uint8Array, epochId: number) => Promise<Uint8Array | null>;
-    groupWrite?: (groupId: Uint8Array, stateData: Uint8Array, epochInserts: Record<string, Uint8Array>, epochUpdates: Record<string, Uint8Array>) => Promise<boolean> | boolean;
-    groupMaxEpochId?: (groupId: Uint8Array) => Promise<number | null>;
-    pskGet?: (id: Uint8Array) => Promise<Uint8Array | null>;
+export interface GroupMessageStorage {
+    add(id: number | bigint, groupId: number | bigint, channelId: number, epoch: number, by: string, message: Uint8Array): Promise<void> | void;
+    get(groupId: number | bigint, startBefore: number | bigint, limit: number): Promise<RawGroupMessage[]>;
+    getLastMessageOfGroup?(groupId: number | bigint): Promise<RawGroupMessage | null | undefined>;
+    get_last_message_of_group?(groupId: number | bigint): Promise<RawGroupMessage | null | undefined>;
+    deleteByGroupId?(groupId: number | bigint): Promise<void> | void;
+    delete_by_group_id?(groupId: number | bigint): Promise<void> | void;
+    updateCursor?(id: number | bigint, groupId: number | bigint, epoch: number): Promise<void> | void;
+    update_cursor?(id: number | bigint, groupId: number | bigint, epoch: number): Promise<void> | void;
 }
-export interface FireflyStorageAdapter {
-    userMessages?: UserMessageStorageAdapter;
-    groupMessages?: GroupMessageStorageAdapter;
-    groupInfo?: GroupInfoStorageAdapter;
-    keyValue?: KeyValueStorageAdapter;
-    mls?: MlsStorageAdapter;
+export interface GroupInfoStorage {
+    getAll?(): Promise<RawGroupInfo[]>;
+    get_all?(): Promise<RawGroupInfo[]>;
+    get(id: number | bigint): Promise<RawGroupInfo | null | undefined>;
+    set(id: number | bigint, name: string, description: string, groupStateId: Uint8Array): Promise<void> | void;
+    delete(id: number | bigint): Promise<void> | void;
 }
+export interface KeyValueStorage {
+    get(key: string): Promise<string | null | undefined>;
+    set(key: string, value: string): Promise<void> | void;
+    updateLastReceivedMessageId?(lastReceivedMessageId: number | bigint): Promise<void> | void;
+    update_last_received_message_id?(lastReceivedMessageId: number | bigint): Promise<void> | void;
+}
+export interface StorageProviders {
+    mlsKeyPackageStorage?: MlsKeyPackageStorage;
+    mlsGroupStateStorage?: MlsGroupStateStorage;
+    mlsPreSharedKeyStorage?: MlsPreSharedKeyStorage;
+    userMessageStorage?: UserMessageStorage;
+    groupMessageStorage?: GroupMessageStorage;
+    groupInfoStorage?: GroupInfoStorage;
+    keyValueStorage?: KeyValueStorage;
+    keyPackageStorage?: MlsKeyPackageStorage;
+    groupStateStorage?: MlsGroupStateStorage;
+    preSharedKeyStorage?: MlsPreSharedKeyStorage;
+    userMessages?: UserMessageStorage;
+    groupMessages?: GroupMessageStorage;
+    groupInfo?: GroupInfoStorage;
+    keyValue?: KeyValueStorage;
+    mls?: any;
+}
+export type FireflyStorageAdapter = StorageProviders;
+export type UserMessageStorageAdapter = UserMessageStorage;
+export type GroupMessageStorageAdapter = GroupMessageStorage;
+export type GroupInfoStorageAdapter = GroupInfoStorage;
+export type KeyValueStorageAdapter = KeyValueStorage;
+export type MlsStorageAdapter = StorageProviders;
 export declare const initLogger: (filePath: string) => void;
 export declare class FireflyClientNode {
     private inner;

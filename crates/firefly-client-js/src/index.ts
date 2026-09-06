@@ -7,6 +7,14 @@ import {
   FireflyClientNode,
   protos,
   initLogger,
+  MlsKeyPackageStorage,
+  MlsGroupStateStorage,
+  MlsPreSharedKeyStorage,
+  UserMessageStorage,
+  GroupMessageStorage,
+  GroupInfoStorage,
+  KeyValueStorage,
+  StorageProviders,
   FireflyStorageAdapter,
   UserMessageStorageAdapter,
   GroupMessageStorageAdapter,
@@ -19,6 +27,14 @@ import {
 } from 'firefly-client-node';
 
 export type {
+  MlsKeyPackageStorage,
+  MlsGroupStateStorage,
+  MlsPreSharedKeyStorage,
+  UserMessageStorage,
+  GroupMessageStorage,
+  GroupInfoStorage,
+  KeyValueStorage,
+  StorageProviders,
   FireflyStorageAdapter,
   UserMessageStorageAdapter,
   GroupMessageStorageAdapter,
@@ -82,7 +98,8 @@ export interface ClientConfig {
   username?: string;
   sessionFile?: string;
   dbFile?: string;
-  storage?: FireflyStorageAdapter;
+  storage?: StorageProviders | FireflyStorageAdapter;
+  storageProviders?: StorageProviders;
 }
 
 export type BotConfig = ClientConfig;
@@ -724,7 +741,7 @@ export class FireflyClient {
       callbacks,
       this.dbFile,
       15000,
-      this.config.storage
+      this.config.storageProviders || this.config.storage
     );
 
     console.log('Connecting to Firefly MLS network...');

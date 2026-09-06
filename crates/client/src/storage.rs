@@ -4,248 +4,16 @@ use std::time::SystemTime;
 use tokio::sync::RwLock;
 use rand::RngCore;
 use libsignal_protocol::{kem::KeyType, *};
+use zeroize::Zeroizing;
+
 use crate::{
     EncryptedMessage, FfiPreKeyBundle,
     utils::{self, get_current_timestamp_millis_since_epoch},
 };
 
-#[async_trait::async_trait]
-pub trait FireflyStorage: Send + Sync {
-    async fn get(&self, table: &str, key: &str) -> Option<Vec<u8>>;
-    async fn set(&self, table: &str, key: &str, value: Vec<u8>);
-    async fn delete(&self, table: &str, key: &str);
-    async fn get_all(&self, table: &str) -> Vec<(String, Vec<u8>)>;
-}
-
-#[derive(Clone, Default)]
-pub struct MemoryStorage {
-    data: Arc<RwLock<HashMap<String, HashMap<String, Vec<u8>>>>>,
-}
-
-impl MemoryStorage {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-#[async_trait::async_trait]
-impl FireflyStorage for MemoryStorage {
-    async fn get(&self, table: &str, key: &str) -> Option<Vec<u8>> {
-        let guard = self.data.read().await;
-        guard.get(table).and_then(|t| t.get(key).cloned())
-    }
-
-    async fn set(&self, table: &str, key: &str, value: Vec<u8>) {
-        let mut guard = self.data.write().await;
-        guard
-            .entry(table.to_string())
-            .or_default()
-            .insert(key.to_string(), value);
-    }
-
-    async fn delete(&self, table: &str, key: &str) {
-        let mut guard = self.data.write().await;
-        if let Some(t) = guard.get_mut(table) {
-            t.remove(key);
-        }
-    }
-
-    async fn get_all(&self, table: &str) -> Vec<(String, Vec<u8>)> {
-        let guard = self.data.read().await;
-        guard
-            .get(table)
-            .map(|t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-            .unwrap_or_default()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// MLS Storage Provider Adapters
-// ---------------------------------------------------------------------------
-
-use firefly_core::storage_provider::{
+pub use firefly_core::storage_provider::{
     MlsGroupStateStorage, MlsKeyPackageStorage, MlsPreSharedKeyStorage,
 };
-use zeroize::Zeroizing;
-
-pub struct GenericMlsKeyPackageStorage {
-    storage: Arc<dyn FireflyStorage>,
-}
-
-impl GenericMlsKeyPackageStorage {
-    pub fn new(storage: Arc<dyn FireflyStorage>) -> Self {
-        Self { storage }
-    }
-}
-
-#[async_trait::async_trait]
-impl MlsKeyPackageStorage for GenericMlsKeyPackageStorage {
-    async fn insert(&self, id: Vec<u8>, key_package_data: Vec<u8>) -> bool {
-        let hex_id = hex::encode(&id);
-        self.storage.set("mls_key_packages", &hex_id, key_package_data).await;
-        true
-    }
-
-    async fn delete(&self, id: Vec<u8>) -> bool {
-        let hex_id = hex::encode(&id);
-        self.storage.delete("mls_key_packages", &hex_id).await;
-        true
-    }
-
-    async fn get(&self, id: Vec<u8>) -> Option<Vec<u8>> {
-        let hex_id = hex::encode(&id);
-        self.storage.get("mls_key_packages", &hex_id).await
-    }
-}
-
-pub struct GenericMlsPreSharedKeyStorage {
-    storage: Arc<dyn FireflyStorage>,
-}
-
-impl GenericMlsPreSharedKeyStorage {
-    pub fn new(storage: Arc<dyn FireflyStorage>) -> Self {
-        Self { storage }
-    }
-}
-
-#[async_trait::async_trait]
-impl MlsPreSharedKeyStorage for GenericMlsPreSharedKeyStorage {
-    async fn get(&self, id: Vec<u8>) -> Option<Vec<u8>> {
-        let hex_id = hex::encode(&id);
-        self.storage.get("mls_psk", &hex_id).await
-    }
-}
-
-pub struct GenericMlsGroupStateStorage {
-    storage: Arc<dyn FireflyStorage>,
-}
-
-impl GenericMlsGroupStateStorage {
-    pub fn new(storage: Arc<dyn FireflyStorage>) -> Self {
-        Self { storage }
-    }
-}
-
-#[async_trait::async_trait]
-impl MlsGroupStateStorage for GenericMlsGroupStateStorage {
-    async fn state(&self, group_id: Vec<u8>) -> Option<Zeroizing<Vec<u8>>> {
-        let hex_id = hex::encode(&group_id);
-        self.storage
-            .get("mls_group_states", &hex_id)
-            .await
-            .map(Zeroizing::new)
-    }
-
-    async fn epoch(&self, group_id: Vec<u8>, epoch_id: u64) -> Option<Zeroizing<Vec<u8>>> {
-        let key = format!("{}:{}", hex::encode(&group_id), epoch_id);
-        self.storage
-            .get("mls_epochs", &key)
-            .await
-            .map(Zeroizing::new)
-    }
-
-    async fn write(
-        &self,
-        group_id: Vec<u8>,
-        state_data: Zeroizing<Vec<u8>>,
-        epoch_inserts: HashMap<u64, Zeroizing<Vec<u8>>>,
-        epoch_updates: HashMap<u64, Zeroizing<Vec<u8>>>,
-    ) -> bool {
-        let hex_id = hex::encode(&group_id);
-        self.storage
-            .set("mls_group_states", &hex_id, state_data.to_vec())
-            .await;
-
-        for (epoch_id, data) in epoch_inserts {
-            let key = format!("{}:{}", hex_id, epoch_id);
-            self.storage.set("mls_epochs", &key, data.to_vec()).await;
-        }
-
-        for (epoch_id, data) in epoch_updates {
-            let key = format!("{}:{}", hex_id, epoch_id);
-            self.storage.set("mls_epochs", &key, data.to_vec()).await;
-        }
-
-        true
-    }
-
-    async fn max_epoch_id(&self, group_id: Vec<u8>) -> Option<u64> {
-        let prefix = format!("{}:", hex::encode(&group_id));
-        let all = self.storage.get_all("mls_epochs").await;
-        all.into_iter()
-            .filter_map(|(k, _)| {
-                if k.starts_with(&prefix) {
-                    k[prefix.len()..].parse::<u64>().ok()
-                } else {
-                    None
-                }
-            })
-            .max()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Generic Key-Value Store
-// ---------------------------------------------------------------------------
-
-pub const KEY_LAST_RECEIVED_MESSAGE_ID: &str = "last_received_message_id";
-pub const KEY_LAST_RECEIVED_GROUP_MESSAGE_ID: &str = "last_received_group_message_id";
-pub const KEY_FCM_TOKEN: &str = "fcm_token";
-
-#[async_trait::async_trait]
-pub trait KeyValueStorage: Send + Sync {
-    async fn get(&self, key: &str) -> anyhow::Result<String>;
-    async fn set(&self, key: &str, value: &str) -> anyhow::Result<()>;
-    async fn update_last_received_message_id(
-        &self,
-        last_received_message_id: u64,
-    ) -> anyhow::Result<()>;
-}
-
-#[derive(Clone)]
-pub struct GenericKeyValueStore {
-    storage: Arc<dyn FireflyStorage>,
-}
-
-impl GenericKeyValueStore {
-    pub fn new(storage: Arc<dyn FireflyStorage>) -> Self {
-        Self { storage }
-    }
-}
-
-#[async_trait::async_trait]
-impl KeyValueStorage for GenericKeyValueStore {
-    async fn get(&self, key: &str) -> anyhow::Result<String> {
-        let val = self
-            .storage
-            .get("key_value_store", key)
-            .await
-            .ok_or_else(|| anyhow::anyhow!("key not found: {}", key))?;
-        String::from_utf8(val).map_err(|e| anyhow::anyhow!(e))
-    }
-
-    async fn set(&self, key: &str, value: &str) -> anyhow::Result<()> {
-        self.storage
-            .set("key_value_store", key, value.as_bytes().to_vec())
-            .await;
-        Ok(())
-    }
-
-    async fn update_last_received_message_id(
-        &self,
-        last_received_message_id: u64,
-    ) -> anyhow::Result<()> {
-        if let Ok(existing_str) = self.get(KEY_LAST_RECEIVED_MESSAGE_ID).await {
-            if let Ok(existing) = existing_str.parse::<u64>() {
-                if existing >= last_received_message_id {
-                    return Ok(());
-                }
-            }
-        }
-        self.set(KEY_LAST_RECEIVED_MESSAGE_ID, &last_received_message_id.to_string())
-            .await
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Common Data Models
@@ -292,8 +60,198 @@ pub struct AddressIdAndDeviceId {
     pub username: String,
 }
 
+#[derive(Default, Clone, Copy, Debug)]
+pub struct ConversationSettings {
+    pub inner: u64,
+}
+
+impl ConversationSettings {
+    pub fn new(settings: u64) -> Self {
+        Self { inner: settings }
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Group Info Store Trait & Generic Store
+// Key-Value Store Trait & Memory Implementation
+// ---------------------------------------------------------------------------
+
+pub const KEY_LAST_RECEIVED_MESSAGE_ID: &str = "last_received_message_id";
+pub const KEY_LAST_RECEIVED_GROUP_MESSAGE_ID: &str = "last_received_group_message_id";
+pub const KEY_FCM_TOKEN: &str = "fcm_token";
+
+#[async_trait::async_trait]
+pub trait KeyValueStorage: Send + Sync {
+    async fn get(&self, key: &str) -> anyhow::Result<String>;
+    async fn set(&self, key: &str, value: &str) -> anyhow::Result<()>;
+    async fn update_last_received_message_id(
+        &self,
+        last_received_message_id: u64,
+    ) -> anyhow::Result<()>;
+}
+
+#[derive(Clone, Default)]
+pub struct MemoryKeyValueStore {
+    data: Arc<RwLock<HashMap<String, String>>>,
+}
+
+impl MemoryKeyValueStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait::async_trait]
+impl KeyValueStorage for MemoryKeyValueStore {
+    async fn get(&self, key: &str) -> anyhow::Result<String> {
+        let guard = self.data.read().await;
+        guard
+            .get(key)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("key not found: {}", key))
+    }
+
+    async fn set(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        let mut guard = self.data.write().await;
+        guard.insert(key.to_string(), value.to_string());
+        Ok(())
+    }
+
+    async fn update_last_received_message_id(
+        &self,
+        last_received_message_id: u64,
+    ) -> anyhow::Result<()> {
+        if let Ok(existing_str) = self.get(KEY_LAST_RECEIVED_MESSAGE_ID).await {
+            if let Ok(existing) = existing_str.parse::<u64>() {
+                if existing >= last_received_message_id {
+                    return Ok(());
+                }
+            }
+        }
+        self.set(KEY_LAST_RECEIVED_MESSAGE_ID, &last_received_message_id.to_string())
+            .await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MLS KeyPackage Storage - Memory Implementation
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+pub struct MemoryMlsKeyPackageStorage {
+    data: Arc<RwLock<HashMap<Vec<u8>, Vec<u8>>>>,
+}
+
+impl MemoryMlsKeyPackageStorage {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait::async_trait]
+impl MlsKeyPackageStorage for MemoryMlsKeyPackageStorage {
+    async fn insert(&self, id: Vec<u8>, key_package_data: Vec<u8>) -> bool {
+        let mut guard = self.data.write().await;
+        guard.insert(id, key_package_data);
+        true
+    }
+
+    async fn delete(&self, id: Vec<u8>) -> bool {
+        let mut guard = self.data.write().await;
+        guard.remove(&id).is_some()
+    }
+
+    async fn get(&self, id: Vec<u8>) -> Option<Vec<u8>> {
+        let guard = self.data.read().await;
+        guard.get(&id).cloned()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MLS PreSharedKey Storage - Memory Implementation
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+pub struct MemoryMlsPreSharedKeyStorage {
+    data: Arc<RwLock<HashMap<Vec<u8>, Vec<u8>>>>,
+}
+
+impl MemoryMlsPreSharedKeyStorage {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait::async_trait]
+impl MlsPreSharedKeyStorage for MemoryMlsPreSharedKeyStorage {
+    async fn get(&self, id: Vec<u8>) -> Option<Vec<u8>> {
+        let guard = self.data.read().await;
+        guard.get(&id).cloned()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MLS GroupState Storage - Memory Implementation
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+pub struct MemoryMlsGroupStateStorage {
+    states: Arc<RwLock<HashMap<Vec<u8>, Zeroizing<Vec<u8>>>>>,
+    epochs: Arc<RwLock<HashMap<(Vec<u8>, u64), Zeroizing<Vec<u8>>>>>,
+}
+
+impl MemoryMlsGroupStateStorage {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait::async_trait]
+impl MlsGroupStateStorage for MemoryMlsGroupStateStorage {
+    async fn state(&self, group_id: Vec<u8>) -> Option<Zeroizing<Vec<u8>>> {
+        let guard = self.states.read().await;
+        guard.get(&group_id).cloned()
+    }
+
+    async fn epoch(&self, group_id: Vec<u8>, epoch_id: u64) -> Option<Zeroizing<Vec<u8>>> {
+        let guard = self.epochs.read().await;
+        guard.get(&(group_id, epoch_id)).cloned()
+    }
+
+    async fn write(
+        &self,
+        group_id: Vec<u8>,
+        state_data: Zeroizing<Vec<u8>>,
+        epoch_inserts: HashMap<u64, Zeroizing<Vec<u8>>>,
+        epoch_updates: HashMap<u64, Zeroizing<Vec<u8>>>,
+    ) -> bool {
+        {
+            let mut states_guard = self.states.write().await;
+            states_guard.insert(group_id.clone(), state_data);
+        }
+
+        let mut epochs_guard = self.epochs.write().await;
+        for (epoch_id, data) in epoch_inserts {
+            epochs_guard.insert((group_id.clone(), epoch_id), data);
+        }
+        for (epoch_id, data) in epoch_updates {
+            epochs_guard.insert((group_id.clone(), epoch_id), data);
+        }
+
+        true
+    }
+
+    async fn max_epoch_id(&self, group_id: Vec<u8>) -> Option<u64> {
+        let guard = self.epochs.read().await;
+        guard
+            .keys()
+            .filter(|(gid, _)| gid == &group_id)
+            .map(|(_, epoch)| *epoch)
+            .max()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Group Info Store Trait & Memory Implementation
 // ---------------------------------------------------------------------------
 
 #[async_trait::async_trait]
@@ -310,37 +268,30 @@ pub trait GroupInfoStorage: Send + Sync {
     async fn delete(&self, id: u64) -> anyhow::Result<()>;
 }
 
-#[derive(Clone)]
-pub struct GenericGroupInfoStore {
-    storage: Arc<dyn FireflyStorage>,
+#[derive(Clone, Default)]
+pub struct MemoryGroupInfoStore {
+    data: Arc<RwLock<HashMap<u64, GroupInfo>>>,
 }
 
-impl GenericGroupInfoStore {
-    pub fn new(storage: Arc<dyn FireflyStorage>) -> Self {
-        Self { storage }
+impl MemoryGroupInfoStore {
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
 #[async_trait::async_trait]
-impl GroupInfoStorage for GenericGroupInfoStore {
+impl GroupInfoStorage for MemoryGroupInfoStore {
     async fn get_all(&self) -> anyhow::Result<Vec<GroupInfo>> {
-        let rows = self.storage.get_all("group_infos").await;
-        let mut list = Vec::new();
-        for (_, bytes) in rows {
-            if let Ok(info) = serde_json::from_slice::<GroupInfo>(&bytes) {
-                list.push(info);
-            }
-        }
-        Ok(list)
+        let guard = self.data.read().await;
+        Ok(guard.values().cloned().collect())
     }
 
     async fn get(&self, id: u64) -> anyhow::Result<GroupInfo> {
-        let bytes = self
-            .storage
-            .get("group_infos", &id.to_string())
-            .await
-            .ok_or_else(|| anyhow::anyhow!("GroupInfo not found for {}", id))?;
-        serde_json::from_slice(&bytes).map_err(|e| anyhow::anyhow!(e))
+        let guard = self.data.read().await;
+        guard
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("GroupInfo not found for {}", id))
     }
 
     async fn set(
@@ -350,25 +301,28 @@ impl GroupInfoStorage for GenericGroupInfoStore {
         description: String,
         group_state_id: Vec<u8>,
     ) -> anyhow::Result<()> {
-        let info = GroupInfo {
+        let mut guard = self.data.write().await;
+        guard.insert(
             id,
-            name,
-            description,
-            identifier: group_state_id,
-        };
-        let bytes = serde_json::to_vec(&info)?;
-        self.storage.set("group_infos", &id.to_string(), bytes).await;
+            GroupInfo {
+                id,
+                name,
+                description,
+                identifier: group_state_id,
+            },
+        );
         Ok(())
     }
 
     async fn delete(&self, id: u64) -> anyhow::Result<()> {
-        self.storage.delete("group_infos", &id.to_string()).await;
+        let mut guard = self.data.write().await;
+        guard.remove(&id);
         Ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
-// Group Messages Store Trait & Generic Store
+// Group Messages Store Trait & Memory Implementation
 // ---------------------------------------------------------------------------
 
 #[async_trait::async_trait]
@@ -393,19 +347,20 @@ pub trait GroupMessageStorage: Send + Sync {
     async fn update_cursor(&self, id: u64, group_id: u64, epoch: u32) -> anyhow::Result<()>;
 }
 
-#[derive(Clone)]
-pub struct GenericGroupMessagesStore {
-    storage: Arc<dyn FireflyStorage>,
+#[derive(Clone, Default)]
+pub struct MemoryGroupMessageStore {
+    messages: Arc<RwLock<Vec<GroupMessage>>>,
+    cursors: Arc<RwLock<HashMap<u64, (u64, u32)>>>,
 }
 
-impl GenericGroupMessagesStore {
-    pub fn new(storage: Arc<dyn FireflyStorage>) -> Self {
-        Self { storage }
+impl MemoryGroupMessageStore {
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
 #[async_trait::async_trait]
-impl GroupMessageStorage for GenericGroupMessagesStore {
+impl GroupMessageStorage for MemoryGroupMessageStore {
     async fn add(
         &self,
         id: u64,
@@ -415,17 +370,15 @@ impl GroupMessageStorage for GenericGroupMessagesStore {
         by: &str,
         message: &[u8],
     ) -> anyhow::Result<()> {
-        let msg = GroupMessage {
+        let mut guard = self.messages.write().await;
+        guard.push(GroupMessage {
             id,
             group_id,
             by: by.to_string(),
             message: message.to_vec(),
             channel_id,
             epoch,
-        };
-        let key = format!("{}:{:020}", group_id, id);
-        let bytes = serde_json::to_vec(&msg)?;
-        self.storage.set("group_messages", &key, bytes).await;
+        });
         Ok(())
     }
 
@@ -435,13 +388,11 @@ impl GroupMessageStorage for GenericGroupMessagesStore {
         start_before: u64,
         limit: u32,
     ) -> anyhow::Result<Vec<GroupMessage>> {
-        let prefix = format!("{}:", group_id);
-        let all = self.storage.get_all("group_messages").await;
-        let mut matching: Vec<GroupMessage> = all
-            .into_iter()
-            .filter(|(k, _)| k.starts_with(&prefix))
-            .filter_map(|(_, v)| serde_json::from_slice(&v).ok())
-            .filter(|m: &GroupMessage| m.id < start_before)
+        let guard = self.messages.read().await;
+        let mut matching: Vec<GroupMessage> = guard
+            .iter()
+            .filter(|m| m.group_id == group_id && m.id < start_before)
+            .cloned()
             .collect();
         matching.sort_by(|a, b| b.id.cmp(&a.id));
         matching.truncate(limit as usize);
@@ -456,27 +407,20 @@ impl GroupMessageStorage for GenericGroupMessagesStore {
     }
 
     async fn delete_by_group_id(&self, group_id: u64) -> anyhow::Result<()> {
-        let prefix = format!("{}:", group_id);
-        let all = self.storage.get_all("group_messages").await;
-        for (k, _) in all {
-            if k.starts_with(&prefix) {
-                self.storage.delete("group_messages", &k).await;
-            }
-        }
+        let mut guard = self.messages.write().await;
+        guard.retain(|m| m.group_id != group_id);
         Ok(())
     }
 
     async fn update_cursor(&self, id: u64, group_id: u64, epoch: u32) -> anyhow::Result<()> {
-        let cursor = serde_json::json!({ "id": id, "epoch": epoch });
-        let key = format!("cursor:{}", group_id);
-        let bytes = serde_json::to_vec(&cursor)?;
-        self.storage.set("group_messages_cursor", &key, bytes).await;
+        let mut guard = self.cursors.write().await;
+        guard.insert(group_id, (id, epoch));
         Ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
-// User Messages Store Trait & Generic Store
+// User Messages Store Trait & Memory Implementation
 // ---------------------------------------------------------------------------
 
 #[async_trait::async_trait]
@@ -496,19 +440,19 @@ pub trait UserMessageStorage: Send + Sync {
     ) -> anyhow::Result<Vec<UserMessage>>;
 }
 
-#[derive(Clone)]
-pub struct GenericMessagesStore {
-    storage: Arc<dyn FireflyStorage>,
+#[derive(Clone, Default)]
+pub struct MemoryUserMessageStore {
+    messages: Arc<RwLock<Vec<UserMessage>>>,
 }
 
-impl GenericMessagesStore {
-    pub fn new(storage: Arc<dyn FireflyStorage>) -> Self {
-        Self { storage }
+impl MemoryUserMessageStore {
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
 #[async_trait::async_trait]
-impl UserMessageStorage for GenericMessagesStore {
+impl UserMessageStorage for MemoryUserMessageStore {
     async fn add(
         &self,
         id: u64,
@@ -516,15 +460,13 @@ impl UserMessageStorage for GenericMessagesStore {
         message: &[u8],
         sent_by_other: bool,
     ) -> anyhow::Result<()> {
-        let msg = UserMessage {
+        let mut guard = self.messages.write().await;
+        guard.push(UserMessage {
             id,
             other: other.to_string(),
             message: message.to_vec(),
             sent_by_other,
-        };
-        let key = format!("{}:{:020}", other, id);
-        let bytes = serde_json::to_vec(&msg)?;
-        self.storage.set("user_messages", &key, bytes).await;
+        });
         Ok(())
     }
 
@@ -534,14 +476,12 @@ impl UserMessageStorage for GenericMessagesStore {
         before: i64,
         limit: i64,
     ) -> anyhow::Result<Vec<UserMessage>> {
-        let prefix = format!("{}:", other);
-        let all = self.storage.get_all("user_messages").await;
+        let guard = self.messages.read().await;
         let before_u64 = if before < 0 { u64::MAX } else { before as u64 };
-        let mut matching: Vec<UserMessage> = all
-            .into_iter()
-            .filter(|(k, _)| k.starts_with(&prefix))
-            .filter_map(|(_, v)| serde_json::from_slice(&v).ok())
-            .filter(|m: &UserMessage| m.id < before_u64)
+        let mut matching: Vec<UserMessage> = guard
+            .iter()
+            .filter(|m| m.other == other && m.id < before_u64)
+            .cloned()
             .collect();
         matching.sort_by(|a, b| b.id.cmp(&a.id));
         matching.truncate(limit as usize);
@@ -550,17 +490,18 @@ impl UserMessageStorage for GenericMessagesStore {
 }
 
 // ---------------------------------------------------------------------------
-// Generic Address Store
+// Address Store - Memory Implementation
 // ---------------------------------------------------------------------------
 
-#[derive(Clone)]
-pub struct GenericAddressStore {
-    storage: Arc<dyn FireflyStorage>,
+#[derive(Clone, Default)]
+pub struct MemoryAddressStore {
+    by_id: Arc<RwLock<HashMap<u64, AddressIdAndDeviceId>>>,
+    by_username: Arc<RwLock<HashMap<String, Vec<AddressIdAndDeviceId>>>>,
 }
 
-impl GenericAddressStore {
-    pub fn new(storage: Arc<dyn FireflyStorage>) -> Self {
-        Self { storage }
+impl MemoryAddressStore {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub async fn add(&self, id: u64, username: &str, device_id: u8) -> anyhow::Result<()> {
@@ -569,93 +510,76 @@ impl GenericAddressStore {
             device_id,
             username: username.to_string(),
         };
-        let bytes = serde_json::to_vec(&item)?;
-        self.storage.set("addresses", &id.to_string(), bytes.clone()).await;
-        let un_key = format!("{}:{}", username, device_id);
-        self.storage.set("addresses_by_username", &un_key, bytes).await;
+        {
+            let mut guard = self.by_id.write().await;
+            guard.insert(id, item.clone());
+        }
+        {
+            let mut guard = self.by_username.write().await;
+            let list = guard.entry(username.to_string()).or_default();
+            list.retain(|a| a.device_id != device_id);
+            list.push(item);
+        }
         Ok(())
     }
 
     pub async fn get(&self, username: &str) -> anyhow::Result<Vec<AddressIdAndDeviceId>> {
-        let prefix = format!("{}:", username);
-        let all = self.storage.get_all("addresses_by_username").await;
-        let mut res = Vec::new();
-        for (k, v) in all {
-            if k.starts_with(&prefix) {
-                if let Ok(item) = serde_json::from_slice(&v) {
-                    res.push(item);
-                }
-            }
-        }
-        Ok(res)
+        let guard = self.by_username.read().await;
+        Ok(guard.get(username).cloned().unwrap_or_default())
     }
 
     pub async fn get_by_id(&self, id: u64) -> anyhow::Result<Option<AddressIdAndDeviceId>> {
-        if let Some(bytes) = self.storage.get("addresses", &id.to_string()).await {
-            Ok(Some(serde_json::from_slice(&bytes)?))
-        } else {
-            Ok(None)
-        }
+        let guard = self.by_id.read().await;
+        Ok(guard.get(&id).cloned())
     }
 }
 
 // ---------------------------------------------------------------------------
-// Generic Self Group KeyPackage Store
+// Self Group KeyPackage Store - Memory Implementation
 // ---------------------------------------------------------------------------
 
-#[derive(Clone)]
-pub struct GenericSelfGroupKeyPackageStore {
-    storage: Arc<dyn FireflyStorage>,
+#[derive(Clone, Default)]
+pub struct MemorySelfGroupKeyPackageStore {
+    data: Arc<RwLock<HashMap<i32, Vec<u8>>>>,
 }
 
-impl GenericSelfGroupKeyPackageStore {
-    pub fn new(storage: Arc<dyn FireflyStorage>) -> Self {
-        Self { storage }
+impl MemorySelfGroupKeyPackageStore {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub async fn set(&self, id: i32, key_package_data: &[u8]) -> anyhow::Result<()> {
-        self.storage
-            .set("self_group_key_packages", &id.to_string(), key_package_data.to_vec())
-            .await;
+        let mut guard = self.data.write().await;
+        guard.insert(id, key_package_data.to_vec());
         Ok(())
     }
 
     pub async fn get(&self, id: i32) -> anyhow::Result<Vec<u8>> {
-        self.storage
-            .get("self_group_key_packages", &id.to_string())
-            .await
+        let guard = self.data.read().await;
+        guard
+            .get(&id)
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("key package not found"))
     }
 
     pub async fn delete(&self, id: i32) -> anyhow::Result<()> {
-        self.storage
-            .delete("self_group_key_packages", &id.to_string())
-            .await;
+        let mut guard = self.data.write().await;
+        guard.remove(&id);
         Ok(())
     }
 
     pub async fn delete_many(&self, ids: &[i32]) -> anyhow::Result<()> {
+        let mut guard = self.data.write().await;
         for id in ids {
-            self.delete(*id).await?;
+            guard.remove(id);
         }
         Ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
-// Conversation Store Trait & Generic Store
+// Conversation Store Trait & Memory Implementation
 // ---------------------------------------------------------------------------
-
-#[derive(Default, Clone, Copy, Debug)]
-pub struct ConversationSettings {
-    pub inner: u64,
-}
-
-impl ConversationSettings {
-    pub fn new(settings: u64) -> Self {
-        Self { inner: settings }
-    }
-}
 
 #[async_trait::async_trait]
 pub trait ConversationStorage: Send + Sync {
@@ -670,29 +594,25 @@ pub trait ConversationStorage: Send + Sync {
     ) -> anyhow::Result<()>;
 }
 
-#[derive(Clone)]
-pub struct GenericConversationStore {
-    storage: Arc<dyn FireflyStorage>,
+#[derive(Clone, Default)]
+pub struct MemoryConversationStore {
+    data: Arc<RwLock<HashMap<String, ConversationSettings>>>,
 }
 
-impl GenericConversationStore {
-    pub fn new(storage: Arc<dyn FireflyStorage>) -> Self {
-        Self { storage }
+impl MemoryConversationStore {
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
 #[async_trait::async_trait]
-impl ConversationStorage for GenericConversationStore {
+impl ConversationStorage for MemoryConversationStore {
     async fn get_conversation(
         &self,
         username: &str,
     ) -> anyhow::Result<Option<ConversationSettings>> {
-        if let Some(bytes) = self.storage.get("conversations", username).await {
-            let val = String::from_utf8(bytes)?.parse::<u64>()?;
-            Ok(Some(ConversationSettings::new(val)))
-        } else {
-            Ok(None)
-        }
+        let guard = self.data.read().await;
+        Ok(guard.get(username).copied())
     }
 
     async fn set_conversation(
@@ -700,39 +620,33 @@ impl ConversationStorage for GenericConversationStore {
         username: &str,
         settings: ConversationSettings,
     ) -> anyhow::Result<()> {
-        self.storage
-            .set(
-                "conversations",
-                username,
-                settings.inner.to_string().into_bytes(),
-            )
-            .await;
+        let mut guard = self.data.write().await;
+        guard.insert(username.to_string(), settings);
         Ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
-// Generic Signal Stores
+// Signal Stores - Memory Implementation
 // ---------------------------------------------------------------------------
 
-#[derive(Clone)]
-pub struct GenericPreKeyDb {
-    storage: Arc<dyn FireflyStorage>,
+#[derive(Clone, Default)]
+pub struct MemoryPreKeyDb {
+    data: Arc<RwLock<HashMap<u32, Vec<u8>>>>,
 }
 
-impl GenericPreKeyDb {
-    pub fn new(storage: Arc<dyn FireflyStorage>) -> Self {
-        Self { storage }
+impl MemoryPreKeyDb {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub async fn get_pre_key(&self, prekey_id: PreKeyId) -> Result<PreKeyRecord, SignalProtocolError> {
-        let key = u32::from(prekey_id).to_string();
-        let bytes = self
-            .storage
-            .get("pre_keys", &key)
-            .await
-            .ok_or_else(|| SignalProtocolError::InvalidPreKeyId)?;
-        PreKeyRecord::deserialize(&bytes)
+        let key = u32::from(prekey_id);
+        let guard = self.data.read().await;
+        let bytes = guard
+            .get(&key)
+            .ok_or(SignalProtocolError::InvalidPreKeyId)?;
+        PreKeyRecord::deserialize(bytes)
     }
 
     pub async fn save_pre_key(
@@ -740,21 +654,23 @@ impl GenericPreKeyDb {
         prekey_id: PreKeyId,
         record: &PreKeyRecord,
     ) -> Result<(), SignalProtocolError> {
-        let key = u32::from(prekey_id).to_string();
+        let key = u32::from(prekey_id);
         let bytes = record.serialize()?;
-        self.storage.set("pre_keys", &key, bytes).await;
+        let mut guard = self.data.write().await;
+        guard.insert(key, bytes);
         Ok(())
     }
 
     pub async fn remove_pre_key(&mut self, prekey_id: PreKeyId) -> Result<(), SignalProtocolError> {
-        let key = u32::from(prekey_id).to_string();
-        self.storage.delete("pre_keys", &key).await;
+        let key = u32::from(prekey_id);
+        let mut guard = self.data.write().await;
+        guard.remove(&key);
         Ok(())
     }
 }
 
 #[async_trait::async_trait(?Send)]
-impl PreKeyStore for GenericPreKeyDb {
+impl PreKeyStore for MemoryPreKeyDb {
     async fn get_pre_key(&self, prekey_id: PreKeyId) -> Result<PreKeyRecord, SignalProtocolError> {
         self.get_pre_key(prekey_id).await
     }
@@ -772,27 +688,26 @@ impl PreKeyStore for GenericPreKeyDb {
     }
 }
 
-#[derive(Clone)]
-pub struct GenericSignedPreKeyDb {
-    storage: Arc<dyn FireflyStorage>,
+#[derive(Clone, Default)]
+pub struct MemorySignedPreKeyDb {
+    data: Arc<RwLock<HashMap<u32, Vec<u8>>>>,
 }
 
-impl GenericSignedPreKeyDb {
-    pub fn new(storage: Arc<dyn FireflyStorage>) -> Self {
-        Self { storage }
+impl MemorySignedPreKeyDb {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub async fn get_signed_pre_key(
         &self,
         signed_prekey_id: SignedPreKeyId,
     ) -> Result<SignedPreKeyRecord, SignalProtocolError> {
-        let key = u32::from(signed_prekey_id).to_string();
-        let bytes = self
-            .storage
-            .get("signed_pre_keys", &key)
-            .await
-            .ok_or_else(|| SignalProtocolError::InvalidSignedPreKeyId)?;
-        SignedPreKeyRecord::deserialize(&bytes)
+        let key = u32::from(signed_prekey_id);
+        let guard = self.data.read().await;
+        let bytes = guard
+            .get(&key)
+            .ok_or(SignalProtocolError::InvalidSignedPreKeyId)?;
+        SignedPreKeyRecord::deserialize(bytes)
     }
 
     pub async fn save_signed_pre_key(
@@ -800,15 +715,16 @@ impl GenericSignedPreKeyDb {
         signed_prekey_id: SignedPreKeyId,
         record: &SignedPreKeyRecord,
     ) -> Result<(), SignalProtocolError> {
-        let key = u32::from(signed_prekey_id).to_string();
+        let key = u32::from(signed_prekey_id);
         let bytes = record.serialize()?;
-        self.storage.set("signed_pre_keys", &key, bytes).await;
+        let mut guard = self.data.write().await;
+        guard.insert(key, bytes);
         Ok(())
     }
 }
 
 #[async_trait::async_trait(?Send)]
-impl SignedPreKeyStore for GenericSignedPreKeyDb {
+impl SignedPreKeyStore for MemorySignedPreKeyDb {
     async fn get_signed_pre_key(
         &self,
         signed_prekey_id: SignedPreKeyId,
@@ -825,27 +741,26 @@ impl SignedPreKeyStore for GenericSignedPreKeyDb {
     }
 }
 
-#[derive(Clone)]
-pub struct GenericKyberPreKeyDb {
-    storage: Arc<dyn FireflyStorage>,
+#[derive(Clone, Default)]
+pub struct MemoryKyberPreKeyDb {
+    data: Arc<RwLock<HashMap<u32, Vec<u8>>>>,
 }
 
-impl GenericKyberPreKeyDb {
-    pub fn new(storage: Arc<dyn FireflyStorage>) -> Self {
-        Self { storage }
+impl MemoryKyberPreKeyDb {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub async fn get_kyber_pre_key(
         &self,
         kyber_prekey_id: KyberPreKeyId,
     ) -> Result<KyberPreKeyRecord, SignalProtocolError> {
-        let key = u32::from(kyber_prekey_id).to_string();
-        let bytes = self
-            .storage
-            .get("kyber_pre_keys", &key)
-            .await
-            .ok_or_else(|| SignalProtocolError::InvalidKyberPreKeyId)?;
-        KyberPreKeyRecord::deserialize(&bytes)
+        let key = u32::from(kyber_prekey_id);
+        let guard = self.data.read().await;
+        let bytes = guard
+            .get(&key)
+            .ok_or(SignalProtocolError::InvalidKyberPreKeyId)?;
+        KyberPreKeyRecord::deserialize(bytes)
     }
 
     pub async fn save_kyber_pre_key(
@@ -853,9 +768,10 @@ impl GenericKyberPreKeyDb {
         kyber_prekey_id: KyberPreKeyId,
         record: &KyberPreKeyRecord,
     ) -> Result<(), SignalProtocolError> {
-        let key = u32::from(kyber_prekey_id).to_string();
+        let key = u32::from(kyber_prekey_id);
         let bytes = record.serialize()?;
-        self.storage.set("kyber_pre_keys", &key, bytes).await;
+        let mut guard = self.data.write().await;
+        guard.insert(key, bytes);
         Ok(())
     }
 
@@ -870,7 +786,7 @@ impl GenericKyberPreKeyDb {
 }
 
 #[async_trait::async_trait(?Send)]
-impl KyberPreKeyStore for GenericKyberPreKeyDb {
+impl KyberPreKeyStore for MemoryKyberPreKeyDb {
     async fn get_kyber_pre_key(
         &self,
         kyber_prekey_id: KyberPreKeyId,
@@ -896,22 +812,23 @@ impl KyberPreKeyStore for GenericKyberPreKeyDb {
     }
 }
 
-#[derive(Clone)]
-pub struct GenericSessionDb {
-    storage: Arc<dyn FireflyStorage>,
+#[derive(Clone, Default)]
+pub struct MemorySessionDb {
+    data: Arc<RwLock<HashMap<String, Vec<u8>>>>,
 }
 
-impl GenericSessionDb {
-    pub fn new(storage: Arc<dyn FireflyStorage>) -> Self {
-        Self { storage }
+impl MemorySessionDb {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub async fn load_session(
         &self,
         address: &ProtocolAddress,
     ) -> Result<Option<SessionRecord>, SignalProtocolError> {
-        if let Some(bytes) = self.storage.get("sessions", &address.to_string()).await {
-            Ok(Some(SessionRecord::deserialize(&bytes)?))
+        let guard = self.data.read().await;
+        if let Some(bytes) = guard.get(&address.to_string()) {
+            Ok(Some(SessionRecord::deserialize(bytes)?))
         } else {
             Ok(None)
         }
@@ -923,13 +840,14 @@ impl GenericSessionDb {
         record: &SessionRecord,
     ) -> Result<(), SignalProtocolError> {
         let bytes = record.serialize()?;
-        self.storage.set("sessions", &address.to_string(), bytes).await;
+        let mut guard = self.data.write().await;
+        guard.insert(address.to_string(), bytes);
         Ok(())
     }
 }
 
 #[async_trait::async_trait(?Send)]
-impl SessionStore for GenericSessionDb {
+impl SessionStore for MemorySessionDb {
     async fn load_session(
         &self,
         address: &ProtocolAddress,
@@ -955,63 +873,34 @@ pub struct IdentityKeyPairRow {
     pub username: String,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct StoredIdentityKeyPair {
-    id: i64,
-    keypair: Vec<u8>,
-    registration_id: u32,
-    device_id: u8,
-    username: String,
+#[derive(Clone, Default)]
+pub struct MemoryIdentityDb {
+    row: Arc<RwLock<Option<IdentityKeyPairRow>>>,
+    identities: Arc<RwLock<HashMap<String, Vec<u8>>>>,
 }
 
-#[derive(Clone)]
-pub struct GenericIdentityDb {
-    storage: Arc<dyn FireflyStorage>,
-}
-
-impl GenericIdentityDb {
-    pub async fn new(storage: Arc<dyn FireflyStorage>) -> anyhow::Result<Self> {
-        let store = Self { storage };
-        if store.get_stored().await.is_none() {
-            let mut rng = utils::rng();
-            let keypair = IdentityKeyPair::generate(&mut rng);
-            let registration_id = rng.next_u32() % 32000;
-            let device_id = 1 + (rng.next_u32() % 126) as u8;
-            let stored = StoredIdentityKeyPair {
-                id: 0,
-                keypair: keypair.serialize().to_vec(),
-                registration_id,
-                device_id,
-                username: String::new(),
-            };
-            store.save_stored(&stored).await?;
-        }
+impl MemoryIdentityDb {
+    pub async fn new() -> anyhow::Result<Self> {
+        let store = Self::default();
+        let mut rng = utils::rng();
+        let keypair = IdentityKeyPair::generate(&mut rng);
+        let registration_id = rng.next_u32() % 32000;
+        let device_id = 1 + (rng.next_u32() % 126) as u8;
+        *store.row.write().await = Some(IdentityKeyPairRow {
+            id: 0,
+            keypair,
+            registration_id,
+            device_id,
+            username: String::new(),
+        });
         Ok(store)
     }
 
-    async fn get_stored(&self) -> Option<StoredIdentityKeyPair> {
-        let bytes = self.storage.get("identity_keypair", "local").await?;
-        serde_json::from_slice(&bytes).ok()
-    }
-
-    async fn save_stored(&self, stored: &StoredIdentityKeyPair) -> anyhow::Result<()> {
-        let bytes = serde_json::to_vec(stored)?;
-        self.storage.set("identity_keypair", "local", bytes).await;
-        Ok(())
-    }
-
     pub async fn get_full_identity_key_pair(&self) -> anyhow::Result<IdentityKeyPairRow> {
-        let stored = self
-            .get_stored()
-            .await
-            .ok_or_else(|| anyhow::anyhow!("Identity key pair not found"))?;
-        Ok(IdentityKeyPairRow {
-            id: stored.id,
-            keypair: IdentityKeyPair::try_from(stored.keypair.as_slice())?,
-            registration_id: stored.registration_id,
-            device_id: stored.device_id,
-            username: stored.username,
-        })
+        let guard = self.row.read().await;
+        guard
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Identity key pair not found"))
     }
 
     pub async fn update_registration_for_keypair(
@@ -1020,20 +909,20 @@ impl GenericIdentityDb {
         username: &str,
         device_id: u8,
     ) -> anyhow::Result<()> {
-        if let Some(mut stored) = self.get_stored().await {
-            stored.id = id;
-            stored.username = username.to_string();
-            stored.device_id = device_id;
-            self.save_stored(&stored).await?;
+        let mut guard = self.row.write().await;
+        if let Some(ref mut row) = *guard {
+            row.id = id;
+            row.username = username.to_string();
+            row.device_id = device_id;
         }
         Ok(())
     }
 
     pub async fn update_id_for_keypair(&self, id: i64, username: &str) -> anyhow::Result<()> {
-        if let Some(mut stored) = self.get_stored().await {
-            stored.id = id;
-            stored.username = username.to_string();
-            self.save_stored(&stored).await?;
+        let mut guard = self.row.write().await;
+        if let Some(ref mut row) = *guard {
+            row.id = id;
+            row.username = username.to_string();
         }
         Ok(())
     }
@@ -1060,10 +949,9 @@ impl GenericIdentityDb {
         identity: &IdentityKey,
     ) -> Result<IdentityChange, SignalProtocolError> {
         let key = address.to_string();
-        let existing = self.storage.get("identities", &key).await;
-        self.storage
-            .set("identities", &key, identity.serialize().to_vec())
-            .await;
+        let bytes = identity.serialize().to_vec();
+        let mut guard = self.identities.write().await;
+        let existing = guard.insert(key, bytes);
         Ok(IdentityChange::from_changed(existing.is_none()))
     }
 
@@ -1081,8 +969,9 @@ impl GenericIdentityDb {
         address: &ProtocolAddress,
     ) -> Result<Option<IdentityKey>, SignalProtocolError> {
         let key = address.to_string();
-        if let Some(bytes) = self.storage.get("identities", &key).await {
-            Ok(Some(IdentityKey::decode(&bytes)?))
+        let guard = self.identities.read().await;
+        if let Some(bytes) = guard.get(&key) {
+            Ok(Some(IdentityKey::decode(bytes)?))
         } else {
             Ok(None)
         }
@@ -1090,7 +979,7 @@ impl GenericIdentityDb {
 }
 
 #[async_trait::async_trait(?Send)]
-impl IdentityKeyStore for GenericIdentityDb {
+impl IdentityKeyStore for MemoryIdentityDb {
     async fn get_identity_key_pair(&self) -> Result<IdentityKeyPair, SignalProtocolError> {
         self.get_identity_key_pair().await
     }
@@ -1125,29 +1014,29 @@ impl IdentityKeyStore for GenericIdentityDb {
 }
 
 // ---------------------------------------------------------------------------
-// Generic Key Stores
+// Memory Key Stores
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
-pub struct GenericKeyStores {
-    pub identity_store: GenericIdentityDb,
-    pub session_store: GenericSessionDb,
-    pub signed_prekey_store: GenericSignedPreKeyDb,
-    pub prekey_store: GenericPreKeyDb,
-    pub kyber_key_store: GenericKyberPreKeyDb,
-    pub address_store: GenericAddressStore,
-    pub conversation_store: GenericConversationStore,
+pub struct MemoryKeyStores {
+    pub identity_store: MemoryIdentityDb,
+    pub session_store: MemorySessionDb,
+    pub signed_prekey_store: MemorySignedPreKeyDb,
+    pub prekey_store: MemoryPreKeyDb,
+    pub kyber_key_store: MemoryKyberPreKeyDb,
+    pub address_store: MemoryAddressStore,
+    pub conversation_store: MemoryConversationStore,
 }
 
-impl GenericKeyStores {
-    pub async fn new(storage: Arc<dyn FireflyStorage>) -> anyhow::Result<Self> {
-        let identity_store = GenericIdentityDb::new(storage.clone()).await?;
-        let session_store = GenericSessionDb::new(storage.clone());
-        let signed_prekey_store = GenericSignedPreKeyDb::new(storage.clone());
-        let prekey_store = GenericPreKeyDb::new(storage.clone());
-        let kyber_key_store = GenericKyberPreKeyDb::new(storage.clone());
-        let address_store = GenericAddressStore::new(storage.clone());
-        let conversation_store = GenericConversationStore::new(storage.clone());
+impl MemoryKeyStores {
+    pub async fn new() -> anyhow::Result<Self> {
+        let identity_store = MemoryIdentityDb::new().await?;
+        let session_store = MemorySessionDb::new();
+        let signed_prekey_store = MemorySignedPreKeyDb::new();
+        let prekey_store = MemoryPreKeyDb::new();
+        let kyber_key_store = MemoryKyberPreKeyDb::new();
+        let address_store = MemoryAddressStore::new();
+        let conversation_store = MemoryConversationStore::new();
 
         Ok(Self {
             identity_store,
@@ -1348,6 +1237,3 @@ impl GenericKeyStores {
         })
     }
 }
-
-
-

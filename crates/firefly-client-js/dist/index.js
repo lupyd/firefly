@@ -616,7 +616,7 @@ class FireflyClient {
             onGroupMeetingSignal: () => { },
             onReadUserMessagesUpto: () => { },
         };
-        this.client = await firefly_client_node_1.FireflyClientNode.create(this.apiBaseUrl, this.wsUrl, 2000, callbacks, this.dbFile, 15000, this.config.storage);
+        this.client = await firefly_client_node_1.FireflyClientNode.create(this.apiBaseUrl, this.wsUrl, 2000, callbacks, this.dbFile, 15000, this.config.storageProviders || this.config.storage);
         console.log('Connecting to Firefly MLS network...');
         try {
             console.log('Running checkSetup()...');

@@ -1,5 +1,5 @@
-import { FireflyClientNode, protos, initLogger, FireflyStorageAdapter, UserMessageStorageAdapter, GroupMessageStorageAdapter, GroupInfoStorageAdapter, KeyValueStorageAdapter, MlsStorageAdapter, RawUserMessage, RawGroupMessage, RawGroupInfo } from 'firefly-client-node';
-export type { FireflyStorageAdapter, UserMessageStorageAdapter, GroupMessageStorageAdapter, GroupInfoStorageAdapter, KeyValueStorageAdapter, MlsStorageAdapter, RawUserMessage, RawGroupMessage, RawGroupInfo, };
+import { FireflyClientNode, protos, initLogger, MlsKeyPackageStorage, MlsGroupStateStorage, MlsPreSharedKeyStorage, UserMessageStorage, GroupMessageStorage, GroupInfoStorage, KeyValueStorage, StorageProviders, FireflyStorageAdapter, UserMessageStorageAdapter, GroupMessageStorageAdapter, GroupInfoStorageAdapter, KeyValueStorageAdapter, MlsStorageAdapter, RawUserMessage, RawGroupMessage, RawGroupInfo } from 'firefly-client-node';
+export type { MlsKeyPackageStorage, MlsGroupStateStorage, MlsPreSharedKeyStorage, UserMessageStorage, GroupMessageStorage, GroupInfoStorage, KeyValueStorage, StorageProviders, FireflyStorageAdapter, UserMessageStorageAdapter, GroupMessageStorageAdapter, GroupInfoStorageAdapter, KeyValueStorageAdapter, MlsStorageAdapter, RawUserMessage, RawGroupMessage, RawGroupInfo, };
 export interface ClientConfig {
     port?: number;
     auth0Domain?: string;
@@ -11,7 +11,8 @@ export interface ClientConfig {
     username?: string;
     sessionFile?: string;
     dbFile?: string;
-    storage?: FireflyStorageAdapter;
+    storage?: StorageProviders | FireflyStorageAdapter;
+    storageProviders?: StorageProviders;
 }
 export type BotConfig = ClientConfig;
 export interface ClientContext {

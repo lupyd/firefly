@@ -7,6 +7,7 @@ import {
   FireflyClient,
   protos,
   initLogger,
+  type StorageProviders,
   type FireflyStorageAdapter,
   type RawUserMessage,
   type RawGroupMessage,
@@ -449,9 +450,25 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
     const interceptedUserMessages: RawUserMessage[] = [];
     const interceptedGroupMessages: RawGroupMessage[] = [];
     const interceptedGroupInfo = new Map<number, RawGroupInfo>();
+    let keyPackagesInserted = 0;
+    const rawKeyPackages = new Map<string, Uint8Array>();
 
-    const customStorage: FireflyStorageAdapter = {
-      userMessages: {
+    const customStorage: StorageProviders = {
+      mlsKeyPackageStorage: {
+        insert: (id: Uint8Array, data: Uint8Array) => {
+          keyPackagesInserted++;
+          rawKeyPackages.set(Buffer.from(id).toString('hex'), data);
+          return true;
+        },
+        delete: (id: Uint8Array) => {
+          rawKeyPackages.delete(Buffer.from(id).toString('hex'));
+          return true;
+        },
+        get: (id: Uint8Array) => {
+          return rawKeyPackages.get(Buffer.from(id).toString('hex')) || null;
+        },
+      },
+      userMessageStorage: {
         add: (msg: RawUserMessage) => {
           console.log('[CustomStorage] Intercepted user message:', msg.id, msg.from, '->', msg.to);
           interceptedUserMessages.push(msg);
@@ -462,7 +479,7 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
           );
         },
       },
-      groupMessages: {
+      groupMessageStorage: {
         add: (msg: RawGroupMessage) => {
           console.log('[CustomStorage] Intercepted group message:', msg.id, 'group:', msg.groupId, 'from:', msg.from);
           interceptedGroupMessages.push(msg);
@@ -480,7 +497,7 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
         },
         updateCursor: (_groupId: number, _cursor: number) => {},
       },
-      groupInfo: {
+      groupInfoStorage: {
         getAll: () => Array.from(interceptedGroupInfo.values()),
         get: (groupId: number) => interceptedGroupInfo.get(groupId) || null,
         set: (group: RawGroupInfo) => {
@@ -583,6 +600,11 @@ test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000
       'Custom storage should have intercepted at least 1 group message'
     );
     assert.strictEqual(interceptedGroupMessages[0].groupId, s4GroupId);
+    console.log('Intercepted MLS key packages inserted count:', keyPackagesInserted);
+    assert.ok(
+      keyPackagesInserted > 0,
+      'Custom storage should have intercepted MLS key package insertions'
+    );
     console.log('✓ Custom raw storage adapter flow passed!');
 
     await s4Alice.dispose();
