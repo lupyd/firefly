@@ -5,10 +5,5 @@
     "docs:dev": "pnpm --filter firefly-docs dev",
     "docs:build": "pnpm --filter firefly-docs build",
     "docs:preview": "pnpm --filter firefly-docs preview"
-  },
-  "workspaces": [
-    "crates/*",
-    "examples/*",
-    "doc-site"
-  ]
+  }
 }

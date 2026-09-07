@@ -95,7 +95,7 @@ jobs:
       - name: Run TypeScript integration tests
         run: |
           cd examples/chatbot
-          bun install
+          npm install
           FIREFLY_BASE_URL=http://127.0.0.1:39209 FIREFLY_WS_URL=ws://127.0.0.1:39209/ SPAWN_SERVER=false bun test
 
       - name: Dump Docker logs on failure
