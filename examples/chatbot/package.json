@@ -8,8 +8,7 @@
     "test": "bun test --timeout 120000"
   },
   "dependencies": {
-    "firefly-client-js": "file:../../crates/firefly-client-js",
-    "firefly-client-node": "file:../../crates/client-node"
+    "firefly-client-js": "file:../../crates/firefly-client-js"
   },
   "devDependencies": {
     "@types/bun": "latest"
