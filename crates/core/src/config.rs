@@ -1,6 +1,6 @@
 use std::{
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::UNIX_EPOCH,
 };
 
 use anyhow::Context;
@@ -332,7 +332,7 @@ impl FireflyIdentityProvider {
 
     async fn refresh(&self) -> anyhow::Result<()> {
         let base_url = self.base_url.clone();
-        let (jwks, expiry) = crate::utils::SendWrapper(async move {
+        let fut = async move {
             let url = format!("{}/jwks.json", base_url);
             let response = HTTP_CLIENT.get(url).send().await?;
 
@@ -347,8 +347,13 @@ impl FireflyIdentityProvider {
             let (expiry, _) = get_expiry_from_headers(response.headers())?;
             let jwks = response.text().await?;
             Ok::<_, anyhow::Error>((jwks, expiry))
-        })
-        .await?;
+        };
+
+        #[cfg(target_arch = "wasm32")]
+        let (jwks, expiry) = crate::utils::SendWrapper(fut).await?;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let (jwks, expiry) = fut.await?;
 
         let mut g = self.keys_string.write().await;
         *g = (jwks, expiry);
@@ -400,7 +405,7 @@ impl FireflyIdentityProvider {
         address_id: u64,
     ) -> anyhow::Result<Vec<u8>> {
         let base_url = self.base_url.clone();
-        crate::utils::SendWrapper(async move {
+        let fut = async move {
             let url = format!(
                 "{}/sign?device_id={}&address_id={}",
                 base_url, device_id, address_id
@@ -424,8 +429,16 @@ impl FireflyIdentityProvider {
 
             let _: SignedToken = deserialize_proto(&body)?;
             Ok(body.to_vec())
-        })
-        .await
+        };
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::utils::SendWrapper(fut).await
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            fut.await
+        }
     }
 }
 

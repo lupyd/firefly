@@ -30,11 +30,17 @@ pub fn get_system_time_from_secs(seconds: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(seconds)
 }
 
+#[cfg(target_arch = "wasm32")]
 #[derive(Clone, Copy, Debug)]
 pub struct SendWrapper<F>(pub F);
+
+#[cfg(target_arch = "wasm32")]
 unsafe impl<F> Send for SendWrapper<F> {}
+
+#[cfg(target_arch = "wasm32")]
 unsafe impl<F> Sync for SendWrapper<F> {}
 
+#[cfg(target_arch = "wasm32")]
 impl<F: std::future::Future> std::future::Future for SendWrapper<F> {
     type Output = F::Output;
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
