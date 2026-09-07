@@ -31,6 +31,9 @@ jobs:
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
+      - name: Install protoc
+        run: apt-get install protobuf-compiler
+
       - name: Start PostgreSQL container
         run: |
           docker run -d \
