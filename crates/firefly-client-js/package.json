@@ -1,6 +1,6 @@
 {
   "name": "firefly-client-js",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "A clean, class-based client API for deploying bots and automation on the Firefly MLS network",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
