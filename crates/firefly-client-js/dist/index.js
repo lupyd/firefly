@@ -80,6 +80,7 @@ function openBrowser(url) {
     });
 }
 class FireflyClient {
+    config;
     port;
     auth0Domain;
     auth0ClientId;
@@ -92,9 +93,12 @@ class FireflyClient {
     sessionFile;
     dbFile;
     commands;
+    messageHandlers;
+    groupMessageHandlers;
     client;
     session;
     constructor(options = {}) {
+        this.config = options;
         this.port = options.port || 38295;
         this.auth0Domain = options.auth0Domain || 'https://auth.lupyd.com';
         this.auth0ClientId = options.auth0ClientId || 'GnfEyGY0JdD0Oige2HSpeErcaWLrvObm';
@@ -107,6 +111,8 @@ class FireflyClient {
         this.sessionFile = options.sessionFile || path.resolve(process.cwd(), 'client-session.json');
         this.dbFile = options.dbFile || path.resolve(process.cwd(), 'client-store.db');
         this.commands = new Map();
+        this.messageHandlers = [];
+        this.groupMessageHandlers = [];
         this.client = null;
         this.session = {
             access_token: null,
@@ -119,6 +125,14 @@ class FireflyClient {
     command(name, handler) {
         const trigger = name.startsWith('/') ? name.toLowerCase() : `/${name.toLowerCase()}`;
         this.commands.set(trigger, handler);
+    }
+    // Registers a general direct message handler
+    onMessage(handler) {
+        this.messageHandlers.push(handler);
+    }
+    // Registers a general group message handler
+    onGroupMessage(handler) {
+        this.groupMessageHandlers.push(handler);
     }
     // Fetch members' online status and last connected timestamp
     async getGroupMembersOnlineStatus(groupId) {
@@ -142,6 +156,124 @@ class FireflyClient {
             throw new Error('Client not initialized');
         }
         await this.client.readUserMessagesUpto(other, Number(uptoMessageId));
+    }
+    // Direct 1:1 user message
+    async sendUserMessage(to, text) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        const payload = {
+            messagePayload: {
+                text,
+                files: undefined,
+                replyingTo: 0n,
+            },
+            nonce: Math.floor(Math.random() * 9_999_999),
+        };
+        const messageInnerBytes = UserMessageInner.encode(payload).finish();
+        return await this.client.encryptAndSend(to, Array.from(messageInnerBytes));
+    }
+    // Send group message
+    async sendGroupMessage(groupId, text, channelId = 0) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        const payload = {
+            messagePayload: {
+                text,
+                files: undefined,
+                replyingTo: 0n,
+            },
+            channelId,
+        };
+        const messageInnerBytes = GroupMessageInner.encode(payload).finish();
+        return await this.client.encryptAndSendGroup(groupId, Array.from(messageInnerBytes));
+    }
+    // Create group
+    async createGroup(name, description = '', settings) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        return await this.client.createGroup(name, description, settings);
+    }
+    // Add/invite member to group
+    async inviteMember(groupId, username, roleId = 1) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        await this.client.addGroupMember(groupId, username, roleId);
+    }
+    async addGroupMember(groupId, username, roleId = 1) {
+        return this.inviteMember(groupId, username, roleId);
+    }
+    // Kick member from group
+    async kickMember(groupId, username) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        await this.client.kickGroupMember(groupId, username);
+    }
+    async kickGroupMember(groupId, username) {
+        return this.kickMember(groupId, username);
+    }
+    // Create join link for group
+    async createJoinLink(groupId, expiresInSeconds = 86400, maxUses = 100) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        return await this.client.createJoinLink(groupId, expiresInSeconds, maxUses);
+    }
+    // Join group via link
+    async joinViaLink(linkToken) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        await this.client.joinViaLink(linkToken);
+        await this.client.loadAllGroups();
+    }
+    // Request to join / re-add to group
+    async requestToJoin(groupId) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        await this.client.requestToJoin(groupId);
+    }
+    async syncGroupJoinsAndReadds(groupId) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        await this.client.syncGroupJoinsAndReadds(groupId);
+    }
+    // List group infos
+    async getGroups() {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        return await this.client.getGroupInfos();
+    }
+    async getGroupInfos() {
+        return this.getGroups();
+    }
+    // Get historical group messages
+    async getGroupMessages(groupId, startBefore = 0, limit = 50) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        return await this.client.getGroupMessages(groupId, startBefore, limit);
+    }
+    // Query online status
+    async getOnlineStatus(usernames) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        return await this.client.getOnlineStatus(usernames);
+    }
+    // Dispose client
+    async dispose() {
+        if (this.client) {
+            await this.client.dispose();
+            this.client = null;
+        }
     }
     // Load and save session
     _loadSession() {
@@ -302,14 +434,15 @@ class FireflyClient {
     }
     // Handles parsed message routing to command registry
     async _handleMessage({ text, sender, isGroup, groupId, channelId }) {
-        if (!text || !text.startsWith('/'))
+        if (!text)
             return;
-        const parts = text.trim().split(/\s+/);
-        const commandName = parts[0].toLowerCase();
-        const args = parts.slice(1);
-        const handler = this.commands.get(commandName);
-        if (!handler)
-            return;
+        let commandName = '';
+        let args = [];
+        if (text.startsWith('/')) {
+            const parts = text.trim().split(/\s+/);
+            commandName = parts[0].toLowerCase();
+            args = parts.slice(1);
+        }
         const ctx = {
             client: this,
             bot: this,
@@ -347,11 +480,34 @@ class FireflyClient {
                 }
             }
         };
-        try {
-            await handler(ctx);
+        if (isGroup) {
+            for (const handler of this.groupMessageHandlers) {
+                try {
+                    await handler(ctx);
+                }
+                catch (err) {
+                    console.error('Error executing group message handler:', err);
+                }
+            }
         }
-        catch (err) {
-            console.error(`Error executing command ${commandName}:`, err);
+        else {
+            for (const handler of this.messageHandlers) {
+                try {
+                    await handler(ctx);
+                }
+                catch (err) {
+                    console.error('Error executing message handler:', err);
+                }
+            }
+        }
+        if (commandName && this.commands.has(commandName)) {
+            const handler = this.commands.get(commandName);
+            try {
+                await handler(ctx);
+            }
+            catch (err) {
+                console.error(`Error executing command ${commandName}:`, err);
+            }
         }
     }
     // Initializes FFI connection
@@ -389,7 +545,7 @@ class FireflyClient {
                 try {
                     const msg = JSON.parse(msgJson);
                     const other = msg.other;
-                    const sentByOther = msg.sent_by_other;
+                    const sentByOther = msg.sentByOther ?? msg.sent_by_other;
                     const message = msg.message;
                     console.log(`[onMessage] msg received from: ${other}, sentByOther: ${sentByOther}`);
                     if (!sentByOther)
@@ -423,9 +579,9 @@ class FireflyClient {
                 try {
                     const msg = JSON.parse(msgJson);
                     const by = msg.by;
-                    const groupId = msg.group_id;
+                    const groupId = msg.groupId ?? msg.group_id;
                     const message = msg.message;
-                    const channelId = msg.channel_id;
+                    const channelId = msg.channelId ?? msg.channel_id;
                     console.log(`[onGroupMessage] msg received from: ${by}, group: ${groupId}`);
                     if (by === this.session.username)
                         return; // skip outgoing
@@ -460,7 +616,7 @@ class FireflyClient {
             onGroupMeetingSignal: () => { },
             onReadUserMessagesUpto: () => { },
         };
-        this.client = await firefly_client_node_1.FireflyClientNode.create(this.apiBaseUrl, this.wsUrl, 2000, callbacks, this.dbFile, 15000);
+        this.client = await firefly_client_node_1.FireflyClientNode.create(this.apiBaseUrl, this.wsUrl, 2000, callbacks, this.dbFile, 15000, this.config.storageProviders || this.config.storage);
         console.log('Connecting to Firefly MLS network...');
         try {
             console.log('Running checkSetup()...');

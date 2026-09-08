@@ -1,7 +1,7 @@
 use sqlx::SqlitePool;
 use sqlx::prelude::*;
 
-#[derive(sqlx::FromRow)]
+#[derive(Clone, Debug, sqlx::FromRow, serde::Serialize, serde::Deserialize)]
 pub struct GroupMessage {
     pub id: u64,
     pub group_id: u64,

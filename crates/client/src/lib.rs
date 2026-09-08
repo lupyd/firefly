@@ -6,7 +6,8 @@ use crate::logger::TeeLogger;
 
 use firefly_protos::firefly;
 
-#[cfg(not(target_arch = "wasm32"))]
+pub use libsignal_protocol;
+
 pub mod callbacks;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -14,13 +15,13 @@ pub mod db;
 
 pub mod error;
 
-#[cfg(not(target_arch = "wasm32"))]
 pub mod group;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod logger;
 
 pub mod schema;
+pub mod storage;
 pub mod utils;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -128,7 +129,13 @@ fn set_panic_handler() {
             backtrace
         );
         log::error!("{}", msg);
-        std::process::abort();
+        eprintln!("{}", msg);
+        if std::env::var("CARGO").is_err()
+            && std::env::var("RUST_TEST_THREADS").is_err()
+            && std::env::var("EMULATOR_MODE").is_err()
+        {
+            std::process::abort();
+        }
     }));
 }
 

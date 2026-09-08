@@ -3,7 +3,36 @@ import * as path from 'path';
 import * as http from 'http';
 import * as crypto from 'crypto';
 import { exec } from 'child_process';
-import { FireflyClientNode, protos, initLogger } from 'firefly-client-node';
+import {
+  FireflyClientNode,
+  protos,
+  initLogger,
+  MlsKeyPackageStorage,
+  MlsGroupStateStorage,
+  MlsPreSharedKeyStorage,
+  UserMessageStorage,
+  GroupMessageStorage,
+  GroupInfoStorage,
+  KeyValueStorage,
+  StorageProviders,
+  RawUserMessage,
+  RawGroupMessage,
+  RawGroupInfo,
+} from 'firefly-client-node';
+
+export type {
+  MlsKeyPackageStorage,
+  MlsGroupStateStorage,
+  MlsPreSharedKeyStorage,
+  UserMessageStorage,
+  GroupMessageStorage,
+  GroupInfoStorage,
+  KeyValueStorage,
+  StorageProviders,
+  RawUserMessage,
+  RawGroupMessage,
+  RawGroupInfo,
+};
 
 const GroupMessageInner = protos.GroupMessageInner;
 const UserMessageInner = protos.UserMessageInner;
@@ -57,6 +86,8 @@ export interface ClientConfig {
   username?: string;
   sessionFile?: string;
   dbFile?: string;
+  storage?: StorageProviders;
+  storageProviders?: StorageProviders;
 }
 
 export type BotConfig = ClientConfig;
@@ -88,6 +119,7 @@ export interface BotContext {
 export type CommandHandler = (ctx: ClientContext & BotContext) => Promise<void>;
 
 export class FireflyClient {
+  private config: ClientConfig;
   private port: number;
   private auth0Domain: string;
   private auth0ClientId: string;
@@ -103,6 +135,8 @@ export class FireflyClient {
   private dbFile: string;
 
   public commands: Map<string, CommandHandler>;
+  public messageHandlers: Array<(ctx: ClientContext & BotContext) => Promise<void> | void>;
+  public groupMessageHandlers: Array<(ctx: ClientContext & BotContext) => Promise<void> | void>;
   public client: any;
   public session: {
     access_token: string | null;
@@ -112,6 +146,7 @@ export class FireflyClient {
   };
 
   constructor(options: ClientConfig = {}) {
+    this.config = options;
     this.port = options.port || 38295;
     this.auth0Domain = options.auth0Domain || 'https://auth.lupyd.com';
     this.auth0ClientId = options.auth0ClientId || 'GnfEyGY0JdD0Oige2HSpeErcaWLrvObm';
@@ -127,6 +162,8 @@ export class FireflyClient {
     this.dbFile = options.dbFile || path.resolve(process.cwd(), 'client-store.db');
 
     this.commands = new Map();
+    this.messageHandlers = [];
+    this.groupMessageHandlers = [];
     this.client = null;
     this.session = {
       access_token: null,
@@ -140,6 +177,16 @@ export class FireflyClient {
   command(name: string, handler: CommandHandler): void {
     const trigger = name.startsWith('/') ? name.toLowerCase() : `/${name.toLowerCase()}`;
     this.commands.set(trigger, handler);
+  }
+
+  // Registers a general direct message handler
+  onMessage(handler: (ctx: ClientContext & BotContext) => Promise<void> | void): void {
+    this.messageHandlers.push(handler);
+  }
+
+  // Registers a general group message handler
+  onGroupMessage(handler: (ctx: ClientContext & BotContext) => Promise<void> | void): void {
+    this.groupMessageHandlers.push(handler);
   }
 
   // Fetch members' online status and last connected timestamp
@@ -167,6 +214,140 @@ export class FireflyClient {
       throw new Error('Client not initialized');
     }
     await this.client.readUserMessagesUpto(other, Number(uptoMessageId));
+  }
+
+  // Direct 1:1 user message
+  async sendUserMessage(to: string, text: string): Promise<any> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    const payload = {
+      messagePayload: {
+        text,
+        files: undefined,
+        replyingTo: 0n,
+      },
+      nonce: Math.floor(Math.random() * 9_999_999),
+    };
+    const messageInnerBytes = UserMessageInner.encode(payload).finish();
+    return await this.client.encryptAndSend(to, Array.from(messageInnerBytes));
+  }
+
+  // Send group message
+  async sendGroupMessage(groupId: number, text: string, channelId: number = 0): Promise<number> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    const payload = {
+      messagePayload: {
+        text,
+        files: undefined,
+        replyingTo: 0n,
+      },
+      channelId,
+    };
+    const messageInnerBytes = GroupMessageInner.encode(payload).finish();
+    return await this.client.encryptAndSendGroup(groupId, Array.from(messageInnerBytes));
+  }
+
+  // Create group
+  async createGroup(name: string, description: string = '', settings?: number): Promise<any> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    return await this.client.createGroup(name, description, settings);
+  }
+
+  // Add/invite member to group
+  async inviteMember(groupId: number, username: string, roleId: number = 1): Promise<void> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    await this.client.addGroupMember(groupId, username, roleId);
+  }
+
+  async addGroupMember(groupId: number, username: string, roleId: number = 1): Promise<void> {
+    return this.inviteMember(groupId, username, roleId);
+  }
+
+  // Kick member from group
+  async kickMember(groupId: number, username: string): Promise<void> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    await this.client.kickGroupMember(groupId, username);
+  }
+
+  async kickGroupMember(groupId: number, username: string): Promise<void> {
+    return this.kickMember(groupId, username);
+  }
+
+  // Create join link for group
+  async createJoinLink(groupId: number, expiresInSeconds: number = 86400, maxUses: number = 100): Promise<string> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    return await this.client.createJoinLink(groupId, expiresInSeconds, maxUses);
+  }
+
+  // Join group via link
+  async joinViaLink(linkToken: string): Promise<void> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    await this.client.joinViaLink(linkToken);
+    await this.client.loadAllGroups();
+  }
+
+  // Request to join / re-add to group
+  async requestToJoin(groupId: number): Promise<void> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    await this.client.requestToJoin(groupId);
+  }
+
+  async syncGroupJoinsAndReadds(groupId: number): Promise<void> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    await this.client.syncGroupJoinsAndReadds(groupId);
+  }
+
+  // List group infos
+  async getGroups(): Promise<any[]> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    return await this.client.getGroupInfos();
+  }
+
+  async getGroupInfos(): Promise<any[]> {
+    return this.getGroups();
+  }
+
+  // Get historical group messages
+  async getGroupMessages(groupId: number, startBefore: number = 0, limit: number = 50): Promise<any[]> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    return await this.client.getGroupMessages(groupId, startBefore, limit);
+  }
+
+  // Query online status
+  async getOnlineStatus(usernames: string[]): Promise<string[]> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    return await this.client.getOnlineStatus(usernames);
+  }
+
+  // Dispose client
+  async dispose(): Promise<void> {
+    if (this.client) {
+      await this.client.dispose();
+      this.client = null;
+    }
   }
 
   // Load and save session
@@ -355,14 +536,15 @@ export class FireflyClient {
     groupId: number | null;
     channelId: number | null;
   }): Promise<void> {
-    if (!text || !text.startsWith('/')) return;
+    if (!text) return;
 
-    const parts = text.trim().split(/\s+/);
-    const commandName = parts[0].toLowerCase();
-    const args = parts.slice(1);
-
-    const handler = this.commands.get(commandName);
-    if (!handler) return;
+    let commandName = '';
+    let args: string[] = [];
+    if (text.startsWith('/')) {
+      const parts = text.trim().split(/\s+/);
+      commandName = parts[0].toLowerCase();
+      args = parts.slice(1);
+    }
 
     const ctx: ClientContext & BotContext = {
       client: this,
@@ -401,10 +583,31 @@ export class FireflyClient {
       }
     };
 
-    try {
-      await handler(ctx);
-    } catch (err) {
-      console.error(`Error executing command ${commandName}:`, err);
+    if (isGroup) {
+      for (const handler of this.groupMessageHandlers) {
+        try {
+          await handler(ctx);
+        } catch (err) {
+          console.error('Error executing group message handler:', err);
+        }
+      }
+    } else {
+      for (const handler of this.messageHandlers) {
+        try {
+          await handler(ctx);
+        } catch (err) {
+          console.error('Error executing message handler:', err);
+        }
+      }
+    }
+
+    if (commandName && this.commands.has(commandName)) {
+      const handler = this.commands.get(commandName)!;
+      try {
+        await handler(ctx);
+      } catch (err) {
+        console.error(`Error executing command ${commandName}:`, err);
+      }
     }
   }
 
@@ -446,7 +649,7 @@ export class FireflyClient {
         try {
           const msg = JSON.parse(msgJson);
           const other = msg.other;
-          const sentByOther = msg.sent_by_other;
+          const sentByOther = msg.sentByOther ?? msg.sent_by_other;
           const message = msg.message;
 
           console.log(`[onMessage] msg received from: ${other}, sentByOther: ${sentByOther}`);
@@ -480,9 +683,9 @@ export class FireflyClient {
         try {
           const msg = JSON.parse(msgJson);
           const by = msg.by;
-          const groupId = msg.group_id;
+          const groupId = msg.groupId ?? msg.group_id;
           const message = msg.message;
-          const channelId = msg.channel_id;
+          const channelId = msg.channelId ?? msg.channel_id;
 
           console.log(`[onGroupMessage] msg received from: ${by}, group: ${groupId}`);
           if (by === this.session.username) return; // skip outgoing
@@ -525,7 +728,8 @@ export class FireflyClient {
       2000,
       callbacks,
       this.dbFile,
-      15000
+      15000,
+      this.config.storageProviders || this.config.storage
     );
 
     console.log('Connecting to Firefly MLS network...');

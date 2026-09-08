@@ -4,6 +4,7 @@ use zeroize::Zeroizing;
 use firefly_core::storage_provider::MlsGroupStateStorage;
 use firefly_core::storage_provider::MlsKeyPackageStorage;
 use firefly_core::storage_provider::MlsPreSharedKeyStorage;
+use crate::storage::GroupInfoStorage;
 use sqlx::Executor;
 use sqlx::SqlitePool;
 use sqlx::prelude::*;
@@ -345,12 +346,7 @@ impl MlsKeyPackageStorage for GroupKeyPackageStore {
     }
 }
 
-pub struct GroupInfo {
-    pub id: u64,
-    pub identifier: Vec<u8>,
-    pub name: String,
-    pub description: String,
-}
+pub use crate::storage::GroupInfo;
 
 #[derive(Clone)]
 pub struct GroupInfoStore {
@@ -461,6 +457,28 @@ impl GroupInfoStore {
             .await?;
 
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl GroupInfoStorage for GroupInfoStore {
+    async fn get_all(&self) -> anyhow::Result<Vec<GroupInfo>> {
+        self.get_all().await
+    }
+    async fn get(&self, id: u64) -> anyhow::Result<GroupInfo> {
+        self.get(id).await
+    }
+    async fn set(
+        &self,
+        id: u64,
+        name: String,
+        description: String,
+        group_state_id: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        self.set(id, name, description, group_state_id).await
+    }
+    async fn delete(&self, id: u64) -> anyhow::Result<()> {
+        self.delete(id).await
     }
 }
 

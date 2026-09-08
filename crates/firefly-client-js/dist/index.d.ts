@@ -1,4 +1,5 @@
-import { FireflyClientNode, protos, initLogger } from 'firefly-client-node';
+import { FireflyClientNode, protos, initLogger, MlsKeyPackageStorage, MlsGroupStateStorage, MlsPreSharedKeyStorage, UserMessageStorage, GroupMessageStorage, GroupInfoStorage, KeyValueStorage, StorageProviders, RawUserMessage, RawGroupMessage, RawGroupInfo } from 'firefly-client-node';
+export type { MlsKeyPackageStorage, MlsGroupStateStorage, MlsPreSharedKeyStorage, UserMessageStorage, GroupMessageStorage, GroupInfoStorage, KeyValueStorage, StorageProviders, RawUserMessage, RawGroupMessage, RawGroupInfo, };
 export interface ClientConfig {
     port?: number;
     auth0Domain?: string;
@@ -10,6 +11,8 @@ export interface ClientConfig {
     username?: string;
     sessionFile?: string;
     dbFile?: string;
+    storage?: StorageProviders;
+    storageProviders?: StorageProviders;
 }
 export type BotConfig = ClientConfig;
 export interface ClientContext {
@@ -36,6 +39,7 @@ export interface BotContext {
 }
 export type CommandHandler = (ctx: ClientContext & BotContext) => Promise<void>;
 export declare class FireflyClient {
+    private config;
     private port;
     private auth0Domain;
     private auth0ClientId;
@@ -48,6 +52,8 @@ export declare class FireflyClient {
     private sessionFile;
     private dbFile;
     commands: Map<string, CommandHandler>;
+    messageHandlers: Array<(ctx: ClientContext & BotContext) => Promise<void> | void>;
+    groupMessageHandlers: Array<(ctx: ClientContext & BotContext) => Promise<void> | void>;
     client: any;
     session: {
         access_token: string | null;
@@ -57,8 +63,26 @@ export declare class FireflyClient {
     };
     constructor(options?: ClientConfig);
     command(name: string, handler: CommandHandler): void;
+    onMessage(handler: (ctx: ClientContext & BotContext) => Promise<void> | void): void;
+    onGroupMessage(handler: (ctx: ClientContext & BotContext) => Promise<void> | void): void;
     getGroupMembersOnlineStatus(groupId: number): Promise<any>;
     readUserMessagesUpto(other: string, uptoMessageId: bigint | number): Promise<void>;
+    sendUserMessage(to: string, text: string): Promise<any>;
+    sendGroupMessage(groupId: number, text: string, channelId?: number): Promise<number>;
+    createGroup(name: string, description?: string, settings?: number): Promise<any>;
+    inviteMember(groupId: number, username: string, roleId?: number): Promise<void>;
+    addGroupMember(groupId: number, username: string, roleId?: number): Promise<void>;
+    kickMember(groupId: number, username: string): Promise<void>;
+    kickGroupMember(groupId: number, username: string): Promise<void>;
+    createJoinLink(groupId: number, expiresInSeconds?: number, maxUses?: number): Promise<string>;
+    joinViaLink(linkToken: string): Promise<void>;
+    requestToJoin(groupId: number): Promise<void>;
+    syncGroupJoinsAndReadds(groupId: number): Promise<void>;
+    getGroups(): Promise<any[]>;
+    getGroupInfos(): Promise<any[]>;
+    getGroupMessages(groupId: number, startBefore?: number, limit?: number): Promise<any[]>;
+    getOnlineStatus(usernames: string[]): Promise<string[]>;
+    dispose(): Promise<void>;
     private _loadSession;
     private _saveSession;
     private _exchangeCodeForTokens;

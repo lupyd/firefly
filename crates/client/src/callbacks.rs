@@ -1,4 +1,4 @@
-use crate::db::{group_messages::GroupMessage, messages::UserMessage};
+use crate::storage::{GroupMessage, UserMessage};
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CallSignal {

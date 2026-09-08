@@ -1,11 +1,18 @@
 import test from 'node:test';
 import * as assert from 'node:assert';
-import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { FireflyClient, protos, initLogger } from 'firefly-client-js';
+import {
+  FireflyClient,
+  protos,
+  initLogger,
+  type StorageProviders,
+  type RawUserMessage,
+  type RawGroupMessage,
+  type RawGroupInfo,
+} from 'firefly-client-js';
 
-// Initialize the native Rust client logger to write all internal logs to js-test.log
+// Initialize the native Rust client logger
 initLogger('/tmp/firefly/js-test.log');
 
 const GroupMessageInner = protos.GroupMessageInner;
@@ -15,82 +22,55 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-test('Firefly JS Client Integration Test - DM, Group Invite, and Group Messaging', { timeout: 60000 }, async (t) => {
+test('Firefly JS Client Integration Test Suite - Rust Parity', { timeout: 120000 }, async () => {
   process.env.EMULATOR_MODE = 'true';
   process.env.NO_TOKEN_VERIFICATION = 'true';
-  process.env.FIREFLY_BASE_URL = 'http://127.0.0.1:39305';
-  const port = 39305;
-  const dbSuffix = Math.floor(Math.random() * 100000);
-  const aliceDb = path.resolve(process.cwd(), `alice-test-${dbSuffix}.db`);
-  const bobDb = path.resolve(process.cwd(), `bob-test-${dbSuffix}.db`);
-  const aliceSession = path.resolve(process.cwd(), `alice-session-${dbSuffix}.json`);
-  const bobSession = path.resolve(process.cwd(), `bob-session-${dbSuffix}.json`);
+  const baseUrl = process.env.FIREFLY_BASE_URL || 'http://127.0.0.1:39209';
+  const wsUrl =
+    process.env.FIREFLY_WS_URL ||
+    baseUrl.replace(/^http:\/\//, 'ws://').replace(/^https:\/\//, 'wss://') + '/';
+  const dbSuffix = Math.floor(Math.random() * 1000000);
 
-  // Cleanup pre-existing files
-  const cleanupFiles = () => {
-    [aliceDb, bobDb, aliceSession, bobSession].forEach((f) => {
-      if (fs.existsSync(f)) {
-        try {
-          fs.unlinkSync(f);
-        } catch (e) {}
-      }
+  const testDir = `/tmp/firefly/ts_test_${dbSuffix}`;
+  if (!fs.existsSync(testDir)) {
+    fs.mkdirSync(testDir, { recursive: true });
+  }
+
+  const createClientHelper = (username: string) => {
+    const dbFile = path.resolve(testDir, `${username}.db`);
+    const sessionFile = path.resolve(testDir, `${username}-session.json`);
+    return new FireflyClient({
+      username,
+      emulatorMode: true,
+      apiBaseUrl: baseUrl,
+      wsUrl,
+      dbFile,
+      sessionFile,
     });
   };
-  cleanupFiles();
 
-  console.log('Spawning Firefly MLS Server on port', port);
-  const serverBin = process.env.FIREFLY_SERVER_PATH || (fs.existsSync('/home/ash/lupyd/firefly-mls-server/target/debug/firefly-server') ? '/home/ash/lupyd/firefly-mls-server/target/debug/firefly-server' : '/home/ash/.cargo/target/debug/firefly-server');
-  const serverProcess = spawn(serverBin, [], {
-    env: {
-      ...process.env,
-      EMULATOR_MODE: 'true',
-      NO_TOKEN_VERIFICATION: 'true',
-      PORT: String(port),
-      FIREFLY_BASE_URL: `http://127.0.0.1:${port}`,
-      RUST_LOG: 'info',
-    },
-  });
-
-  serverProcess.stdout.on('data', (data) => {
-    console.log('[SERVER STDOUT]', data.toString().trim());
-  });
-  serverProcess.stderr.on('data', (data) => {
-    console.error('[SERVER STDERR]', data.toString().trim());
-  });
-
-  // Make sure we kill the server on any exit
-  const killServer = () => {
-    console.log('Killing Firefly MLS Server...');
-    serverProcess.kill('SIGKILL');
+  const cleanupFiles = () => {
+    try {
+      if (fs.existsSync(testDir)) {
+        fs.rmSync(testDir, { recursive: true, force: true });
+      }
+    } catch (_) {}
   };
 
-  process.on('exit', killServer);
+  console.log('Connecting to Firefly MLS Server at', baseUrl);
 
   try {
-    // Wait for the server to start up
-    await sleep(4000);
+    // =========================================================================
+    // SCENARIO 1 & 2: Direct Messaging (DM) + Group Messaging Flow
+    // =========================================================================
+    console.log('\n--- Running Scenario 1 & 2: DM and Group Flow ---');
+    const aliceUser = `alice_${dbSuffix}`;
+    const bobUser = `bob_${dbSuffix}`;
+    const charlieOfflineUser = `charlie_offline_${dbSuffix}`;
 
-    console.log('Initializing Alice Client...');
-    const alice = new FireflyClient({
-      username: 'alice',
-      emulatorMode: true,
-      apiBaseUrl: `http://127.0.0.1:${port}`,
-      wsUrl: `ws://127.0.0.1:${port}/`,
-      dbFile: aliceDb,
-      sessionFile: aliceSession,
-    });
+    const alice = createClientHelper(aliceUser);
+    const bob = createClientHelper(bobUser);
 
-    console.log('Initializing Bob Client...');
-    const bob = new FireflyClient({
-      username: 'bob',
-      emulatorMode: true,
-      apiBaseUrl: `http://127.0.0.1:${port}`,
-      wsUrl: `ws://127.0.0.1:${port}/`,
-      dbFile: bobDb,
-      sessionFile: bobSession,
-    });
-
-    // Registrations for DMs
     let aliceReceivedPing = false;
     let bobReceivedPong = false;
 
@@ -105,125 +85,492 @@ test('Firefly JS Client Integration Test - DM, Group Invite, and Group Messaging
       bobReceivedPong = true;
     });
 
-    // Registrations for Group Messages
     let aliceReceivedGroupPing = false;
     let bobReceivedGroupPong = false;
 
     alice.command('groupping', async (ctx) => {
-      console.log('Alice received /groupping group command from', ctx.sender);
+      console.log('Alice received /groupping from', ctx.sender);
       aliceReceivedGroupPing = true;
       await ctx.reply('/grouppong');
     });
 
     bob.command('grouppong', async (ctx) => {
-      console.log('Bob received /grouppong group reply from', ctx.sender);
+      console.log('Bob received /grouppong from', ctx.sender);
       bobReceivedGroupPong = true;
     });
 
-    console.log('Starting Alice...');
     await alice.start();
-    console.log('Alice started!');
-
-    console.log('Starting Bob...');
     await bob.start();
-    console.log('Bob started!');
-
-    // Wait a bit for both to sync keys
     await sleep(2000);
 
-    // ----------------------------------------------------
-    // TEST 1: Direct Messaging (DM)
-    // ----------------------------------------------------
-    console.log('Bob sending DM (/ping) to Alice...');
-    const dmPayload = {
-      messagePayload: {
-        text: '/ping',
-        files: undefined,
-        replyingTo: 0n,
-      },
-      nonce: Math.floor(Math.random() * 9_999_999),
-    };
-    const dmBytes = UserMessageInner.encode(dmPayload).finish();
-    await bob.client.encryptAndSend('alice', Array.from(dmBytes));
+    // 1. DM Ping-Pong
+    console.log(`Testing Direct Message (${bobUser} -> ${aliceUser})...`);
+    await bob.sendUserMessage(aliceUser, '/ping');
 
-    // Wait and verify
     for (let i = 0; i < 20; i++) {
       if (aliceReceivedPing && bobReceivedPong) break;
       await sleep(500);
     }
+    assert.ok(aliceReceivedPing, 'Alice should have received Bob DM');
+    assert.ok(bobReceivedPong, 'Bob should have received Alice reply DM');
+    console.log('✓ Direct messaging flow passed!');
 
-    assert.ok(aliceReceivedPing, 'Alice should have received Bob\'s DM');
-    assert.ok(bobReceivedPong, 'Bob should have received Alice\'s reply DM');
-    console.log('Direct messaging integration test passed!');
-
-    // ----------------------------------------------------
-    // TEST 2: Group Creation and Invitation
-    // ----------------------------------------------------
-    console.log('Alice creating a group...');
-    const groupInfo = await alice.client.createGroup('IntegrationGroup', 'Group for integration testing');
-    const groupId = groupInfo.id;
+    // 2. Group Creation & Invitation
+    console.log(`Testing Group Creation and Member Invite (${aliceUser} -> ${bobUser})...`);
+    const groupInfo = await alice.createGroup(`IntegrationGroup_${dbSuffix}`, 'Group for integration testing');
+    const groupId = Number(groupInfo.id);
     console.log('Group created with ID:', groupId);
 
-    console.log('Alice inviting Bob to the group...');
-    await alice.client.addGroupMember(groupId, 'bob', 0);
-
-    console.log('Bob checking setup to fetch and join the group...');
-    await bob.client.checkSetup();
-
-    // Wait a bit for both to update group states and epochs
+    await alice.addGroupMember(groupId, bobUser, 0);
     await sleep(2000);
 
-    // ----------------------------------------------------
-    // TEST 2.5: Group Members Online Status and Last Connected
-    // ----------------------------------------------------
-    console.log('Alice fetching group members online status...');
-    const memberStatus = await alice.getGroupMembersOnlineStatus(Number(groupId));
-    console.log('Group members status received:', JSON.stringify(memberStatus, (k, v) => typeof v === 'bigint' ? v.toString() : v));
+    // Group Ping-Pong
+    console.log('Testing Group Message exchange...');
+    await bob.sendGroupMessage(groupId, '/groupping', 1);
 
-    assert.ok(memberStatus.members && memberStatus.members.length >= 2, 'Should have at least 2 members in group');
-    
-    const aliceStatus = memberStatus.members.find((m: any) => m.username === 'alice');
-    const bobStatus = memberStatus.members.find((m: any) => m.username === 'bob');
-
-    assert.ok(aliceStatus, 'Alice should be in the member status list');
-    assert.ok(bobStatus, 'Bob should be in the member status list');
-
-    assert.ok(aliceStatus.isOnline, 'Alice should be online');
-    assert.ok(bobStatus.isOnline, 'Bob should be online');
-
-    assert.ok(aliceStatus.lastConnectedAt > 0n, 'Alice last connected timestamp should be set');
-    assert.ok(bobStatus.lastConnectedAt > 0n, 'Bob last connected timestamp should be set');
-
-    console.log('Group members online status test passed!');
-
-    // ----------------------------------------------------
-    // TEST 3: Group Messaging
-    // ----------------------------------------------------
-    console.log('Bob sending group message (/groupping)...');
-    const grpPayload = {
-      messagePayload: {
-        text: '/groupping',
-        files: undefined,
-        replyingTo: 0n,
-      },
-      channelId: 1,
-    };
-    const grpBytes = GroupMessageInner.encode(grpPayload).finish();
-    await bob.client.encryptAndSendGroup(groupId, Array.from(grpBytes));
-
-    // Wait and verify
     for (let i = 0; i < 20; i++) {
       if (aliceReceivedGroupPing && bobReceivedGroupPong) break;
       await sleep(500);
     }
+    assert.ok(aliceReceivedGroupPing, 'Alice should have received Bob group message');
+    assert.ok(bobReceivedGroupPong, 'Bob should have received Alice group reply');
+    console.log('✓ Group messaging flow passed!');
 
-    assert.ok(aliceReceivedGroupPing, 'Alice should have received Bob\'s group message');
-    assert.ok(bobReceivedGroupPong, 'Bob should have received Alice\'s group reply');
-    console.log('Group messaging integration test passed!');
+    // =========================================================================
+    // SCENARIO 3: Online Status Flow (Individual + Group Members)
+    // =========================================================================
+    console.log('\n--- Running Scenario 3: Online Status Flow ---');
+    console.log(`Querying online status for [${aliceUser}, ${bobUser}, ${charlieOfflineUser}]...`);
+    const onlineList1 = await alice.getOnlineStatus([aliceUser, bobUser, charlieOfflineUser]);
+    console.log('Online list:', onlineList1);
+    assert.ok(onlineList1.includes(aliceUser), 'Alice should be online');
+    assert.ok(onlineList1.includes(bobUser), 'Bob should be online');
+    assert.ok(!onlineList1.includes(charlieOfflineUser), 'charlieOfflineUser should be offline');
 
+    console.log('Fetching group members online status...');
+    const memberStatus = await alice.getGroupMembersOnlineStatus(groupId);
+    assert.ok(memberStatus.members && memberStatus.members.length >= 2);
+    const aliceSt = memberStatus.members.find((m: any) => m.username === aliceUser);
+    const bobSt = memberStatus.members.find((m: any) => m.username === bobUser);
+    assert.ok(aliceSt && aliceSt.isOnline, 'Alice should show online in group status');
+    assert.ok(bobSt && bobSt.isOnline, 'Bob should show online in group status');
+    assert.ok(aliceSt.lastConnectedAt > 0n);
+    assert.ok(bobSt.lastConnectedAt > 0n);
+
+    // Disconnect Bob and re-check
+    console.log('Disposing Bob client to test disconnect detection...');
+    await bob.dispose();
+    await sleep(2000);
+
+    const onlineList2 = await alice.getOnlineStatus([aliceUser, bobUser, charlieOfflineUser]);
+    console.log('Online list after Bob disposed:', onlineList2);
+    assert.ok(onlineList2.includes(aliceUser), 'Alice should still be online');
+    assert.ok(!onlineList2.includes(bobUser), 'Bob should now be offline');
+    console.log('✓ Online status flow passed!');
+
+    // Dispose Alice before next scenarios
+    await alice.dispose();
+
+    // =========================================================================
+    // SCENARIO 4: Kick Member & Permission Authorization Flow
+    // =========================================================================
+    console.log('\n--- Running Scenario 4: Kick Member & Permission Authorization ---');
+    const kickOwnerUser = `kick_alice_${dbSuffix}`;
+    const kickBobUser = `kick_bob_${dbSuffix}`;
+    const kickCharlieUser = `kick_charlie_${dbSuffix}`;
+
+    const kickOwner = createClientHelper(kickOwnerUser);
+    const kickBob = createClientHelper(kickBobUser);
+    const kickCharlie = createClientHelper(kickCharlieUser);
+
+    let kickAliceReceivedMsg: string | null = null;
+    let kickBobReceivedMsg: string | null = null;
+    let kickCharlieReceivedMsg: string | null = null;
+
+    kickOwner.onGroupMessage(async (ctx) => {
+      console.log('[kickOwner received group message]', ctx.text, 'from', ctx.sender);
+      kickAliceReceivedMsg = ctx.text;
+    });
+    kickBob.onGroupMessage(async (ctx) => {
+      console.log('[kickBob received group message]', ctx.text, 'from', ctx.sender);
+      kickBobReceivedMsg = ctx.text;
+    });
+    kickCharlie.onGroupMessage(async (ctx) => {
+      console.log('[kickCharlie received group message]', ctx.text, 'from', ctx.sender);
+      kickCharlieReceivedMsg = ctx.text;
+    });
+
+    await kickOwner.start();
+    await kickBob.start();
+    await kickCharlie.start();
+    await sleep(2000);
+
+    const kickGroup = await kickOwner.createGroup(`KickGroup_${dbSuffix}`, 'Testing permissions & kicks');
+    const kickGroupId = Number(kickGroup.id);
+
+    console.log('Adding Bob and Charlie to Kick Test Group...');
+    await kickOwner.addGroupMember(kickGroupId, kickBobUser, 0);
+    await kickOwner.addGroupMember(kickGroupId, kickCharlieUser, 0);
+
+    await sleep(2000);
+
+    // Charlie (role 0) attempts to kick Alice (owner) - MUST FAIL!
+    console.log('Testing: Charlie attempts to kick Owner Alice (must fail)...');
+    let charlieKickAliceFailed = false;
+    try {
+      await kickCharlie.kickGroupMember(kickGroupId, kickOwnerUser);
+    } catch (err) {
+      charlieKickAliceFailed = true;
+      console.log('Charlie kick Alice correctly failed with error:', String(err));
+    }
+    assert.ok(charlieKickAliceFailed, 'Non-admin member should not be able to kick owner');
+
+    // Charlie (role 0) attempts to kick Bob - MUST FAIL!
+    console.log('Testing: Charlie attempts to kick Bob (must fail)...');
+    let charlieKickBobFailed = false;
+    try {
+      await kickCharlie.kickGroupMember(kickGroupId, kickBobUser);
+    } catch (err) {
+      charlieKickBobFailed = true;
+      console.log('Charlie kick Bob correctly failed with error:', String(err));
+    }
+    assert.ok(charlieKickBobFailed, 'Non-admin member should not be able to kick peer member');
+
+    // Alice kicks Bob
+    console.log('Owner Alice kicking Bob...');
+    await kickOwner.kickGroupMember(kickGroupId, kickBobUser);
+    await sleep(2000);
+
+    // Bob attempts to send message
+    console.log('Kicked Bob attempting to send group message...');
+    let bobSendFailed = false;
+    try {
+      await kickBob.sendGroupMessage(kickGroupId, 'Hello from kicked Bob!', 0);
+    } catch (err) {
+      bobSendFailed = true;
+      console.log('Bob send immediately rejected by server:', (err as Error).message);
+    }
+
+    // Wait and verify Alice and Charlie do not receive anything from Bob
+    await sleep(3000);
+    assert.ok(
+      kickAliceReceivedMsg !== 'Hello from kicked Bob!',
+      'Alice should NOT receive messages from kicked Bob'
+    );
+    assert.ok(
+      kickCharlieReceivedMsg !== 'Hello from kicked Bob!',
+      'Charlie should NOT receive messages from kicked Bob'
+    );
+
+    // Charlie sends message to group -> Alice receives it
+    console.log('Charlie sending group message to verify active group membership...');
+    await kickCharlie.sendGroupMessage(kickGroupId, 'Hello from Charlie, still here!', 0);
+
+    for (let i = 0; i < 20; i++) {
+      if (kickAliceReceivedMsg === 'Hello from Charlie, still here!') break;
+      await sleep(500);
+    }
+    assert.strictEqual(
+      kickAliceReceivedMsg,
+      'Hello from Charlie, still here!',
+      'Alice should receive message from Charlie'
+    );
+    console.log('✓ Kick member and permissions flow passed!');
+
+    await kickOwner.dispose();
+    await kickBob.dispose();
+    await kickCharlie.dispose();
+
+    // =========================================================================
+    // SCENARIO 5: Public Join Link Flow
+    // =========================================================================
+    console.log('\n--- Running Scenario 5: Public Join Link Flow ---');
+    const linkOwnerUser = `link_alice_${dbSuffix}`;
+    const linkBobUser = `link_bob_${dbSuffix}`;
+    const linkCharlieUser = `link_charlie_${dbSuffix}`;
+    const linkDaveUser = `link_dave_${dbSuffix}`;
+
+    const linkOwner = createClientHelper(linkOwnerUser);
+    const linkBob = createClientHelper(linkBobUser);
+    const linkCharlie = createClientHelper(linkCharlieUser);
+    const linkDave = createClientHelper(linkDaveUser);
+
+    let linkBobReceivedAliceMsg = false;
+    let linkAliceReceivedBobMsg = false;
+
+    linkOwner.onGroupMessage(async (ctx) => {
+      console.log('[linkOwner received group message]', ctx.text, 'from', ctx.sender);
+      if (ctx.text === 'Hello from Bob via link!') {
+        linkAliceReceivedBobMsg = true;
+      }
+    });
+
+    linkBob.onGroupMessage(async (ctx) => {
+      console.log('[linkBob received group message]', ctx.text, 'from', ctx.sender);
+      if (ctx.text === 'Hello to public group from Alice!') {
+        linkBobReceivedAliceMsg = true;
+      }
+    });
+
+    await linkOwner.start();
+    await linkBob.start();
+    await sleep(2000);
+
+    const pubGroup = await linkOwner.createGroup(`PublicLinkGroup_${dbSuffix}`, 'Test join links');
+    const pubGroupId = Number(pubGroup.id);
+
+    console.log('Owner Alice creating join link (expires: 3600s, max_uses: 10)...');
+    const joinToken = await linkOwner.createJoinLink(pubGroupId, 3600, 10);
+    console.log('Created join link token:', joinToken);
+
+    console.log('Bob joining via link...');
+    await linkBob.joinViaLink(joinToken);
+
+    // Wait for Alice to receive groupJoinRequests and auto-process it
+    console.log('Waiting for owner Alice to auto-process join request...');
+    await sleep(4000);
+
+    console.log('Owner Alice sending message to group...');
+    await linkOwner.sendGroupMessage(pubGroupId, 'Hello to public group from Alice!', 0);
+
+    for (let i = 0; i < 20; i++) {
+      if (linkBobReceivedAliceMsg) break;
+      await sleep(500);
+    }
+    assert.ok(linkBobReceivedAliceMsg, 'Bob should receive Alice message in link-joined group');
+
+    console.log('Bob sending message to group...');
+    await linkBob.sendGroupMessage(pubGroupId, 'Hello from Bob via link!', 0);
+
+    for (let i = 0; i < 20; i++) {
+      if (linkAliceReceivedBobMsg) break;
+      await sleep(500);
+    }
+    assert.ok(linkAliceReceivedBobMsg, 'Alice should receive Bob message');
+
+    // Test max uses limit = 1
+    console.log('Testing max_uses limit (max_uses: 1)...');
+    const maxUseToken = await linkOwner.createJoinLink(pubGroupId, 3600, 1);
+
+    await linkCharlie.start();
+    await linkDave.start();
+    await sleep(2000);
+
+    console.log('Charlie joins via 1-use token (should succeed)...');
+    await linkCharlie.joinViaLink(maxUseToken);
+
+    console.log('Dave joins via already used 1-use token (must fail)...');
+    let daveJoinFailed = false;
+    try {
+      await linkDave.joinViaLink(maxUseToken);
+    } catch (err) {
+      daveJoinFailed = true;
+      const errStr = String(err);
+      console.log('Dave join correctly failed with error:', errStr);
+      assert.ok(errStr.includes('Invalid link'), 'Error should indicate invalid link');
+    }
+    assert.ok(daveJoinFailed, 'Dave should fail to join with exhausted link');
+
+    // Test link expiry
+    console.log('Testing link expiry (expires_in_seconds: 1)...');
+    const expiryToken = await linkOwner.createJoinLink(pubGroupId, 1, 10);
+    await sleep(2500); // wait for link to expire
+
+    console.log('Dave joins via expired token (must fail)...');
+    let daveExpiryFailed = false;
+    try {
+      await linkDave.joinViaLink(expiryToken);
+    } catch (err) {
+      daveExpiryFailed = true;
+      const errStr = String(err);
+      console.log('Dave join expired link correctly failed with error:', errStr);
+      assert.ok(errStr.includes('Invalid link'), 'Error should indicate invalid link');
+    }
+    assert.ok(daveExpiryFailed, 'Dave should fail to join expired link');
+    console.log('✓ Public join link flow passed!');
+
+    await linkOwner.dispose();
+    await linkBob.dispose();
+    await linkCharlie.dispose();
+    await linkDave.dispose();
+
+    // =========================================================================
+    // SCENARIO 6: Custom Storage Adapter (Raw Types)
+    // =========================================================================
+    console.log('\n=============================================');
+    console.log('STARTING SCENARIO 6: CUSTOM STORAGE ADAPTER');
+    console.log('=============================================\n');
+
+    const interceptedUserMessages: RawUserMessage[] = [];
+    const interceptedGroupMessages: RawGroupMessage[] = [];
+    const interceptedGroupInfo = new Map<number, RawGroupInfo>();
+    let keyPackagesInserted = 0;
+    const rawKeyPackages = new Map<string, Uint8Array>();
+
+    const customStorage: StorageProviders = {
+      mlsKeyPackageStorage: {
+        insert: (id: Uint8Array, data: Uint8Array) => {
+          keyPackagesInserted++;
+          rawKeyPackages.set(Buffer.from(id).toString('hex'), data);
+          return true;
+        },
+        delete: (id: Uint8Array) => {
+          rawKeyPackages.delete(Buffer.from(id).toString('hex'));
+          return true;
+        },
+        get: (id: Uint8Array) => {
+          return rawKeyPackages.get(Buffer.from(id).toString('hex')) || null;
+        },
+      },
+      userMessageStorage: {
+        add: (msg: RawUserMessage) => {
+          console.log('[CustomStorage] Intercepted user message:', msg.id, msg.from, '->', msg.to);
+          interceptedUserMessages.push(msg);
+        },
+        getLastMessagesOf: (other: string) => {
+          return Promise.resolve(
+            interceptedUserMessages.filter(
+              (m) => m.other === other || m.from === other || m.to === other
+            )
+          );
+        },
+      },
+      groupMessageStorage: {
+        add: (msg: RawGroupMessage) => {
+          console.log('[CustomStorage] Intercepted group message:', msg.id, 'group:', msg.groupId, 'from:', msg.from);
+          interceptedGroupMessages.push(msg);
+        },
+        get: (groupId: number | bigint) => {
+          return Promise.resolve(interceptedGroupMessages.filter((m) => m.groupId === Number(groupId)));
+        },
+        getLastMessageOfGroup: (groupId: number | bigint) => {
+          const msgs = interceptedGroupMessages.filter((m) => m.groupId === Number(groupId));
+          return Promise.resolve(msgs[msgs.length - 1] || null);
+        },
+        deleteByGroupId: (groupId: number | bigint) => {
+          const idx = interceptedGroupMessages.findIndex((m) => m.groupId === Number(groupId));
+          if (idx !== -1) interceptedGroupMessages.splice(idx, 1);
+        },
+        updateCursor: (_id: number | bigint, _groupId: number | bigint, _epoch: number) => {},
+      },
+      groupInfoStorage: {
+        getAll: () => Promise.resolve(Array.from(interceptedGroupInfo.values())),
+        get: (groupId: number | bigint) => Promise.resolve(interceptedGroupInfo.get(Number(groupId)) || null),
+        set: (group: RawGroupInfo) => {
+          console.log('[CustomStorage] Intercepted group info set:', group.groupId ?? group.id, group.name);
+          interceptedGroupInfo.set(Number(group.groupId ?? group.id), group);
+        },
+        delete: (groupId: number | bigint) => {
+          interceptedGroupInfo.delete(Number(groupId));
+        },
+      },
+    };
+
+    const s4AliceUsername = `s4_alice_${dbSuffix}`;
+    const s4BobUsername = `s4_bob_${dbSuffix}`;
+
+    const s4Alice = new FireflyClient({
+      username: s4AliceUsername,
+      emulatorMode: true,
+      apiBaseUrl: baseUrl,
+      wsUrl,
+      dbFile: path.resolve(testDir, `${s4AliceUsername}.db`),
+      sessionFile: path.resolve(testDir, `${s4AliceUsername}-session.json`),
+      storageProviders: customStorage,
+    });
+    const s4Bob = createClientHelper(s4BobUsername);
+
+    let s4AliceReceivedPing = false;
+    let s4BobReceivedPong = false;
+
+    s4Alice.command('ping', async (ctx) => {
+      console.log('s4Alice received /ping command from', ctx.sender);
+      s4AliceReceivedPing = true;
+      await ctx.reply('/pong');
+    });
+
+    s4Bob.command('pong', async (ctx) => {
+      console.log('s4Bob received /pong reply from', ctx.sender);
+      s4BobReceivedPong = true;
+    });
+
+    await s4Alice.start();
+    await s4Bob.start();
+    await sleep(2000);
+
+    console.log('Testing DM with custom storage adapter...');
+    await s4Bob.sendUserMessage(s4AliceUsername, '/ping');
+
+    for (let i = 0; i < 20; i++) {
+      if (s4AliceReceivedPing && s4BobReceivedPong) break;
+      await sleep(500);
+    }
+    assert.ok(s4AliceReceivedPing, 's4Alice should receive ping DM');
+    assert.ok(s4BobReceivedPong, 's4Bob should receive pong reply');
+
+    // Verify custom storage intercepted user messages
+    console.log('Intercepted user messages count:', interceptedUserMessages.length);
+    assert.ok(
+      interceptedUserMessages.length >= 1,
+      'Custom storage should have intercepted at least 1 user message'
+    );
+    const lastUserMsg = interceptedUserMessages[interceptedUserMessages.length - 1];
+    assert.ok(
+      lastUserMsg.from.length > 0 || lastUserMsg.to.length > 0 || (lastUserMsg.other && lastUserMsg.other.length > 0),
+      'Message from/to/other field should be populated'
+    );
+
+    // Testing Group creation and group info interception
+    console.log('Testing Group Creation with custom storage adapter...');
+    const s4Group = await s4Alice.createGroup(`CustomStorageGroup_${dbSuffix}`, 'Testing raw storage');
+    const s4GroupId = Number(s4Group.id);
+    console.log('s4Group created with ID:', s4GroupId);
+
+    await s4Alice.addGroupMember(s4GroupId, s4BobUsername, 0);
+    await sleep(2000);
+
+    // Verify custom group info storage
+    console.log('Intercepted group info size:', interceptedGroupInfo.size);
+    assert.ok(
+      interceptedGroupInfo.has(s4GroupId),
+      'Custom storage should have intercepted group info'
+    );
+    const storedGroup = interceptedGroupInfo.get(s4GroupId);
+    assert.strictEqual(storedGroup?.name, `CustomStorageGroup_${dbSuffix}`);
+
+    // Group message interception
+    let s4AliceReceivedGroupMsg = false;
+    s4Alice.onGroupMessage((_) => {
+      s4AliceReceivedGroupMsg = true;
+    });
+
+    await s4Bob.sendGroupMessage(s4GroupId, 'Hello with custom storage!', 1);
+    for (let i = 0; i < 20; i++) {
+      if (s4AliceReceivedGroupMsg) break;
+      await sleep(500);
+    }
+    assert.ok(s4AliceReceivedGroupMsg, 's4Alice should receive group message');
+
+    console.log('Intercepted group messages count:', interceptedGroupMessages.length);
+    assert.ok(
+      interceptedGroupMessages.length >= 1,
+      'Custom storage should have intercepted at least 1 group message'
+    );
+    assert.strictEqual(interceptedGroupMessages[0].groupId, s4GroupId);
+    console.log('Intercepted MLS key packages inserted count:', keyPackagesInserted);
+    assert.ok(
+      keyPackagesInserted > 0,
+      'Custom storage should have intercepted MLS key package insertions'
+    );
+    console.log('✓ Custom raw storage adapter flow passed!');
+
+    await s4Alice.dispose();
+    await s4Bob.dispose();
+
+    console.log('\n=============================================');
+    console.log('ALL INTEGRATION TEST SCENARIOS PASSED!');
+    console.log('=============================================\n');
   } finally {
-    process.off('exit', killServer);
-    killServer();
     cleanupFiles();
   }
 });

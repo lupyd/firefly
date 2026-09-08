@@ -103,8 +103,7 @@ pub fn deserialize_identities(
 #[derive(Clone)]
 pub struct FireflyMlsRules;
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl MlsRules for FireflyMlsRules {
     type Error = FireflyError;
 

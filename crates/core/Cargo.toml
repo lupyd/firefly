@@ -34,6 +34,9 @@ reqwest = { workspace = true, features = ["rustls-tls"], default-features = fals
 quick-protobuf = { workspace = true }
 zeroize = { workspace = true }
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mls_build_async)'] }

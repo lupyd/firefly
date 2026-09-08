@@ -10,17 +10,6 @@ use zeroize::Zeroizing;
 
 use crate::FireflyError;
 
-#[cfg(target_arch = "wasm32")]
-#[async_trait::async_trait(?Send)]
-pub trait MlsKeyPackageStorage {
-    async fn insert(&self, id: Vec<u8>, key_package_data: Vec<u8>) -> bool;
-
-    async fn delete(&self, id: Vec<u8>) -> bool;
-
-    async fn get(&self, id: Vec<u8>) -> Option<Vec<u8>>;
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 pub trait MlsKeyPackageStorage: Send + Sync {
     async fn insert(&self, id: Vec<u8>, key_package_data: Vec<u8>) -> bool;
@@ -43,8 +32,7 @@ impl FfiKeyPackageStorage {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl KeyPackageStorage for FfiKeyPackageStorage {
     type Error = FireflyError;
 
@@ -68,13 +56,6 @@ impl KeyPackageStorage for FfiKeyPackageStorage {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-#[async_trait::async_trait(?Send)]
-pub trait MlsPreSharedKeyStorage {
-    async fn get(&self, id: Vec<u8>) -> Option<Vec<u8>>;
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 pub trait MlsPreSharedKeyStorage: Send + Sync {
     async fn get(&self, id: Vec<u8>) -> Option<Vec<u8>>;
@@ -93,8 +74,7 @@ impl FfiPreSharedKeyStorage {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl PreSharedKeyStorage for FfiPreSharedKeyStorage {
     type Error = FireflyError;
 
@@ -107,22 +87,6 @@ impl PreSharedKeyStorage for FfiPreSharedKeyStorage {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-#[async_trait::async_trait(?Send)]
-pub trait MlsGroupStateStorage {
-    async fn state(&self, group_id: Vec<u8>) -> Option<Zeroizing<Vec<u8>>>;
-    async fn epoch(&self, group_id: Vec<u8>, epoch_id: u64) -> Option<Zeroizing<Vec<u8>>>;
-    async fn write(
-        &self,
-        group_id: Vec<u8>,
-        state_data: Zeroizing<Vec<u8>>,
-        epoch_inserts: HashMap<u64, Zeroizing<Vec<u8>>>,
-        epoch_updates: HashMap<u64, Zeroizing<Vec<u8>>>,
-    ) -> bool;
-    async fn max_epoch_id(&self, group_id: Vec<u8>) -> Option<u64>;
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 pub trait MlsGroupStateStorage: Send + Sync {
     async fn state(&self, group_id: Vec<u8>) -> Option<Zeroizing<Vec<u8>>>;
@@ -150,8 +114,7 @@ impl FfiGroupStateStorage {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl GroupStateStorage for FfiGroupStateStorage {
     type Error = FireflyError;
 

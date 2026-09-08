@@ -2,6 +2,7 @@ use sqlx::{SqlitePool, prelude::*};
 
 use crate::db::setup_pool_from_path;
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct UserMessage {
     pub id: u64,
     pub other: String,
