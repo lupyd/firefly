@@ -16,7 +16,7 @@ echo " Server URL: $FIREFLY_BASE_URL"
 echo "=========================================="
 
 if [ "$#" -eq 0 ]; then
-    cargo test -- --test-threads=1
+    cargo test
 else
-    cargo test "$@" -- --test-threads=1
+    cargo test "$@"
 fi

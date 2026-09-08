@@ -80,7 +80,7 @@ jobs:
           export RUST_LOG=info
           export FIREFLY_BASE_URL=http://127.0.0.1:39209
           export FIREFLY_WS_URL=ws://127.0.0.1:39209
-          cargo test -- --test-threads=1
+          cargo test
 
       - name: Build WASM and JS packages
         run: |

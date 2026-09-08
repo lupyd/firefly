@@ -129,7 +129,13 @@ fn set_panic_handler() {
             backtrace
         );
         log::error!("{}", msg);
-        std::process::abort();
+        eprintln!("{}", msg);
+        if std::env::var("CARGO").is_err()
+            && std::env::var("RUST_TEST_THREADS").is_err()
+            && std::env::var("EMULATOR_MODE").is_err()
+        {
+            std::process::abort();
+        }
     }));
 }
 
