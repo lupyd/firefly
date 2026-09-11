@@ -155,10 +155,10 @@ impl<'a> FireflyGroupExtensionWrapper<'a> {
 
         let roles = &channel.roles;
         if let Ok(role_idx) = roles.search_by_key(&member_role, |x| x.id) {
-            Some(roles[role_idx].permissions);
+            return Some(roles[role_idx].permissions);
         }
 
-        return Some(channel.default_permissions);
+        Some(channel.default_permissions)
     }
 
     pub fn serialize(&self) -> Result<Vec<u8>, quick_protobuf::Error> {
