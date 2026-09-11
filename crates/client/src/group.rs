@@ -81,13 +81,14 @@ impl FfiMlsClient {
             if identity.is_valid_until_secs().unwrap_or_default() > current_timestamp_seconds + 5 {
                 identity
             } else if let Some(token) = callbacks.get_access_token().await {
-                let identity = FireflyIdentity::generate(
-                    token.clone(),
-                    base_url.clone(),
-                    device_id,
-                    address_id,
-                )
-                .await?;
+                let identity = identity
+                    .refresh(
+                        token.clone(),
+                        base_url.clone(),
+                        device_id,
+                        address_id,
+                    )
+                    .await?;
 
                 let serialized_identity = identity.to_vec()?;
 

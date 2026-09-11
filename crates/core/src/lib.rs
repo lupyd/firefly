@@ -532,9 +532,8 @@ impl FireflyMlsGroup {
             })
             .collect();
 
-        let mut commit_builder = group.commit_builder();
-
-        let mut invitee_addresses = Vec::new();
+        let mut last_expired_err = None;
+        let mut valid_packages = Vec::new();
 
         for package in packages.packages {
             if current_addresses.contains(&package.address) {
@@ -542,15 +541,44 @@ impl FireflyMlsGroup {
                 continue;
             }
 
+            if let Ok(message) = MlsMessage::from_bytes(&package.package) {
+                if let Some(kp) = message.as_key_package() {
+                    if let Ok(cred) = crate::config::FireflyCredential::from_signing_identity(kp.signing_identity()) {
+                        if !*crate::utils::EMULATOR_MODE && cred.is_expired().is_some() {
+                            let valid_until = cred.valid_until_secs().unwrap_or_default();
+                            let now = crate::utils::get_current_timestamp_in_secs();
+                            log::warn!(
+                                "Skipping stale device address {} for user {}: token expired valid_until {}: now {}",
+                                package.address, username, valid_until, now
+                            );
+                            last_expired_err = Some(anyhow::anyhow!(
+                                "token expired valid_until {}: now {}",
+                                valid_until, now
+                            ));
+                            continue;
+                        }
+                    }
+                }
+            }
+            valid_packages.push(package);
+        }
+
+        if valid_packages.is_empty() {
+            if let Some(err) = last_expired_err {
+                return Err(err);
+            }
+            log::info!("No new members to add, skipping commit");
+            return Ok(0);
+        }
+
+        let mut commit_builder = group.commit_builder();
+        let mut invitee_addresses = Vec::new();
+
+        for package in valid_packages {
             commit_builder =
                 commit_builder.add_member(MlsMessage::from_bytes(&package.package)?)?;
 
             invitee_addresses.push(package.address);
-        }
-
-        if invitee_addresses.is_empty() {
-            log::info!("No new members to add, skipping commit");
-            return Ok(0);
         }
 
         commit_builder = commit_builder.custom_proposal(
