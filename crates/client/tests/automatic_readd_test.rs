@@ -222,6 +222,7 @@ async fn test_automatic_readd() {
                 ..Default::default()
             },
         ),
+        message_type: 0,
     };
 
     // Bob2 might need to wait for his own sync or the GroupInvite

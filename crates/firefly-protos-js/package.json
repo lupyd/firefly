@@ -1,6 +1,6 @@
 {
   "name": "firefly-protos-js",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "Generated protobuf definitions and codecs for the Firefly MLS network",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -12,7 +12,6 @@
   "bugs": {
     "url": "https://github.com/lupyd/firefly/issues"
   },
-  
   "scripts": {
     "proto:gen": "mkdir -p src && protoc -I=../protos/protobufs message.proto --plugin=node_modules/ts-proto/protoc-gen-ts_proto --ts_proto_opt=forceLong=bigint --ts_proto_opt=env=browser --ts_proto_opt=esModuleInterop=true --ts_proto_out=src",
     "build": "pnpm run proto:gen && tsc",

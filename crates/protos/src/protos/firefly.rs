@@ -2653,6 +2653,7 @@ impl<'a> MessageWrite for EncryptedFiles<'a> {
 pub struct MessagePayload<'a> {
     pub text: Cow<'a, str>,
     pub files: Option<firefly::EncryptedFiles<'a>>,
+    pub message_type: u32,
     pub ext: firefly::mod_MessagePayload::OneOfext,
 }
 
@@ -2663,6 +2664,7 @@ impl<'a> MessageRead<'a> for MessagePayload<'a> {
             match r.next_tag(bytes) {
                 Ok(10) => msg.text = r.read_string(bytes).map(Cow::Borrowed)?,
                 Ok(26) => msg.files = Some(r.read_message::<firefly::EncryptedFiles>(bytes)?),
+                Ok(56) => msg.message_type = r.read_uint32(bytes)?,
                 Ok(33) => msg.ext = firefly::mod_MessagePayload::OneOfext::editedOf(r.read_fixed64(bytes)?),
                 Ok(41) => msg.ext = firefly::mod_MessagePayload::OneOfext::replyingTo(r.read_fixed64(bytes)?),
                 Ok(49) => msg.ext = firefly::mod_MessagePayload::OneOfext::deleted(r.read_fixed64(bytes)?),
@@ -2679,6 +2681,7 @@ impl<'a> MessageWrite for MessagePayload<'a> {
         0
         + if self.text == "" { 0 } else { 1 + sizeof_len((&self.text).len()) }
         + self.files.as_ref().map_or(0, |m| 1 + sizeof_len((m).get_size()))
+        + if self.message_type == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.message_type) as u64) }
         + match self.ext {
             firefly::mod_MessagePayload::OneOfext::editedOf(_) => 1 + 8,
             firefly::mod_MessagePayload::OneOfext::replyingTo(_) => 1 + 8,
@@ -2689,6 +2692,7 @@ impl<'a> MessageWrite for MessagePayload<'a> {
     fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
         if self.text != "" { w.write_with_tag(10, |w| w.write_string(&**&self.text))?; }
         if let Some(ref s) = self.files { w.write_with_tag(26, |w| w.write_message(s))?; }
+        if self.message_type != 0u32 { w.write_with_tag(56, |w| w.write_uint32(*&self.message_type))?; }
         match self.ext {            firefly::mod_MessagePayload::OneOfext::editedOf(ref m) => { w.write_with_tag(33, |w| w.write_fixed64(*m))? },
             firefly::mod_MessagePayload::OneOfext::replyingTo(ref m) => { w.write_with_tag(41, |w| w.write_fixed64(*m))? },
             firefly::mod_MessagePayload::OneOfext::deleted(ref m) => { w.write_with_tag(49, |w| w.write_fixed64(*m))? },
@@ -2801,6 +2805,7 @@ impl<'a> MessageWrite for SelfUserMessage<'a> {
 #[derive(Debug, Default, PartialEq, Clone)]
 pub struct UserMessageInner<'a> {
     pub nonce: u32,
+    pub message_type: u32,
     pub message: firefly::mod_UserMessageInner::OneOfmessage<'a>,
 }
 
@@ -2810,6 +2815,7 @@ impl<'a> MessageRead<'a> for UserMessageInner<'a> {
         while !r.is_eof() {
             match r.next_tag(bytes) {
                 Ok(85) => msg.nonce = r.read_fixed32(bytes)?,
+                Ok(40) => msg.message_type = r.read_uint32(bytes)?,
                 Ok(10) => msg.message = firefly::mod_UserMessageInner::OneOfmessage::plainText(r.read_bytes(bytes).map(Cow::Borrowed)?),
                 Ok(18) => msg.message = firefly::mod_UserMessageInner::OneOfmessage::callMessage(r.read_message::<firefly::CallMessage>(bytes)?),
                 Ok(26) => msg.message = firefly::mod_UserMessageInner::OneOfmessage::messagePayload(r.read_message::<firefly::MessagePayload>(bytes)?),
@@ -2826,6 +2832,7 @@ impl<'a> MessageWrite for UserMessageInner<'a> {
     fn get_size(&self) -> usize {
         0
         + if self.nonce == 0u32 { 0 } else { 1 + 4 }
+        + if self.message_type == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.message_type) as u64) }
         + match self.message {
             firefly::mod_UserMessageInner::OneOfmessage::plainText(ref m) => 1 + sizeof_len((m).len()),
             firefly::mod_UserMessageInner::OneOfmessage::callMessage(ref m) => 1 + sizeof_len((m).get_size()),
@@ -2836,6 +2843,7 @@ impl<'a> MessageWrite for UserMessageInner<'a> {
 
     fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
         if self.nonce != 0u32 { w.write_with_tag(85, |w| w.write_fixed32(*&self.nonce))?; }
+        if self.message_type != 0u32 { w.write_with_tag(40, |w| w.write_uint32(*&self.message_type))?; }
         match self.message {            firefly::mod_UserMessageInner::OneOfmessage::plainText(ref m) => { w.write_with_tag(10, |w| w.write_bytes(&**m))? },
             firefly::mod_UserMessageInner::OneOfmessage::callMessage(ref m) => { w.write_with_tag(18, |w| w.write_message(m))? },
             firefly::mod_UserMessageInner::OneOfmessage::messagePayload(ref m) => { w.write_with_tag(26, |w| w.write_message(m))? },
@@ -2870,6 +2878,7 @@ impl<'a> Default for OneOfmessage<'a> {
 #[derive(Debug, Default, PartialEq, Clone)]
 pub struct GroupMessageInner<'a> {
     pub channelId: u32,
+    pub message_type: u32,
     pub message: firefly::mod_GroupMessageInner::OneOfmessage<'a>,
 }
 
@@ -2879,6 +2888,7 @@ impl<'a> MessageRead<'a> for GroupMessageInner<'a> {
         while !r.is_eof() {
             match r.next_tag(bytes) {
                 Ok(8) => msg.channelId = r.read_uint32(bytes)?,
+                Ok(24) => msg.message_type = r.read_uint32(bytes)?,
                 Ok(18) => msg.message = firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(r.read_message::<firefly::MessagePayload>(bytes)?),
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
@@ -2892,6 +2902,7 @@ impl<'a> MessageWrite for GroupMessageInner<'a> {
     fn get_size(&self) -> usize {
         0
         + if self.channelId == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.channelId) as u64) }
+        + if self.message_type == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.message_type) as u64) }
         + match self.message {
             firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(ref m) => 1 + sizeof_len((m).get_size()),
             firefly::mod_GroupMessageInner::OneOfmessage::None => 0,
@@ -2899,6 +2910,7 @@ impl<'a> MessageWrite for GroupMessageInner<'a> {
 
     fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
         if self.channelId != 0u32 { w.write_with_tag(8, |w| w.write_uint32(*&self.channelId))?; }
+        if self.message_type != 0u32 { w.write_with_tag(24, |w| w.write_uint32(*&self.message_type))?; }
         match self.message {            firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(ref m) => { w.write_with_tag(18, |w| w.write_message(m))? },
             firefly::mod_GroupMessageInner::OneOfmessage::None => {},
     }        Ok(())

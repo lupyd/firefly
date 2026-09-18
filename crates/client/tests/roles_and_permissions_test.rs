@@ -595,6 +595,7 @@ async fn test_channel_permissions_overrides_and_restriction() {
                 ..Default::default()
             },
         ),
+        message_type: 0,
     };
 
     let send_result = charlie.upload_group_message(group_id, read_only_msg, 0).await;

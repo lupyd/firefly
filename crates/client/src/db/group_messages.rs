@@ -9,6 +9,8 @@ pub struct GroupMessage {
     pub message: Vec<u8>,
     pub channel_id: u32,
     pub epoch: u32,
+    #[serde(default)]
+    pub message_type: u32,
 }
 
 #[derive(Clone)]
@@ -27,18 +29,26 @@ impl GroupMessagesStore {
             message BLOB NOT NULL,
             channel_id INTEGER NOT NULL,
             epoch INTEGER NOT NULL DEFAULT 0,
+            message_type INTEGER NOT NULL DEFAULT 0,
 
             PRIMARY KEY (group_id, id)
-        )
+        );
+
+        CREATE INDEX IF NOT EXISTS group_messages_type_idx ON group_messages (group_id, message_type);
         "#,
         )
         .await?;
+
+        // Migration for existing tables without message_type column
+        let _ = pool
+            .execute("ALTER TABLE group_messages ADD COLUMN message_type INTEGER NOT NULL DEFAULT 0")
+            .await;
 
         Ok(Self { pool })
     }
 
     pub async fn update_cursor(&self, id: u64, group_id: u64, epoch: u32) -> anyhow::Result<()> {
-        self.add(id, group_id, 0, epoch, "", "".as_bytes()).await
+        self.add(id, group_id, 0, epoch, "", "".as_bytes(), 0).await
     }
 
     pub async fn add(
@@ -49,18 +59,20 @@ impl GroupMessagesStore {
         epoch: u32,
         by: &str,
         message: &[u8],
+        message_type: u32,
     ) -> anyhow::Result<()> {
         log::info!(
-            "store insert: group_message id={} group_id={}, channel_id={} by={}",
+            "store insert: group_message id={} group_id={}, channel_id={} by={} message_type={}",
             id,
             group_id,
             channel_id,
-            by
+            by,
+            message_type
         );
         sqlx::query(
             r#"
-        INSERT INTO group_messages (id, group_id, by, message, channel_id, epoch)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO group_messages (id, group_id, by, message, channel_id, epoch, message_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         "#,
         )
         .bind(id as i64)
@@ -69,6 +81,7 @@ impl GroupMessagesStore {
         .bind(message)
         .bind(channel_id)
         .bind(epoch)
+        .bind(message_type as i64)
         .execute(&self.pool)
         .await?;
 
@@ -83,7 +96,7 @@ impl GroupMessagesStore {
     ) -> anyhow::Result<Vec<GroupMessage>> {
         let rows = sqlx::query(
             r#"
-        SELECT id, by, message, channel_id, group_id, epoch
+        SELECT id, by, message, channel_id, group_id, epoch, message_type
         FROM group_messages
         WHERE group_id = ? AND id < ?
         ORDER BY id DESC LIMIT ?
@@ -101,10 +114,44 @@ impl GroupMessagesStore {
             .collect::<Result<Vec<_>, _>>()?)
     }
 
+    pub async fn get_pinned_messages(&self, group_id: u64) -> anyhow::Result<Vec<GroupMessage>> {
+        let rows = sqlx::query(
+            r#"
+        SELECT id, by, message, channel_id, group_id, epoch, message_type
+        FROM group_messages
+        WHERE group_id = ? AND (message_type & 1) != 0
+        ORDER BY id ASC
+        "#,
+        )
+        .bind(group_id as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(GroupMessage::from_row)
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub async fn update_message_type(
+        &self,
+        group_id: u64,
+        id: u64,
+        message_type: u32,
+    ) -> anyhow::Result<()> {
+        sqlx::query("UPDATE group_messages SET message_type = ? WHERE group_id = ? AND id = ?")
+            .bind(message_type as i64)
+            .bind(group_id as i64)
+            .bind(id as i64)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn get_all_last_messages(&self) -> anyhow::Result<Vec<GroupMessage>> {
         let rows = sqlx::query(
             r#"
-SELECT gm.group_id, gm.id, gm.by, gm.message, gm.channel_id, gm.epoch
+SELECT gm.group_id, gm.id, gm.by, gm.message, gm.channel_id, gm.epoch, gm.message_type
 FROM group_messages gm
 JOIN (
     SELECT group_id, MAX(id) AS max_id
@@ -125,7 +172,7 @@ AND gm.id = last.max_id;
     }
 
     pub async fn get_last_message_of_group(&self, group_id: u64) -> anyhow::Result<GroupMessage> {
-        let row = sqlx::query("SELECT group_id, id, by, message, channel_id, epoch FROM group_messages WHERE group_id = ? ORDER BY id DESC LIMIT 1").bind(group_id as i64).fetch_one(&self.pool).await?;
+        let row = sqlx::query("SELECT group_id, id, by, message, channel_id, epoch, message_type FROM group_messages WHERE group_id = ? ORDER BY id DESC LIMIT 1").bind(group_id as i64).fetch_one(&self.pool).await?;
         Ok(GroupMessage::from_row(&row)?)
     }
 
@@ -160,8 +207,26 @@ mod tests {
         let pool = setup_test_db().await;
         let store = GroupMessagesStore::new(pool).await.unwrap();
 
-        let result = store.add(1, 100, 1, 1, "user1", &[1, 2, 3]).await;
+        let result = store.add(1, 100, 1, 1, "user1", &[1, 2, 3], 0).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pinned_messages() {
+        let pool = setup_test_db().await;
+        let store = GroupMessagesStore::new(pool).await.unwrap();
+
+        store.add(1, 100, 1, 1, "user1", &[1], 0).await.unwrap();
+        store.add(2, 100, 1, 1, "user2", &[2], 1).await.unwrap();
+
+        let pinned = store.get_pinned_messages(100).await.unwrap();
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0].id, 2);
+        assert_eq!(pinned[0].message_type, 1);
+
+        store.update_message_type(100, 1, 1).await.unwrap();
+        let pinned_updated = store.get_pinned_messages(100).await.unwrap();
+        assert_eq!(pinned_updated.len(), 2);
     }
 
     #[tokio::test]
@@ -178,9 +243,9 @@ mod tests {
         let pool = setup_test_db().await;
         let store = GroupMessagesStore::new(pool).await.unwrap();
 
-        store.add(1, 100, 1, 1, "user1", &[1]).await.unwrap();
-        store.add(3, 100, 1, 1, "user2", &[3]).await.unwrap();
-        store.add(2, 100, 1, 1, "user3", &[2]).await.unwrap();
+        store.add(1, 100, 1, 1, "user1", &[1], 0).await.unwrap();
+        store.add(3, 100, 1, 1, "user2", &[3], 0).await.unwrap();
+        store.add(2, 100, 1, 1, "user3", &[2], 0).await.unwrap();
 
         let messages = store.get(100, 10, 10).await.unwrap();
         assert_eq!(messages.len(), 3);
@@ -195,7 +260,7 @@ mod tests {
         let store = GroupMessagesStore::new(pool).await.unwrap();
 
         for i in 1..=5 {
-            store.add(i, 100, 1, 1, "user", &[i as u8]).await.unwrap();
+            store.add(i, 100, 1, 1, "user", &[i as u8], 0).await.unwrap();
         }
 
         let messages = store.get(100, 10, 2).await.unwrap();
@@ -209,9 +274,9 @@ mod tests {
         let pool = setup_test_db().await;
         let store = GroupMessagesStore::new(pool).await.unwrap();
 
-        store.add(1, 100, 1, 1, "user1", &[1]).await.unwrap();
-        store.add(2, 100, 1, 1, "user2", &[2]).await.unwrap();
-        store.add(3, 100, 1, 1, "user3", &[3]).await.unwrap();
+        store.add(1, 100, 1, 1, "user1", &[1], 0).await.unwrap();
+        store.add(2, 100, 1, 1, "user2", &[2], 0).await.unwrap();
+        store.add(3, 100, 1, 1, "user3", &[3], 0).await.unwrap();
 
         let messages = store.get(100, 3, 10).await.unwrap();
         assert_eq!(messages.len(), 2);
@@ -224,8 +289,8 @@ mod tests {
         let pool = setup_test_db().await;
         let store = GroupMessagesStore::new(pool).await.unwrap();
 
-        store.add(1, 100, 1, 1, "user1", &[1]).await.unwrap();
-        store.add(2, 200, 1, 1, "user2", &[2]).await.unwrap();
+        store.add(1, 100, 1, 1, "user1", &[1], 0).await.unwrap();
+        store.add(2, 200, 1, 1, "user2", &[2], 0).await.unwrap();
 
         let messages_100 = store.get(100, 10, 10).await.unwrap();
         let messages_200 = store.get(200, 10, 10).await.unwrap();
@@ -250,8 +315,8 @@ mod tests {
         let pool = setup_test_db().await;
         let store = GroupMessagesStore::new(pool).await.unwrap();
 
-        store.add(1, 100, 1, 1, "user1", &[1]).await.unwrap();
-        store.add(2, 100, 1, 1, "user2", &[2]).await.unwrap();
+        store.add(1, 100, 1, 1, "user1", &[1], 0).await.unwrap();
+        store.add(2, 100, 1, 1, "user2", &[2], 0).await.unwrap();
 
         let messages = store.get_all_last_messages().await.unwrap();
         assert_eq!(messages.len(), 1);
@@ -264,10 +329,10 @@ mod tests {
         let pool = setup_test_db().await;
         let store = GroupMessagesStore::new(pool).await.unwrap();
 
-        store.add(1, 100, 1, 1, "user1", &[1]).await.unwrap();
-        store.add(3, 100, 1, 1, "user2", &[3]).await.unwrap();
-        store.add(2, 200, 1, 1, "user3", &[2]).await.unwrap();
-        store.add(4, 300, 1, 1, "user4", &[4]).await.unwrap();
+        store.add(1, 100, 1, 1, "user1", &[1], 0).await.unwrap();
+        store.add(3, 100, 1, 1, "user2", &[3], 0).await.unwrap();
+        store.add(2, 200, 1, 1, "user3", &[2], 0).await.unwrap();
+        store.add(4, 300, 1, 1, "user4", &[4], 0).await.unwrap();
 
         let messages = store.get_all_last_messages().await.unwrap();
         assert_eq!(messages.len(), 3);
@@ -290,7 +355,7 @@ mod tests {
         let username = "test_user";
 
         store
-            .add(1, 100, 1, 1, username, &message_data)
+            .add(1, 100, 1, 1, username, &message_data, 0)
             .await
             .unwrap();
 
@@ -305,9 +370,9 @@ mod tests {
         let pool = setup_test_db().await;
         let store = GroupMessagesStore::new(pool).await.unwrap();
 
-        store.add(1, 100, 1, 1, "user1", &[1]).await.unwrap();
-        store.add(3, 100, 1, 1, "user2", &[3]).await.unwrap();
-        store.add(2, 100, 1, 1, "user3", &[2]).await.unwrap();
+        store.add(1, 100, 1, 1, "user1", &[1], 0).await.unwrap();
+        store.add(3, 100, 1, 1, "user2", &[3], 0).await.unwrap();
+        store.add(2, 100, 1, 1, "user3", &[2], 0).await.unwrap();
 
         let last_message = store.get_last_message_of_group(100).await.unwrap();
         assert_eq!(last_message.id, 3);
@@ -320,9 +385,9 @@ mod tests {
         let pool = setup_test_db().await;
         let store = GroupMessagesStore::new(pool).await.unwrap();
 
-        store.add(1, 100, 1, 1, "user1", &[1]).await.unwrap();
-        store.add(2, 100, 1, 1, "user2", &[2]).await.unwrap();
-        store.add(3, 200, 1, 1, "user3", &[3]).await.unwrap();
+        store.add(1, 100, 1, 1, "user1", &[1], 0).await.unwrap();
+        store.add(2, 100, 1, 1, "user2", &[2], 0).await.unwrap();
+        store.add(3, 200, 1, 1, "user3", &[3], 0).await.unwrap();
 
         assert_eq!(store.get(100, 10, 10).await.unwrap().len(), 2);
         assert_eq!(store.get(200, 10, 10).await.unwrap().len(), 1);
@@ -338,7 +403,7 @@ mod tests {
         let pool = setup_test_db().await;
         let store = GroupMessagesStore::new(pool).await.unwrap();
 
-        store.add(1, 100, 1, 1, "user1", &[1]).await.unwrap();
+        store.add(1, 100, 1, 1, "user1", &[1], 0).await.unwrap();
         assert_eq!(store.get_last_message_of_group(100).await.unwrap().id, 1);
 
         // Advance cursor via commit/readd id without full message body

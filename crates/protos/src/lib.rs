@@ -4,6 +4,9 @@ use bytes::{BufMut, Bytes, BytesMut};
 pub use protos::*;
 use quick_protobuf::Writer;
 
+pub const MESSAGE_TYPE_NORMAL: u32 = 0;
+pub const MESSAGE_TYPE_PINNED: u32 = 1 << 0;
+
 pub fn deserialize_proto<'a, 'b: 'a, T: quick_protobuf::MessageRead<'a> + Sized>(
     bytes: &'b [u8],
 ) -> Result<T, quick_protobuf::Error> {
@@ -17,3 +20,4 @@ pub fn serialize_proto<T: quick_protobuf::MessageWrite + Sized>(
     msg.write_message(&mut Writer::new(&mut writer))?;
     Ok(writer.into_inner().freeze())
 }
+

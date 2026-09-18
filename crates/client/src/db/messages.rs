@@ -8,6 +8,8 @@ pub struct UserMessage {
     pub other: String,
     pub message: Vec<u8>,
     pub sent_by_other: bool,
+    #[serde(default)]
+    pub message_type: u32,
 }
 
 pub struct LastMessageAndUnreadCount {
@@ -26,10 +28,12 @@ CREATE TABLE IF NOT EXISTS user_messages (
     id INTEGER NOT NULL,
     other TEXT NOT NULL,
     sent_by_other BOOLEAN NOT NULL,
-    message BLOB NOT NULL
+    message BLOB NOT NULL,
+    message_type INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS user_messages_other_idx ON user_messages (other, id);
+CREATE INDEX IF NOT EXISTS user_messages_other_type_idx ON user_messages (other, message_type);
 
 CREATE TABLE IF NOT EXISTS last_seen_user_timestamps (
     other TEXT NOT NULL PRIMARY KEY,
@@ -39,8 +43,16 @@ CREATE TABLE IF NOT EXISTS last_seen_user_timestamps (
 
         let mut conn = pool.acquire().await?;
         for stmt in sql.split(';') {
-            conn.execute(stmt).await?;
+            let trimmed = stmt.trim();
+            if !trimmed.is_empty() {
+                conn.execute(trimmed).await?;
+            }
         }
+
+        // Migration for existing tables without message_type column
+        let _ = conn
+            .execute("ALTER TABLE user_messages ADD COLUMN message_type INTEGER NOT NULL DEFAULT 0")
+            .await;
 
         Ok(Self { pool })
     }
@@ -60,7 +72,7 @@ impl MessagesStore {
         limit: i64,
     ) -> anyhow::Result<Vec<UserMessage>> {
         let rows = sqlx::query(
-            "SELECT other, message, sent_by_other, id FROM user_messages WHERE other = ? AND id < ? ORDER BY id DESC LIMIT ?",
+            "SELECT other, message, sent_by_other, id, message_type FROM user_messages WHERE other = ? AND id < ? ORDER BY id DESC LIMIT ?",
         )
         .bind(other)
         .bind(before)
@@ -70,11 +82,36 @@ impl MessagesStore {
         let mut messages = Vec::<UserMessage>::with_capacity(rows.len());
 
         for row in rows {
+            let message_type: i64 = row.try_get("message_type").unwrap_or(0);
             messages.push(UserMessage {
                 id: row.try_get("id")?,
                 other: row.try_get("other")?,
                 message: row.try_get("message")?,
                 sent_by_other: row.try_get("sent_by_other")?,
+                message_type: message_type as u32,
+            });
+        }
+
+        Ok(messages)
+    }
+
+    pub async fn get_pinned_messages_of(&self, other: &str) -> anyhow::Result<Vec<UserMessage>> {
+        let rows = sqlx::query(
+            "SELECT other, message, sent_by_other, id, message_type FROM user_messages WHERE other = ? AND (message_type & 1) != 0 ORDER BY id ASC",
+        )
+        .bind(other)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut messages = Vec::<UserMessage>::with_capacity(rows.len());
+
+        for row in rows {
+            let message_type: i64 = row.try_get("message_type").unwrap_or(0);
+            messages.push(UserMessage {
+                id: row.try_get("id")?,
+                other: row.try_get("other")?,
+                message: row.try_get("message")?,
+                sent_by_other: row.try_get("sent_by_other")?,
+                message_type: message_type as u32,
             });
         }
 
@@ -100,7 +137,8 @@ impl MessagesStore {
                     s.unread_count,
                     m.id,
                     m.sent_by_other,
-                    m.message
+                    m.message,
+                    m.message_type
                 FROM stats AS s
                 JOIN user_messages AS m
                     ON m.other = s.other
@@ -110,11 +148,13 @@ impl MessagesStore {
         let mut messages = Vec::<LastMessageAndUnreadCount>::with_capacity(rows.len());
 
         for row in rows {
+            let message_type: i64 = row.try_get("message_type").unwrap_or(0);
             let message = UserMessage {
                 id: row.try_get("id")?,
                 other: row.try_get("other")?,
                 message: row.try_get("message")?,
                 sent_by_other: row.try_get("sent_by_other")?,
+                message_type: message_type as u32,
             };
 
             let count: i64 = row.try_get("unread_count")?;
@@ -129,12 +169,13 @@ impl MessagesStore {
 
     pub async fn insert_user_message(&self, row: UserMessage) -> anyhow::Result<()> {
         sqlx::query(
-            "INSERT INTO user_messages (id, other, message, sent_by_other) VALUES (?, ?, ?, ?)",
+            "INSERT INTO user_messages (id, other, message, sent_by_other, message_type) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(row.id as i64)
         .bind(row.other)
         .bind(row.message)
         .bind(row.sent_by_other)
+        .bind(row.message_type as i64)
         .execute(&self.pool)
         .await?;
 
@@ -195,6 +236,21 @@ impl MessagesStore {
             .await?;
         Ok(())
     }
+
+    pub async fn update_message_type(
+        &self,
+        other: &str,
+        id: u64,
+        message_type: u32,
+    ) -> anyhow::Result<()> {
+        sqlx::query("UPDATE user_messages SET message_type = ? WHERE other = ? AND id = ?")
+            .bind(message_type as i64)
+            .bind(other)
+            .bind(id as i64)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -223,6 +279,7 @@ mod tests {
             other: "alice".to_string(),
             message: vec![1, 2, 3],
             sent_by_other: false,
+            message_type: 0,
         };
 
         store.insert_user_message(msg).await.unwrap();
@@ -234,6 +291,45 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].other, "alice");
         assert_eq!(messages[0].message, vec![1, 2, 3]);
+        assert_eq!(messages[0].message_type, 0);
+    }
+
+    #[tokio::test]
+    async fn test_pinned_messages() {
+        let pool = setup_pool(DB_URI, 1).await.unwrap();
+        let store = MessagesStore::new(pool).await.unwrap();
+
+        store
+            .insert_user_message(UserMessage {
+                id: 1,
+                other: "alice".to_string(),
+                message: vec![1],
+                sent_by_other: true,
+                message_type: 0,
+            })
+            .await
+            .unwrap();
+
+        store
+            .insert_user_message(UserMessage {
+                id: 2,
+                other: "alice".to_string(),
+                message: vec![2],
+                sent_by_other: false,
+                message_type: 1, // Pinned bitflag
+            })
+            .await
+            .unwrap();
+
+        let pinned = store.get_pinned_messages_of("alice").await.unwrap();
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0].id, 2);
+        assert_eq!(pinned[0].message_type, 1);
+
+        // Update message 1 to pinned
+        store.update_message_type("alice", 1, 1).await.unwrap();
+        let pinned_updated = store.get_pinned_messages_of("alice").await.unwrap();
+        assert_eq!(pinned_updated.len(), 2);
     }
 
     #[tokio::test]
@@ -247,6 +343,7 @@ mod tests {
                 other: "alice".to_string(),
                 message: vec![1],
                 sent_by_other: true,
+                message_type: 0,
             })
             .await
             .unwrap();
@@ -257,6 +354,7 @@ mod tests {
                 other: "bob".to_string(),
                 message: vec![2],
                 sent_by_other: false,
+                message_type: 0,
             })
             .await
             .unwrap();
@@ -279,6 +377,7 @@ mod tests {
                 other: "alice".to_string(),
                 message: vec![1],
                 sent_by_other: true,
+                message_type: 0,
             })
             .await
             .unwrap();

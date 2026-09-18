@@ -191,6 +191,7 @@ async fn test_offline_group_operations() {
                 ..Default::default()
             },
         ),
+        message_type: 0,
     };
     let payload = firefly_protos::serialize_proto(&group_msg)
         .unwrap()

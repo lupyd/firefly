@@ -823,7 +823,16 @@ impl FireflyWsClient {
         to: String,
         payload: Vec<u8>,
     ) -> anyhow::Result<UserMessage> {
-        let result = self.encrypt_and_send_internal(&to, &payload).await;
+        self.encrypt_and_send_with_type(to, payload, 0).await
+    }
+
+    pub async fn encrypt_and_send_with_type(
+        &self,
+        to: String,
+        payload: Vec<u8>,
+        message_type: u32,
+    ) -> anyhow::Result<UserMessage> {
+        let result = self.encrypt_and_send_internal(&to, &payload, message_type).await;
         match result {
             Ok(msg) => Ok(msg),
             Err(err) => {
@@ -840,17 +849,26 @@ impl FireflyWsClient {
                         return Err(err);
                     }
                     log::info!("re-registered device address successfully, retrying encrypt_and_send");
-                    return self.encrypt_and_send_internal(&to, &payload).await;
+                    return self.encrypt_and_send_internal(&to, &payload, message_type).await;
                 }
                 Err(err)
             }
         }
     }
 
+    pub async fn encrypt_and_send_pinned(
+        &self,
+        to: String,
+        payload: Vec<u8>,
+    ) -> anyhow::Result<UserMessage> {
+        self.encrypt_and_send_with_type(to, payload, firefly_protos::MESSAGE_TYPE_PINNED).await
+    }
+
     async fn encrypt_and_send_internal(
         &self,
         to: &str,
         payload: &[u8],
+        message_type: u32,
     ) -> anyhow::Result<UserMessage> {
         let token = self
             .callbacks
@@ -890,13 +908,49 @@ impl FireflyWsClient {
         let message_settings = 0;
         let self_message_settings = 1;
 
+        let mut effective_payload = payload.to_vec();
+        let mut effective_type = message_type;
+
+        if let Ok(mut inner) = deserialize_proto::<firefly::UserMessageInner>(&effective_payload) {
+            let inner_type = inner.message_type | match &inner.message {
+                firefly::mod_UserMessageInner::OneOfmessage::messagePayload(p) => p.message_type,
+                _ => 0,
+            };
+            effective_type |= inner_type;
+            if message_type != 0 {
+                inner.message_type |= message_type;
+                if let firefly::mod_UserMessageInner::OneOfmessage::messagePayload(ref mut p) = inner.message {
+                    p.message_type |= message_type;
+                }
+                if let Ok(ser) = serialize_proto(&inner) {
+                    effective_payload = ser.to_vec();
+                }
+            }
+        } else if message_type != 0 {
+            let inner = firefly::UserMessageInner {
+                message: firefly::mod_UserMessageInner::OneOfmessage::messagePayload(
+                    firefly::MessagePayload {
+                        text: String::from_utf8_lossy(payload).into_owned().into(),
+                        files: None,
+                        ext: firefly::mod_MessagePayload::OneOfext::None,
+                        message_type,
+                    },
+                ),
+                nonce: rng().next_u32(),
+                message_type,
+            };
+            if let Ok(ser) = serialize_proto(&inner) {
+                effective_payload = ser.to_vec();
+            }
+        }
+
         for address in other_addresses.iter() {
             let message = self
                 .create_encrypted_message(
                     ProtocolAddress::new(to.to_string(), DeviceId::new(address.device_id)?),
                     address.address_id,
                     message_settings,
-                    payload.to_vec(),
+                    effective_payload.clone(),
                 )
                 .await?;
             message_entries.messages.push(message);
@@ -905,10 +959,11 @@ impl FireflyWsClient {
             message: firefly::mod_UserMessageInner::OneOfmessage::selfMessage(
                 firefly::SelfUserMessage {
                     to: to.to_string().into(),
-                    inner: payload.to_vec().into(),
+                    inner: effective_payload.clone().into(),
                 },
             ),
             nonce: rng().next_u32(),
+            message_type: effective_type,
         })?
         .to_vec();
         {
@@ -989,8 +1044,9 @@ impl FireflyWsClient {
             return Ok(UserMessage {
                 id: get_current_timestamp_microseconds_since_epoch(),
                 other: to.to_string(),
-                message: payload.to_vec(),
+                message: effective_payload,
                 sent_by_other: false,
+                message_type: effective_type,
             });
         }
 
@@ -1016,7 +1072,7 @@ impl FireflyWsClient {
                         protocol_address,
                         address.address_id,
                         message_settings,
-                        payload.to_vec(),
+                        effective_payload.clone(),
                     )
                 };
 
@@ -1054,8 +1110,9 @@ impl FireflyWsClient {
         Ok(UserMessage {
             id: get_current_timestamp_microseconds_since_epoch(),
             other: to.to_string(),
-            message: payload.to_vec(),
+            message: effective_payload,
             sent_by_other: false,
+            message_type: effective_type,
         })
     }
 
@@ -1708,6 +1765,10 @@ impl FireflyWsClient {
             .update_cursor(id, groupId, group.epoch().await as u32)
             .await?;
 
+        if let Err(err) = self.re_encrypt_and_send_pinned_messages(groupId).await {
+            log::warn!("Failed to re-encrypt pinned messages after re_add_member: {:?}", err);
+        }
+
         log::info!("[re_add_member] Successfully committed re-add. Notifying server to delete reAdd request...");
         let response = HTTP_CLIENT
             .delete(format!(
@@ -1891,6 +1952,31 @@ impl FireflyWsClient {
                 .context("token not found")?,
         )?;
 
+        let effective_type = message.message_type
+            | match &message.message {
+                firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(p) => p.message_type,
+                _ => 0,
+            };
+
+        if (effective_type & firefly_protos::MESSAGE_TYPE_PINNED) != 0 {
+            if let Ok(existing_pinned) = self.group_messages_store.get_pinned_messages(groupId).await {
+                for existing in existing_pinned {
+                    if existing.id != uploaded_group_message.id
+                        && is_same_pinned_group_message(&existing.message, &payload)
+                    {
+                        let _ = self
+                            .group_messages_store
+                            .update_message_type(
+                                groupId,
+                                existing.id,
+                                existing.message_type & !firefly_protos::MESSAGE_TYPE_PINNED,
+                            )
+                            .await;
+                    }
+                }
+            }
+        }
+
         self.group_messages_store
             .add(
                 uploaded_group_message.id,
@@ -1899,10 +1985,104 @@ impl FireflyWsClient {
                 uploaded_group_message.epoch,
                 &claims.uname,
                 &payload,
+                effective_type,
             )
             .await?;
 
         Ok(uploaded_group_message.id)
+    }
+
+    pub async fn re_encrypt_and_send_pinned_messages(&self, group_id: u64) -> anyhow::Result<()> {
+        let pinned_messages = self.group_messages_store.get_pinned_messages(group_id).await?;
+        if pinned_messages.is_empty() {
+            return Ok(());
+        }
+        log::info!(
+            "[re_encrypt_and_send_pinned_messages] Found {} pinned messages to re-encrypt for group {}",
+            pinned_messages.len(),
+            group_id
+        );
+
+        for pinned in pinned_messages {
+            let inner = match deserialize_proto::<firefly::GroupMessageInner>(&pinned.message) {
+                Ok(mut inner) => {
+                    inner.message_type |= firefly_protos::MESSAGE_TYPE_PINNED;
+                    if let firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(ref mut p) = inner.message {
+                        p.message_type |= firefly_protos::MESSAGE_TYPE_PINNED;
+                    }
+                    inner
+                }
+                Err(_) => {
+                    firefly::GroupMessageInner {
+                        channelId: pinned.channel_id,
+                        message: firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(
+                            firefly::MessagePayload {
+                                text: String::from_utf8_lossy(&pinned.message).into_owned().into(),
+                                files: None,
+                                ext: firefly::mod_MessagePayload::OneOfext::None,
+                                message_type: firefly_protos::MESSAGE_TYPE_PINNED,
+                            },
+                        ),
+                        message_type: firefly_protos::MESSAGE_TYPE_PINNED,
+                    }
+                }
+            };
+
+            match self.upload_group_message(group_id, inner, 0).await {
+                Ok(new_id) => {
+                    log::info!(
+                        "[re_encrypt_and_send_pinned_messages] Successfully re-encrypted pinned message (old_id: {}, new_id: {}) in group {}",
+                        pinned.id,
+                        new_id,
+                        group_id
+                    );
+                    let _ = self
+                        .group_messages_store
+                        .update_message_type(
+                            group_id,
+                            pinned.id,
+                            pinned.message_type & !firefly_protos::MESSAGE_TYPE_PINNED,
+                        )
+                        .await;
+                }
+                Err(err) => {
+                    log::warn!(
+                        "[re_encrypt_and_send_pinned_messages] Failed to re-encrypt pinned message {} in group {}: {:?}",
+                        pinned.id,
+                        group_id,
+                        err
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn encrypt_and_send_group_with_type(
+        &self,
+        group_id: u64,
+        payload: Vec<u8>,
+        message_type: u32,
+    ) -> anyhow::Result<u64> {
+        let mut message = deserialize_proto::<firefly::GroupMessageInner<'_>>(&payload)?;
+        message.message_type |= message_type;
+        if let firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(ref mut p) = message.message {
+            p.message_type |= message_type;
+        }
+        self.upload_group_message(group_id, message, 0).await
+    }
+
+    pub async fn encrypt_and_send_group_pinned(
+        &self,
+        group_id: u64,
+        payload: Vec<u8>,
+    ) -> anyhow::Result<u64> {
+        self.encrypt_and_send_group_with_type(group_id, payload, firefly_protos::MESSAGE_TYPE_PINNED).await
+    }
+
+    pub fn group_message_store(&self) -> GroupMessagesStore {
+        self.group_messages_store.clone()
     }
 
     async fn join_group(
@@ -2513,6 +2693,10 @@ impl FireflyWsClient {
             .update_cursor(id, group_id, group.epoch().await as u32)
             .await?;
 
+        if let Err(err) = self.re_encrypt_and_send_pinned_messages(group_id).await {
+            log::warn!("Failed to re-encrypt pinned messages after add_group_member: {:?}", err);
+        }
+
         Ok(())
     }
 
@@ -2683,6 +2867,29 @@ impl FireflyWsClient {
     }
 }
 
+fn is_same_pinned_group_message(a_bytes: &[u8], b_bytes: &[u8]) -> bool {
+    if a_bytes == b_bytes {
+        return true;
+    }
+    if let (Ok(a), Ok(b)) = (
+        deserialize_proto::<firefly::GroupMessageInner>(a_bytes),
+        deserialize_proto::<firefly::GroupMessageInner>(b_bytes),
+    ) {
+        if a.channelId == b.channelId {
+            match (&a.message, &b.message) {
+                (
+                    firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(pa),
+                    firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(pb),
+                ) => {
+                    return pa.text == pb.text && pa.files == pb.files;
+                }
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
 async fn on_group_message(
     msg: &firefly::GroupMessage<'_>,
     firefly_mls_client: &FfiMlsClient,
@@ -2744,9 +2951,33 @@ async fn on_group_message(
     let epoch = group.epoch().await as u32;
     match message {
         crate::group::FireflyMlsReceivedMessage::Message(encrypted_group_message) => {
-            let channelId =
-                deserialize_proto::<firefly::GroupMessageInner>(&encrypted_group_message.message)?
-                    .channelId;
+            let inner = deserialize_proto::<firefly::GroupMessageInner>(&encrypted_group_message.message).ok();
+            let channelId = inner.as_ref().map(|i| i.channelId).unwrap_or(0);
+            let message_type = inner.as_ref().map(|i| {
+                i.message_type
+                    | match &i.message {
+                        firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(p) => p.message_type,
+                        _ => 0,
+                    }
+            }).unwrap_or(0);
+
+            if (message_type & firefly_protos::MESSAGE_TYPE_PINNED) != 0 {
+                if let Ok(existing_pinned) = group_message_store.get_pinned_messages(msg.groupId).await {
+                    for existing in existing_pinned {
+                        if existing.id != msg.id
+                            && is_same_pinned_group_message(&existing.message, &encrypted_group_message.message)
+                        {
+                            let _ = group_message_store
+                                .update_message_type(
+                                    msg.groupId,
+                                    existing.id,
+                                    existing.message_type & !firefly_protos::MESSAGE_TYPE_PINNED,
+                                )
+                                .await;
+                        }
+                    }
+                }
+            }
 
             group_message_store
                 .add(
@@ -2756,6 +2987,7 @@ async fn on_group_message(
                     epoch,
                     &encrypted_group_message.sender,
                     &encrypted_group_message.message,
+                    message_type,
                 )
                 .await?;
             let message = crate::db::group_messages::GroupMessage {
@@ -2765,15 +2997,17 @@ async fn on_group_message(
                 message: encrypted_group_message.message,
                 channel_id: channelId,
                 epoch,
+                message_type,
             };
 
             log::info!(
-                "processed group message: id: {}, by: {}, len: {}, message_epoch: {}, group_epoch: {}",
+                "processed group message: id: {}, by: {}, len: {}, message_epoch: {}, group_epoch: {}, message_type: {}",
                 message.id,
                 message.by,
                 message.message.len(),
                 msg.epoch,
                 epoch,
+                message_type,
             );
             callbacks.on_group_message(message).await;
         }
@@ -2835,8 +3069,14 @@ async fn on_user_message(
     let mut other_username = from.into_owned();
     let mut final_message = decrypted;
     let mut sent_by_other = true;
+    let mut message_type: u32 = 0;
 
     if let Ok(inner) = deserialize_proto::<firefly::UserMessageInner>(&final_message) {
+        let inner_type = inner.message_type | match &inner.message {
+            firefly::mod_UserMessageInner::OneOfmessage::messagePayload(p) => p.message_type,
+            _ => 0,
+        };
+        message_type |= inner_type;
         match inner.message {
             firefly::mod_UserMessageInner::OneOfmessage::None => {
                 is_dummy = true;
@@ -2849,11 +3089,18 @@ async fn on_user_message(
 
                     if let Ok(inner_inner) =
                         deserialize_proto::<firefly::UserMessageInner>(&final_message)
-                        && let firefly::mod_UserMessageInner::OneOfmessage::None =
+                    {
+                        let inner_inner_type = inner_inner.message_type | match &inner_inner.message {
+                            firefly::mod_UserMessageInner::OneOfmessage::messagePayload(p) => p.message_type,
+                            _ => 0,
+                        };
+                        message_type |= inner_inner_type;
+                        if let firefly::mod_UserMessageInner::OneOfmessage::None =
                             inner_inner.message
                         {
                             is_dummy = true;
                         }
+                    }
                 }
             }
             _ => {
@@ -2873,6 +3120,7 @@ async fn on_user_message(
                 other: other_username,
                 message: final_message,
                 sent_by_other,
+                message_type,
             })
             .await;
     }
@@ -2902,6 +3150,7 @@ async fn on_user_message(
         let dummy_inner = firefly::UserMessageInner {
             message: firefly::mod_UserMessageInner::OneOfmessage::None,
             nonce: rng().next_u32(),
+            message_type: 0,
         };
 
         match serialize_proto(&dummy_inner) {
@@ -3391,6 +3640,78 @@ impl FfiFireflyWsClient {
             .await
     }
 
+    pub async fn encrypt_and_send_with_type(
+        &self,
+        to: String,
+        payload: Vec<u8>,
+        message_type: u32,
+    ) -> anyhow::Result<UserMessage> {
+        let name = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT
+            .scope(name, async {
+                self.inner.encrypt_and_send_with_type(to, payload, message_type).await
+            })
+            .await
+    }
+
+    pub async fn encrypt_and_send_pinned(
+        &self,
+        to: String,
+        payload: Vec<u8>,
+    ) -> anyhow::Result<UserMessage> {
+        self.encrypt_and_send_with_type(to, payload, firefly_protos::MESSAGE_TYPE_PINNED).await
+    }
+
+    pub async fn encrypt_and_send_group(
+        &self,
+        groupId: u64,
+        payload: Vec<u8>,
+    ) -> anyhow::Result<u64> {
+        let name = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT
+            .scope(name, async {
+                let message = deserialize_proto::<firefly::GroupMessageInner<'_>>(&payload)?;
+                self.inner.upload_group_message(groupId, message, 0).await
+            })
+            .await
+    }
+
+    pub async fn encrypt_and_send_group_with_type(
+        &self,
+        groupId: u64,
+        payload: Vec<u8>,
+        message_type: u32,
+    ) -> anyhow::Result<u64> {
+        let name = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT
+            .scope(name, async {
+                let mut message = deserialize_proto::<firefly::GroupMessageInner<'_>>(&payload)?;
+                message.message_type |= message_type;
+                if let firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(ref mut p) = message.message {
+                    p.message_type |= message_type;
+                }
+                self.inner.upload_group_message(groupId, message, 0).await
+            })
+            .await
+    }
+
+    pub async fn encrypt_and_send_group_pinned(
+        &self,
+        groupId: u64,
+        payload: Vec<u8>,
+    ) -> anyhow::Result<u64> {
+        self.encrypt_and_send_group_with_type(groupId, payload, firefly_protos::MESSAGE_TYPE_PINNED).await
+    }
+
+    pub async fn re_encrypt_and_send_pinned_messages(&self, group_id: u64) -> anyhow::Result<()> {
+        let name = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT
+            .scope(name, async {
+                self.inner.re_encrypt_and_send_pinned_messages(group_id).await
+            })
+            .await
+    }
+
     pub async fn upload_fcm_token(&self, token: Option<String>) -> anyhow::Result<()> {
         let name = self.inner.callbacks.name().to_string();
         CURRENT_CLIENT
@@ -3424,20 +3745,6 @@ impl FfiFireflyWsClient {
         CURRENT_CLIENT
             .scope(id, async {
                 self.inner.create_group(name, description, settings).await
-            })
-            .await
-    }
-
-    pub async fn encrypt_and_send_group(
-        &self,
-        groupId: u64,
-        payload: Vec<u8>,
-    ) -> anyhow::Result<u64> {
-        let name = self.inner.callbacks.name().to_string();
-        CURRENT_CLIENT
-            .scope(name, async {
-                let message = deserialize_proto::<firefly::GroupMessageInner<'_>>(&payload)?;
-                self.inner.upload_group_message(groupId, message, 0).await
             })
             .await
     }

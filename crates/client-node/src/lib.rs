@@ -38,6 +38,8 @@ pub struct JsUserMessage {
     pub other: String,
     pub message: Vec<u8>,
     pub sent_by_other: bool,
+    #[serde(default)]
+    pub message_type: u32,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -49,6 +51,8 @@ pub struct JsGroupMessage {
     pub message: Vec<u8>,
     pub channel_id: u32,
     pub epoch: u32,
+    #[serde(default)]
+    pub message_type: u32,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -106,6 +110,7 @@ impl FireflyWsClientCallback for WasmClientCallbacks {
                 other: message.other,
                 message: message.message,
                 sent_by_other: message.sent_by_other,
+                message_type: message.message_type,
             };
             if let Ok(json) = serde_json::to_string(&msg) {
                 let _ = f.call2(&JsValue::NULL, &JsValue::NULL, &JsValue::from_str(&json));
@@ -122,6 +127,7 @@ impl FireflyWsClientCallback for WasmClientCallbacks {
                 message: group_message.message,
                 channel_id: group_message.channel_id,
                 epoch: group_message.epoch,
+                message_type: group_message.message_type,
             };
             if let Ok(json) = serde_json::to_string(&msg) {
                 let _ = f.call2(&JsValue::NULL, &JsValue::NULL, &JsValue::from_str(&json));
@@ -249,6 +255,7 @@ impl UserMessageStorage for JsUserMessageStorage {
         other: &str,
         message: &[u8],
         sent_by_other: bool,
+        message_type: u32,
     ) -> anyhow::Result<()> {
         if let Some(ref f) = self.js_add {
             let msg_arr = js_sys::Uint8Array::from(message);
@@ -259,6 +266,7 @@ impl UserMessageStorage for JsUserMessageStorage {
             let _ = js_sys::Reflect::set(&msg_obj, &"to".into(), &JsValue::from_str(if !sent_by_other { other } else { "" }));
             let _ = js_sys::Reflect::set(&msg_obj, &"message".into(), &msg_arr);
             let _ = js_sys::Reflect::set(&msg_obj, &"sentByOther".into(), &JsValue::from_bool(sent_by_other));
+            let _ = js_sys::Reflect::set(&msg_obj, &"messageType".into(), &JsValue::from_f64(message_type as f64));
 
             let args = if f.length() <= 1 {
                 vec![msg_obj.into()]
@@ -268,11 +276,12 @@ impl UserMessageStorage for JsUserMessageStorage {
                     JsValue::from_str(other),
                     msg_arr.into(),
                     JsValue::from_bool(sent_by_other),
+                    JsValue::from_f64(message_type as f64),
                 ]
             };
             let _ = call_js_async(f, &args).await;
         }
-        self.fallback.add(id, other, message, sent_by_other).await
+        self.fallback.add(id, other, message, sent_by_other, message_type).await
     }
 
     async fn get_last_messages_of(
@@ -313,11 +322,16 @@ impl UserMessageStorage for JsUserMessageStorage {
                             .ok()
                             .map(|v| js_sys::Uint8Array::from(v).to_vec())
                             .unwrap_or_default();
+                        let message_type = js_sys::Reflect::get(&obj, &"messageType".into())
+                            .ok()
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0) as u32;
                         list.push(UserMessage {
                             id,
                             other: other_str,
                             message: msg_bytes,
                             sent_by_other,
+                            message_type,
                         });
                     }
                     return Ok(list);
@@ -325,6 +339,19 @@ impl UserMessageStorage for JsUserMessageStorage {
             }
         }
         self.fallback.get_last_messages_of(other, before, limit).await
+    }
+
+    async fn get_pinned_messages_of(&self, other: &str) -> anyhow::Result<Vec<UserMessage>> {
+        self.fallback.get_pinned_messages_of(other).await
+    }
+
+    async fn update_message_type(
+        &self,
+        other: &str,
+        id: u64,
+        message_type: u32,
+    ) -> anyhow::Result<()> {
+        self.fallback.update_message_type(other, id, message_type).await
     }
 }
 
@@ -347,6 +374,7 @@ impl GroupMessageStorage for JsGroupMessageStorage {
         epoch: u32,
         by: &str,
         message: &[u8],
+        message_type: u32,
     ) -> anyhow::Result<()> {
         if let Some(ref f) = self.js_add {
             let msg_arr = js_sys::Uint8Array::from(message);
@@ -358,6 +386,7 @@ impl GroupMessageStorage for JsGroupMessageStorage {
             let _ = js_sys::Reflect::set(&msg_obj, &"by".into(), &JsValue::from_str(by));
             let _ = js_sys::Reflect::set(&msg_obj, &"from".into(), &JsValue::from_str(by));
             let _ = js_sys::Reflect::set(&msg_obj, &"message".into(), &msg_arr);
+            let _ = js_sys::Reflect::set(&msg_obj, &"messageType".into(), &JsValue::from_f64(message_type as f64));
 
             let args = if f.length() <= 1 {
                 vec![msg_obj.into()]
@@ -369,12 +398,13 @@ impl GroupMessageStorage for JsGroupMessageStorage {
                     JsValue::from_f64(epoch as f64),
                     JsValue::from_str(by),
                     msg_arr.into(),
+                    JsValue::from_f64(message_type as f64),
                 ]
             };
             let _ = call_js_async(f, &args).await;
         }
         self.fallback
-            .add(id, group_id, channel_id, epoch, by, message)
+            .add(id, group_id, channel_id, epoch, by, message, message_type)
             .await
     }
 
@@ -429,6 +459,10 @@ impl GroupMessageStorage for JsGroupMessageStorage {
                             .ok()
                             .map(|v| js_sys::Uint8Array::from(v).to_vec())
                             .unwrap_or_default();
+                        let message_type = js_sys::Reflect::get(&obj, &"messageType".into())
+                            .ok()
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0) as u32;
                         list.push(GroupMessage {
                             id,
                             group_id: gid,
@@ -436,6 +470,7 @@ impl GroupMessageStorage for JsGroupMessageStorage {
                             message: msg_bytes,
                             channel_id,
                             epoch,
+                            message_type,
                         });
                     }
                     return Ok(list);
@@ -443,6 +478,19 @@ impl GroupMessageStorage for JsGroupMessageStorage {
             }
         }
         self.fallback.get(group_id, start_before, limit).await
+    }
+
+    async fn get_pinned_messages(&self, group_id: u64) -> anyhow::Result<Vec<GroupMessage>> {
+        self.fallback.get_pinned_messages(group_id).await
+    }
+
+    async fn update_message_type(
+        &self,
+        group_id: u64,
+        id: u64,
+        message_type: u32,
+    ) -> anyhow::Result<()> {
+        self.fallback.update_message_type(group_id, id, message_type).await
     }
 
     async fn get_last_message_of_group(&self, group_id: u64) -> anyhow::Result<GroupMessage> {
@@ -478,6 +526,10 @@ impl GroupMessageStorage for JsGroupMessageStorage {
                         .ok()
                         .map(|v| js_sys::Uint8Array::from(v).to_vec())
                         .unwrap_or_default();
+                    let message_type = js_sys::Reflect::get(&res, &"messageType".into())
+                        .ok()
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0) as u32;
                     return Ok(GroupMessage {
                         id,
                         group_id: gid,
@@ -485,6 +537,7 @@ impl GroupMessageStorage for JsGroupMessageStorage {
                         message: msg_bytes,
                         channel_id,
                         epoch,
+                        message_type,
                     });
                 }
             }
@@ -1324,12 +1377,25 @@ impl FireflyClientNode {
                                         DeviceId::new(um.fromDeviceId as u8).unwrap(),
                                     );
                                     if let Ok(decrypted) = ks_guard.decrypt(other_addr, um.text.to_vec(), um.type_pb as u8).await {
-                                        let _ = ums.add(um.id, &um.fromUsername, &decrypted, true).await;
+                                        let message_type = deserialize_proto::<firefly::UserMessageInner>(&decrypted)
+                                            .ok()
+                                            .map(|inner| {
+                                                if inner.message_type != 0 {
+                                                    inner.message_type
+                                                } else if let firefly::mod_UserMessageInner::OneOfmessage::messagePayload(ref p) = inner.message {
+                                                    p.message_type
+                                                } else {
+                                                    0
+                                                }
+                                            })
+                                            .unwrap_or(0);
+                                        let _ = ums.add(um.id, &um.fromUsername, &decrypted, true, message_type).await;
                                         cb.on_message(UserMessage {
                                             id: um.id,
                                             other: um.fromUsername.to_string(),
                                             message: decrypted,
                                             sent_by_other: true,
+                                            message_type,
                                         }).await;
                                     }
                                 }
@@ -1339,10 +1405,18 @@ impl FireflyClientNode {
                                         if let Ok(group) = mls_guard.load_group(gm.groupId, grp_ident).await {
                                             if let Ok(firefly_client::group::FireflyMlsReceivedMessage::Message(decrypted)) = group.process(gm.message.to_vec()).await {
                                                 let _ = group.save().await;
-                                                let channel_id = deserialize_proto::<firefly::GroupMessageInner>(&decrypted.message)
-                                                    .map(|inner| inner.channelId)
-                                                    .unwrap_or(0);
-                                                let _ = gms.add(gm.id, gm.groupId, channel_id, gm.epoch, &decrypted.sender, &decrypted.message).await;
+                                                let inner_opt = deserialize_proto::<firefly::GroupMessageInner>(&decrypted.message).ok();
+                                                let channel_id = inner_opt.as_ref().map(|inner| inner.channelId).unwrap_or(0);
+                                                let message_type = inner_opt.as_ref().map(|inner| {
+                                                    if inner.message_type != 0 {
+                                                        inner.message_type
+                                                    } else if let firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(ref p) = inner.message {
+                                                        p.message_type
+                                                    } else {
+                                                        0
+                                                    }
+                                                }).unwrap_or(0);
+                                                let _ = gms.add(gm.id, gm.groupId, channel_id, gm.epoch, &decrypted.sender, &decrypted.message, message_type).await;
                                                 cb.on_group_message(GroupMessage {
                                                     id: gm.id,
                                                     group_id: gm.groupId,
@@ -1350,6 +1424,7 @@ impl FireflyClientNode {
                                                     message: decrypted.message,
                                                     channel_id,
                                                     epoch: gm.epoch,
+                                                    message_type,
                                                 }).await;
                                             }
                                         }
@@ -1362,10 +1437,18 @@ impl FireflyClientNode {
                                             if let Ok(group) = mls_guard.load_group(gm.groupId, grp_ident).await {
                                                 if let Ok(firefly_client::group::FireflyMlsReceivedMessage::Message(decrypted)) = group.process(gm.message.to_vec()).await {
                                                     let _ = group.save().await;
-                                                    let channel_id = deserialize_proto::<firefly::GroupMessageInner>(&decrypted.message)
-                                                        .map(|inner| inner.channelId)
-                                                        .unwrap_or(0);
-                                                    let _ = gms.add(gm.id, gm.groupId, channel_id, gm.epoch, &decrypted.sender, &decrypted.message).await;
+                                                    let inner_opt = deserialize_proto::<firefly::GroupMessageInner>(&decrypted.message).ok();
+                                                    let channel_id = inner_opt.as_ref().map(|inner| inner.channelId).unwrap_or(0);
+                                                    let message_type = inner_opt.as_ref().map(|inner| {
+                                                        if inner.message_type != 0 {
+                                                            inner.message_type
+                                                        } else if let firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(ref p) = inner.message {
+                                                            p.message_type
+                                                        } else {
+                                                            0
+                                                        }
+                                                    }).unwrap_or(0);
+                                                    let _ = gms.add(gm.id, gm.groupId, channel_id, gm.epoch, &decrypted.sender, &decrypted.message, message_type).await;
                                                     cb.on_group_message(GroupMessage {
                                                         id: gm.id,
                                                         group_id: gm.groupId,
@@ -1373,6 +1456,7 @@ impl FireflyClientNode {
                                                         message: decrypted.message,
                                                         channel_id,
                                                         epoch: gm.epoch,
+                                                        message_type,
                                                     }).await;
                                                 }
                                             }
@@ -1644,13 +1728,22 @@ impl FireflyClientNode {
                 }
             }
 
-            let _ = user_messages_store.add(msg_id, &to, &payload, false).await;
+            let inner_msg = deserialize_proto::<firefly::UserMessageInner>(&payload).ok();
+            let message_type = inner_msg.as_ref().map(|inner| {
+                inner.message_type | match &inner.message {
+                    firefly::mod_UserMessageInner::OneOfmessage::messagePayload(p) => p.message_type,
+                    _ => 0,
+                }
+            }).unwrap_or(0);
+
+            let _ = user_messages_store.add(msg_id, &to, &payload, false, message_type).await;
 
             let res = JsUserMessage {
                 id: msg_id as f64,
                 other: to,
                 message: payload,
                 sent_by_other: false,
+                message_type,
             };
 
             serde_wasm_bindgen::to_value(&res).map_err(|e| JsValue::from_str(&e.to_string()))
@@ -1723,12 +1816,17 @@ impl FireflyClientNode {
                 Err(_) => firefly_client::utils::get_current_timestamp_millis_since_epoch(),
             };
 
-            let channel_id = deserialize_proto::<firefly::GroupMessageInner>(&payload)
-                .map(|inner| inner.channelId)
-                .unwrap_or(0);
+            let group_inner = deserialize_proto::<firefly::GroupMessageInner>(&payload).ok();
+            let channel_id = group_inner.as_ref().map(|inner| inner.channelId).unwrap_or(0);
+            let message_type = group_inner.as_ref().map(|inner| {
+                inner.message_type | match &inner.message {
+                    firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(p) => p.message_type,
+                    _ => 0,
+                }
+            }).unwrap_or(0);
 
             let _ = group_messages_store
-                .add(msg_id, gid, channel_id, group.epoch().await as u32, callbacks.name(), &payload)
+                .add(msg_id, gid, channel_id, group.epoch().await as u32, callbacks.name(), &payload, message_type)
                 .await;
 
             Ok(JsValue::from_f64(msg_id as f64))
@@ -2060,6 +2158,59 @@ impl FireflyClientNode {
                     message: m.message,
                     channel_id: m.channel_id,
                     epoch: m.epoch,
+                    message_type: m.message_type,
+                })
+                .collect();
+
+            serde_wasm_bindgen::to_value(&js_messages).map_err(|e| JsValue::from_str(&e.to_string()))
+        })
+    }
+
+    #[wasm_bindgen(js_name = getPinnedGroupMessages)]
+    pub fn get_pinned_group_messages(&self, group_id: f64) -> js_sys::Promise {
+        let group_messages_store = self.group_messages_store.clone();
+
+        future_to_promise(async move {
+            let messages = group_messages_store
+                .get_pinned_messages(group_id as u64)
+                .await
+                .unwrap_or_default();
+
+            let js_messages: Vec<JsGroupMessage> = messages
+                .into_iter()
+                .map(|m: GroupMessage| JsGroupMessage {
+                    id: m.id as f64,
+                    group_id: m.group_id as f64,
+                    by: m.by,
+                    message: m.message,
+                    channel_id: m.channel_id,
+                    epoch: m.epoch,
+                    message_type: m.message_type,
+                })
+                .collect();
+
+            serde_wasm_bindgen::to_value(&js_messages).map_err(|e| JsValue::from_str(&e.to_string()))
+        })
+    }
+
+    #[wasm_bindgen(js_name = getPinnedUserMessages)]
+    pub fn get_pinned_user_messages(&self, other: String) -> js_sys::Promise {
+        let user_messages_store = self.user_messages_store.clone();
+
+        future_to_promise(async move {
+            let messages = user_messages_store
+                .get_pinned_messages_of(&other)
+                .await
+                .unwrap_or_default();
+
+            let js_messages: Vec<JsUserMessage> = messages
+                .into_iter()
+                .map(|m: UserMessage| JsUserMessage {
+                    id: m.id as f64,
+                    other: m.other,
+                    message: m.message,
+                    sent_by_other: m.sent_by_other,
+                    message_type: m.message_type,
                 })
                 .collect();
 

@@ -186,6 +186,7 @@ async fn test_remove_readd_member() {
                 ..Default::default()
             },
         ),
+        message_type: 0,
     };
     bob_client
         .upload_group_message(group_id, group_msg, 0)
@@ -235,6 +236,7 @@ async fn test_remove_readd_member() {
                 ..Default::default()
             },
         ),
+        message_type: 0,
     };
     bob_client
         .upload_group_message(group_id, group_msg2, 0)

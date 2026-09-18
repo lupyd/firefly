@@ -809,6 +809,7 @@ async fn test_used_key_packages_and_pre_keys_cleaned_and_sessions_persist_across
                 ..Default::default()
             },
         ),
+        message_type: 0,
     };
     bob_client
         .upload_group_message(group_id, group_msg, 0)
@@ -923,6 +924,7 @@ async fn test_used_key_packages_and_pre_keys_cleaned_and_sessions_persist_across
                 ..Default::default()
             },
         ),
+        message_type: 0,
     };
     bob_client2
         .upload_group_message(group_id, gmsg_bob, 0)
@@ -943,6 +945,7 @@ async fn test_used_key_packages_and_pre_keys_cleaned_and_sessions_persist_across
                 ..Default::default()
             },
         ),
+        message_type: 0,
     };
     alice_client
         .upload_group_message(group_id, gmsg_alice_reply, 0)

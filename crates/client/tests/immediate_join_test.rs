@@ -178,6 +178,7 @@ async fn test_immediate_group_join() {
                 ..Default::default()
             },
         ),
+        message_type: 0,
     };
     bob_client
         .upload_group_message(group_id, group_msg, 0)

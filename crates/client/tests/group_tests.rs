@@ -196,6 +196,7 @@ async fn test_client_group_flow() {
                 ..Default::default()
             },
         ),
+        message_type: 0,
     };
     bob_client
         .upload_group_message(group_id, group_msg, 0)
@@ -349,6 +350,7 @@ async fn test_key_package_exhaustion_and_restart_cleanup_with_real_client() {
                     ..Default::default()
                 },
             ),
+            message_type: 0,
         };
         bob_client
             .upload_group_message(gid, msg, 0)
@@ -431,6 +433,7 @@ async fn test_key_package_exhaustion_and_restart_cleanup_with_real_client() {
                         ..Default::default()
                     },
                 ),
+                message_type: 0,
             },
             0,
         )
@@ -577,6 +580,7 @@ async fn test_late_joiner_does_not_receive_prior_messages_and_reconnection_sync(
                         ..Default::default()
                     },
                 ),
+                message_type: 0,
             },
             0,
         )
@@ -600,6 +604,7 @@ async fn test_late_joiner_does_not_receive_prior_messages_and_reconnection_sync(
                         ..Default::default()
                     },
                 ),
+                message_type: 0,
             },
             0,
         )
@@ -649,6 +654,7 @@ async fn test_late_joiner_does_not_receive_prior_messages_and_reconnection_sync(
                         ..Default::default()
                     },
                 ),
+                message_type: 0,
             },
             0,
         )

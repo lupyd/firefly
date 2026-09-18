@@ -270,6 +270,7 @@ async fn test_kick_member() {
                 ..Default::default()
             },
         ),
+        message_type: 0,
     };
 
     // We expect upload_group_message to potentially fail since Bob is kicked
@@ -313,6 +314,7 @@ async fn test_kick_member() {
                 ..Default::default()
             },
         ),
+        message_type: 0,
     };
     charles_client
         .upload_group_message(group_id, charles_group_msg, 0)

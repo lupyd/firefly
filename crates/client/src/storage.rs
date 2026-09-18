@@ -29,6 +29,8 @@ pub struct UserMessage {
     pub other: String,
     pub message: Vec<u8>,
     pub sent_by_other: bool,
+    #[serde(default)]
+    pub message_type: u32,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -43,6 +45,8 @@ pub struct GroupMessage {
     pub message: Vec<u8>,
     pub channel_id: u32,
     pub epoch: u32,
+    #[serde(default)]
+    pub message_type: u32,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -322,6 +326,7 @@ impl GroupInfoStorage for MemoryGroupInfoStore {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // Group Messages Store Trait & Memory Implementation
 // ---------------------------------------------------------------------------
 
@@ -335,6 +340,7 @@ pub trait GroupMessageStorage: Send + Sync {
         epoch: u32,
         by: &str,
         message: &[u8],
+        message_type: u32,
     ) -> anyhow::Result<()>;
     async fn get(
         &self,
@@ -342,9 +348,16 @@ pub trait GroupMessageStorage: Send + Sync {
         start_before: u64,
         limit: u32,
     ) -> anyhow::Result<Vec<GroupMessage>>;
+    async fn get_pinned_messages(&self, group_id: u64) -> anyhow::Result<Vec<GroupMessage>>;
     async fn get_last_message_of_group(&self, group_id: u64) -> anyhow::Result<GroupMessage>;
     async fn delete_by_group_id(&self, group_id: u64) -> anyhow::Result<()>;
     async fn update_cursor(&self, id: u64, group_id: u64, epoch: u32) -> anyhow::Result<()>;
+    async fn update_message_type(
+        &self,
+        group_id: u64,
+        id: u64,
+        message_type: u32,
+    ) -> anyhow::Result<()>;
 }
 
 #[derive(Clone, Default)]
@@ -369,6 +382,7 @@ impl GroupMessageStorage for MemoryGroupMessageStore {
         epoch: u32,
         by: &str,
         message: &[u8],
+        message_type: u32,
     ) -> anyhow::Result<()> {
         let mut guard = self.messages.write().await;
         guard.push(GroupMessage {
@@ -378,6 +392,7 @@ impl GroupMessageStorage for MemoryGroupMessageStore {
             message: message.to_vec(),
             channel_id,
             epoch,
+            message_type,
         });
         Ok(())
     }
@@ -397,6 +412,30 @@ impl GroupMessageStorage for MemoryGroupMessageStore {
         matching.sort_by(|a, b| b.id.cmp(&a.id));
         matching.truncate(limit as usize);
         Ok(matching)
+    }
+
+    async fn get_pinned_messages(&self, group_id: u64) -> anyhow::Result<Vec<GroupMessage>> {
+        let guard = self.messages.read().await;
+        let mut matching: Vec<GroupMessage> = guard
+            .iter()
+            .filter(|m| m.group_id == group_id && (m.message_type & 1) != 0)
+            .cloned()
+            .collect();
+        matching.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(matching)
+    }
+
+    async fn update_message_type(
+        &self,
+        group_id: u64,
+        id: u64,
+        message_type: u32,
+    ) -> anyhow::Result<()> {
+        let mut guard = self.messages.write().await;
+        if let Some(m) = guard.iter_mut().find(|m| m.group_id == group_id && m.id == id) {
+            m.message_type = message_type;
+        }
+        Ok(())
     }
 
     async fn get_last_message_of_group(&self, group_id: u64) -> anyhow::Result<GroupMessage> {
@@ -431,6 +470,7 @@ pub trait UserMessageStorage: Send + Sync {
         other: &str,
         message: &[u8],
         sent_by_other: bool,
+        message_type: u32,
     ) -> anyhow::Result<()>;
     async fn get_last_messages_of(
         &self,
@@ -438,6 +478,13 @@ pub trait UserMessageStorage: Send + Sync {
         before: i64,
         limit: i64,
     ) -> anyhow::Result<Vec<UserMessage>>;
+    async fn get_pinned_messages_of(&self, other: &str) -> anyhow::Result<Vec<UserMessage>>;
+    async fn update_message_type(
+        &self,
+        other: &str,
+        id: u64,
+        message_type: u32,
+    ) -> anyhow::Result<()>;
 }
 
 #[derive(Clone, Default)]
@@ -459,6 +506,7 @@ impl UserMessageStorage for MemoryUserMessageStore {
         other: &str,
         message: &[u8],
         sent_by_other: bool,
+        message_type: u32,
     ) -> anyhow::Result<()> {
         let mut guard = self.messages.write().await;
         guard.push(UserMessage {
@@ -466,6 +514,7 @@ impl UserMessageStorage for MemoryUserMessageStore {
             other: other.to_string(),
             message: message.to_vec(),
             sent_by_other,
+            message_type,
         });
         Ok(())
     }
@@ -486,6 +535,30 @@ impl UserMessageStorage for MemoryUserMessageStore {
         matching.sort_by(|a, b| b.id.cmp(&a.id));
         matching.truncate(limit as usize);
         Ok(matching)
+    }
+
+    async fn get_pinned_messages_of(&self, other: &str) -> anyhow::Result<Vec<UserMessage>> {
+        let guard = self.messages.read().await;
+        let mut matching: Vec<UserMessage> = guard
+            .iter()
+            .filter(|m| m.other == other && (m.message_type & 1) != 0)
+            .cloned()
+            .collect();
+        matching.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(matching)
+    }
+
+    async fn update_message_type(
+        &self,
+        other: &str,
+        id: u64,
+        message_type: u32,
+    ) -> anyhow::Result<()> {
+        let mut guard = self.messages.write().await;
+        if let Some(m) = guard.iter_mut().find(|m| m.other == other && m.id == id) {
+            m.message_type = message_type;
+        }
+        Ok(())
     }
 }
 

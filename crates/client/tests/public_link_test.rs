@@ -175,6 +175,7 @@ async fn test_public_link_flow() {
                 ..Default::default()
             },
         ),
+        message_type: 0,
     };
     let alice_msg_bytes = firefly_client::utils::serialize_proto(&alice_msg_inner).unwrap();
     alice_client
@@ -209,6 +210,7 @@ async fn test_public_link_flow() {
                 ..Default::default()
             },
         ),
+        message_type: 0,
     };
     let bob_msg_bytes = firefly_client::utils::serialize_proto(&bob_msg_inner).unwrap();
     bob_client

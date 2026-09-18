@@ -416,6 +416,7 @@ message MessagePayload {
     fixed64 replyingTo = 5;
     fixed64 deleted = 6;
   }
+  uint32 message_type = 7;
 }
 
 enum CallMessageType {
@@ -453,6 +454,7 @@ message UserMessageInner {
   }
 
   fixed32 nonce = 10;
+  uint32 message_type = 5;
 }
 
 message GroupMessageInner {
@@ -460,6 +462,7 @@ message GroupMessageInner {
   oneof message {
     MessagePayload messagePayload = 2;
   }
+  uint32 message_type = 3;
 }
 message RequestGroupReAdds {
   repeated uint64 group_ids = 1;
