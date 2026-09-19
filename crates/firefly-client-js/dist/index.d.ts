@@ -1,5 +1,6 @@
 import { FireflyClientNode, protos, initLogger, MlsKeyPackageStorage, MlsGroupStateStorage, MlsPreSharedKeyStorage, UserMessageStorage, GroupMessageStorage, GroupInfoStorage, KeyValueStorage, StorageProviders, RawUserMessage, RawGroupMessage, RawGroupInfo } from 'firefly-client-node';
 export type { MlsKeyPackageStorage, MlsGroupStateStorage, MlsPreSharedKeyStorage, UserMessageStorage, GroupMessageStorage, GroupInfoStorage, KeyValueStorage, StorageProviders, RawUserMessage, RawGroupMessage, RawGroupInfo, };
+export { UserPermission, DEFAULT_GROUP_PERMISSIONS } from 'firefly-client-node';
 export interface ClientConfig {
     port?: number;
     auth0Domain?: string;

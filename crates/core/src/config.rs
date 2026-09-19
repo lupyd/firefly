@@ -116,12 +116,17 @@ const UPDATE_ROLE_IN_CHANNEL_PROPOSAL_TYPE: ProposalType = ProposalType::new(300
 #[derive(Copy, Clone, Debug)]
 #[repr(u32)]
 pub enum UserPermission {
+    SeeMessage = 1,
+    PinMessage = 2,
     AddMessage = 4,
     ManageChannel = 8,
     ManageRole = 16,
     ManageMember = 32,
     ManageGroup = 64,
 }
+
+pub const DEFAULT_GROUP_PERMISSIONS: u32 = UserPermission::SeeMessage as u32
+    | UserPermission::AddMessage as u32;
 
 #[derive(MlsSize, MlsDecode, MlsEncode)]
 pub struct UpdateRoleProposal {

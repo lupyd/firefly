@@ -213,7 +213,7 @@ pub struct FireflyWsClient {
 
     addressId: AtomicU64,
     group_messages_store: GroupMessagesStore,
-    firefly_mls_client: tokio::sync::OnceCell<Arc<FfiMlsClient>>,
+    firefly_mls_client: Arc<tokio::sync::OnceCell<Arc<FfiMlsClient>>>,
     group_info_store: GroupInfoStore,
     self_group_key_packages_store: SelfGroupKeyPackageStore,
     group_key_packages_store: GroupKeyPackageStore,
@@ -1958,25 +1958,6 @@ impl FireflyWsClient {
                 _ => 0,
             };
 
-        if (effective_type & firefly_protos::MESSAGE_TYPE_PINNED) != 0 {
-            if let Ok(existing_pinned) = self.group_messages_store.get_pinned_messages(groupId).await {
-                for existing in existing_pinned {
-                    if existing.id != uploaded_group_message.id
-                        && is_same_pinned_group_message(&existing.message, &payload)
-                    {
-                        let _ = self
-                            .group_messages_store
-                            .update_message_type(
-                                groupId,
-                                existing.id,
-                                existing.message_type & !firefly_protos::MESSAGE_TYPE_PINNED,
-                            )
-                            .await;
-                    }
-                }
-            }
-        }
-
         self.group_messages_store
             .add(
                 uploaded_group_message.id,
@@ -2082,7 +2063,7 @@ impl FireflyWsClient {
     }
 
     pub fn group_message_store(&self) -> GroupMessagesStore {
-        self.group_messages_store.clone()
+        self.group_messages_store.with_read_access(self.firefly_mls_client.clone(), self.group_info_store.clone())
     }
 
     async fn join_group(
@@ -2867,29 +2848,6 @@ impl FireflyWsClient {
     }
 }
 
-fn is_same_pinned_group_message(a_bytes: &[u8], b_bytes: &[u8]) -> bool {
-    if a_bytes == b_bytes {
-        return true;
-    }
-    if let (Ok(a), Ok(b)) = (
-        deserialize_proto::<firefly::GroupMessageInner>(a_bytes),
-        deserialize_proto::<firefly::GroupMessageInner>(b_bytes),
-    ) {
-        if a.channelId == b.channelId {
-            match (&a.message, &b.message) {
-                (
-                    firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(pa),
-                    firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(pb),
-                ) => {
-                    return pa.text == pb.text && pa.files == pb.files;
-                }
-                _ => {}
-            }
-        }
-    }
-    false
-}
-
 async fn on_group_message(
     msg: &firefly::GroupMessage<'_>,
     firefly_mls_client: &FfiMlsClient,
@@ -2943,10 +2901,16 @@ async fn on_group_message(
         return Ok(());
     }
 
-    let message = group
-        .process(msg.message.to_vec())
-        .await
-        .map_err(|err| anyhow::anyhow!(err))?;
+    let message = match group.process(msg.message.to_vec()).await {
+        Ok(message) => message,
+        Err(err) if err.downcast_ref::<firefly_core::rules::MessagePermissionDenied>().is_some() => {
+            // Consume rejected messages without storing plaintext or emitting callbacks.
+            // Advancing the cursor also prevents an offline-sync retry loop.
+            group_message_store.update_cursor(msg.id, groupId, group.epoch().await as u32).await?;
+            return Ok(());
+        }
+        Err(err) => return Err(err),
+    };
 
     let epoch = group.epoch().await as u32;
     match message {
@@ -2960,24 +2924,6 @@ async fn on_group_message(
                         _ => 0,
                     }
             }).unwrap_or(0);
-
-            if (message_type & firefly_protos::MESSAGE_TYPE_PINNED) != 0 {
-                if let Ok(existing_pinned) = group_message_store.get_pinned_messages(msg.groupId).await {
-                    for existing in existing_pinned {
-                        if existing.id != msg.id
-                            && is_same_pinned_group_message(&existing.message, &encrypted_group_message.message)
-                        {
-                            let _ = group_message_store
-                                .update_message_type(
-                                    msg.groupId,
-                                    existing.id,
-                                    existing.message_type & !firefly_protos::MESSAGE_TYPE_PINNED,
-                                )
-                                .await;
-                        }
-                    }
-                }
-            }
 
             group_message_store
                 .add(
@@ -4019,7 +3965,7 @@ impl FfiFireflyWsClient {
     }
 
     pub fn group_message_store(&self) -> GroupMessagesStore {
-        self.inner.group_messages_store.clone()
+        self.inner.group_message_store()
     }
 
     pub fn group_info_store(&self) -> GroupInfoStore {

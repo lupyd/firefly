@@ -2140,16 +2140,47 @@ impl FireflyClientNode {
     }
 
     #[wasm_bindgen(js_name = getGroupMessages)]
-    pub fn get_group_messages(&self, group_id: f64, start_before: f64, limit: u32) -> js_sys::Promise {
+    pub fn get_group_messages(
+        &self,
+        group_id: f64,
+        start_before: f64,
+        limit: u32,
+    ) -> js_sys::Promise {
         let group_messages_store = self.group_messages_store.clone();
+        let mls = self.mls_client.clone();
+        let groups = self.group_info_store.clone();
 
         future_to_promise(async move {
+            let client = mls
+                .read()
+                .await
+                .clone()
+                .ok_or_else(|| JsValue::from_str("MLS client not initialized"))?;
+            let info = groups
+                .get(group_id as u64)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let group = client
+                .load_group(group_id as u64, info.identifier)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let messages = group_messages_store
                 .get(group_id as u64, start_before as u64, limit)
                 .await
                 .unwrap_or_default();
 
-            let js_messages: Vec<JsGroupMessage> = messages
+            let mut visible = Vec::new();
+            for message in messages {
+                if group
+                    .can_see_message(message.channel_id)
+                    .await
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?
+                {
+                    visible.push(message);
+                }
+            }
+
+            let js_messages: Vec<JsGroupMessage> = visible
                 .into_iter()
                 .map(|m: GroupMessage| JsGroupMessage {
                     id: m.id as f64,
@@ -2162,21 +2193,48 @@ impl FireflyClientNode {
                 })
                 .collect();
 
-            serde_wasm_bindgen::to_value(&js_messages).map_err(|e| JsValue::from_str(&e.to_string()))
+            serde_wasm_bindgen::to_value(&js_messages)
+                .map_err(|e| JsValue::from_str(&e.to_string()))
         })
     }
 
     #[wasm_bindgen(js_name = getPinnedGroupMessages)]
     pub fn get_pinned_group_messages(&self, group_id: f64) -> js_sys::Promise {
         let group_messages_store = self.group_messages_store.clone();
+        let mls = self.mls_client.clone();
+        let groups = self.group_info_store.clone();
 
         future_to_promise(async move {
+            let client = mls
+                .read()
+                .await
+                .clone()
+                .ok_or_else(|| JsValue::from_str("MLS client not initialized"))?;
+            let info = groups
+                .get(group_id as u64)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let group = client
+                .load_group(group_id as u64, info.identifier)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let messages = group_messages_store
                 .get_pinned_messages(group_id as u64)
                 .await
                 .unwrap_or_default();
 
-            let js_messages: Vec<JsGroupMessage> = messages
+            let mut visible = Vec::new();
+            for message in messages {
+                if group
+                    .can_see_message(message.channel_id)
+                    .await
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?
+                {
+                    visible.push(message);
+                }
+            }
+
+            let js_messages: Vec<JsGroupMessage> = visible
                 .into_iter()
                 .map(|m: GroupMessage| JsGroupMessage {
                     id: m.id as f64,
@@ -2189,7 +2247,8 @@ impl FireflyClientNode {
                 })
                 .collect();
 
-            serde_wasm_bindgen::to_value(&js_messages).map_err(|e| JsValue::from_str(&e.to_string()))
+            serde_wasm_bindgen::to_value(&js_messages)
+                .map_err(|e| JsValue::from_str(&e.to_string()))
         })
     }
 
@@ -2298,10 +2357,19 @@ impl FireflyClientNode {
     }
 
     #[wasm_bindgen(js_name = getGroupExtension)]
-    pub fn get_group_extension(&self, _group_id: f64) -> js_sys::Promise {
+    pub fn get_group_extension(&self, group_id: f64) -> js_sys::Promise {
+        let mls = self.mls_client.clone();
+        let groups = self.group_info_store.clone();
         future_to_promise(async move {
-            let empty: Vec<u8> = Vec::new();
-            serde_wasm_bindgen::to_value(&empty).map_err(|e| JsValue::from_str(&e.to_string()))
+            let client = mls.read().await.clone()
+                .ok_or_else(|| JsValue::from_str("MLS client not initialized"))?;
+            let info = groups.get(group_id as u64).await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let group = client.load_group(group_id as u64, info.identifier).await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let extension = group.extension().await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            Ok(js_sys::Uint8Array::from(extension.as_slice()).into())
         })
     }
 

@@ -385,6 +385,8 @@ export interface MessagePayload {
     editedOf?: bigint | undefined;
     replyingTo?: bigint | undefined;
     deleted?: bigint | undefined;
+    /** Optional for compatibility with callers predating pinned messages; defaults to zero. */
+    messageType?: number;
 }
 export interface CallMessage {
     message: Buffer;
@@ -403,10 +405,14 @@ export interface UserMessageInner {
     messagePayload?: MessagePayload | undefined;
     selfMessage?: SelfUserMessage | undefined;
     nonce: number;
+    /** Optional for compatibility with callers predating pinned messages; defaults to zero. */
+    messageType?: number;
 }
 export interface GroupMessageInner {
     channelId: number;
     messagePayload?: MessagePayload | undefined;
+    /** Optional for compatibility with callers predating pinned messages; defaults to zero. */
+    messageType?: number;
 }
 export interface RequestGroupReAdds {
     groupIds: bigint[];

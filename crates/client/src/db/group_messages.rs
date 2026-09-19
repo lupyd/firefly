@@ -1,5 +1,11 @@
 use sqlx::SqlitePool;
 use sqlx::prelude::*;
+use std::sync::Arc;
+
+struct MessageReadAccess {
+    client: Arc<tokio::sync::OnceCell<Arc<crate::group::FfiMlsClient>>>,
+    groups: super::group_stores::GroupInfoStore,
+}
 
 #[derive(Clone, Debug, sqlx::FromRow, serde::Serialize, serde::Deserialize)]
 pub struct GroupMessage {
@@ -16,6 +22,9 @@ pub struct GroupMessage {
 #[derive(Clone)]
 pub struct GroupMessagesStore {
     pool: SqlitePool,
+    read_access: Option<Arc<MessageReadAccess>>,
+    // Clones used by concurrent receive/re-add/upload tasks share this boundary.
+    pin_writes: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl GroupMessagesStore {
@@ -41,10 +50,52 @@ impl GroupMessagesStore {
 
         // Migration for existing tables without message_type column
         let _ = pool
-            .execute("ALTER TABLE group_messages ADD COLUMN message_type INTEGER NOT NULL DEFAULT 0")
+            .execute(
+                "ALTER TABLE group_messages ADD COLUMN message_type INTEGER NOT NULL DEFAULT 0",
+            )
             .await;
 
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            read_access: None,
+            pin_writes: Default::default(),
+        })
+    }
+
+    /// Client-facing view. Internal synchronization retains a raw store so
+    /// denying plaintext access cannot hide protocol cursors or stop commits.
+    pub(crate) fn with_read_access(
+        &self,
+        client: Arc<tokio::sync::OnceCell<Arc<crate::group::FfiMlsClient>>>,
+        groups: super::group_stores::GroupInfoStore,
+    ) -> Self {
+        Self {
+            pool: self.pool.clone(),
+            read_access: Some(Arc::new(MessageReadAccess { client, groups })),
+            pin_writes: self.pin_writes.clone(),
+        }
+    }
+
+    async fn visible_messages(
+        &self,
+        messages: Vec<GroupMessage>,
+    ) -> anyhow::Result<Vec<GroupMessage>> {
+        let Some(access) = &self.read_access else {
+            return Ok(messages);
+        };
+        let client = access
+            .client
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("MLS client not initialized"))?;
+        let mut visible = Vec::new();
+        for message in messages {
+            let info = access.groups.get(message.group_id).await?;
+            let group = client.load_group(message.group_id, info.identifier).await?;
+            if group.can_see_message(message.channel_id).await? {
+                visible.push(message);
+            }
+        }
+        Ok(visible)
     }
 
     pub async fn update_cursor(&self, id: u64, group_id: u64, epoch: u32) -> anyhow::Result<()> {
@@ -61,6 +112,18 @@ impl GroupMessagesStore {
         message: &[u8],
         message_type: u32,
     ) -> anyhow::Result<()> {
+        let _pin_write = self.pin_writes.lock().await;
+        let pinned = message_type & firefly_protos::MESSAGE_TYPE_PINNED != 0;
+        let mut duplicates = Vec::new();
+        let mut newest = id;
+        if pinned {
+            for existing in self.pinned_messages_unfiltered_for_group(group_id).await?.into_iter()
+                .filter(|m| m.channel_id == channel_id
+                    && crate::storage::is_same_pinned_group_message(&m.message, message)) {
+                newest = newest.max(existing.id);
+                duplicates.push(existing);
+            }
+        }
         log::info!(
             "store insert: group_message id={} group_id={}, channel_id={} by={} message_type={}",
             id,
@@ -91,6 +154,17 @@ impl GroupMessagesStore {
         .execute(&self.pool)
         .await?;
 
+        // All insertion paths, including background re-adds and replayed/older
+        // ciphertext, converge on the same highest-id pinned copy.
+        for existing in duplicates.into_iter().filter(|m| m.id != newest) {
+            self.update_message_type_unlocked(group_id, existing.id,
+                existing.message_type & !firefly_protos::MESSAGE_TYPE_PINNED).await?;
+        }
+        if pinned && id != newest {
+            self.update_message_type_unlocked(group_id, id,
+                message_type & !firefly_protos::MESSAGE_TYPE_PINNED).await?;
+        }
+
         Ok(())
     }
 
@@ -114,13 +188,20 @@ impl GroupMessagesStore {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows
-            .iter()
-            .map(GroupMessage::from_row)
-            .collect::<Result<Vec<_>, _>>()?)
+        self.visible_messages(
+            rows.iter()
+                .map(GroupMessage::from_row)
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .await
     }
 
     pub async fn get_pinned_messages(&self, group_id: u64) -> anyhow::Result<Vec<GroupMessage>> {
+        let _pin_write = self.pin_writes.lock().await;
+        self.visible_messages(self.pinned_messages_unfiltered_for_group(group_id).await?).await
+    }
+
+    async fn pinned_messages_unfiltered_for_group(&self, group_id: u64) -> anyhow::Result<Vec<GroupMessage>> {
         let rows = sqlx::query(
             r#"
         SELECT id, by, message, channel_id, group_id, epoch, message_type
@@ -133,10 +214,9 @@ impl GroupMessagesStore {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows
-            .iter()
-            .map(GroupMessage::from_row)
-            .collect::<Result<Vec<_>, _>>()?)
+        Ok(rows.iter()
+                .map(GroupMessage::from_row)
+                .collect::<Result<Vec<_>, _>>()?)
     }
 
     pub async fn update_message_type(
@@ -145,6 +225,11 @@ impl GroupMessagesStore {
         id: u64,
         message_type: u32,
     ) -> anyhow::Result<()> {
+        let _pin_write = self.pin_writes.lock().await;
+        self.update_message_type_unlocked(group_id, id, message_type).await
+    }
+
+    async fn update_message_type_unlocked(&self, group_id: u64, id: u64, message_type: u32) -> anyhow::Result<()> {
         sqlx::query("UPDATE group_messages SET message_type = ? WHERE group_id = ? AND id = ?")
             .bind(message_type as i64)
             .bind(group_id as i64)
@@ -171,15 +256,21 @@ AND gm.id = last.max_id;
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .iter()
-            .map(GroupMessage::from_row)
-            .collect::<Result<Vec<_>, _>>()?)
+        self.visible_messages(
+            rows.iter()
+                .map(GroupMessage::from_row)
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .await
     }
 
     pub async fn get_last_message_of_group(&self, group_id: u64) -> anyhow::Result<GroupMessage> {
         let row = sqlx::query("SELECT group_id, id, by, message, channel_id, epoch, message_type FROM group_messages WHERE group_id = ? ORDER BY id DESC LIMIT 1").bind(group_id as i64).fetch_one(&self.pool).await?;
-        Ok(GroupMessage::from_row(&row)?)
+        self.visible_messages(vec![GroupMessage::from_row(&row)?])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("SeeMessage permission required"))
     }
 
     pub async fn delete_by_group_id(&self, group_id: u64) -> anyhow::Result<()> {
@@ -266,7 +357,10 @@ mod tests {
         let store = GroupMessagesStore::new(pool).await.unwrap();
 
         for i in 1..=5 {
-            store.add(i, 100, 1, 1, "user", &[i as u8], 0).await.unwrap();
+            store
+                .add(i, 100, 1, 1, "user", &[i as u8], 0)
+                .await
+                .unwrap();
         }
 
         let messages = store.get(100, 10, 2).await.unwrap();

@@ -425,7 +425,7 @@ mod tests {
         let dave_name = format!("dave_sq_{}", test_run_id);
 
         let mut wrapper = FireflyGroupExtensionWrapper::new(Default::default());
-        wrapper.update_group("alice's group".into(), UserPermission::AddMessage as u32);
+        wrapper.update_group("alice's group".into(), firefly_core::config::DEFAULT_GROUP_PERMISSIONS);
         wrapper.update_role(FireflyGroupRole {
             id: 1,
             name: "owner".into(),

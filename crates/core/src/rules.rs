@@ -31,6 +31,104 @@ pub const fn has_permission(permissions: u32, expected_permission: u32) -> bool 
     permissions & expected_permission == expected_permission
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{permission:?} permission required for channel {channel_id}")]
+pub struct MessagePermissionDenied {
+    pub permission: UserPermission,
+    pub channel_id: u32,
+}
+
+impl FireflyMlsRules {
+    /// Resolve permissions for an authenticated MLS roster member. Default-role
+    /// members are deliberately omitted from the serialized member list.
+    /// Channel overrides replace permissions; otherwise channel defaults apply.
+    /// Channel zero without an explicit channel is the legacy group-wide stream.
+    pub fn message_permissions(
+        extension: &FireflyGroupExtensionWrapper<'_>,
+        username: &str,
+        channel_id: u32,
+    ) -> u32 {
+        let role = extension.get_role_of_user(username).unwrap_or(0);
+        if extension.get_permissions_from_role_id(role).is_none() {
+            return 0;
+        }
+        match extension.get_channel(channel_id) {
+            Some(channel) => channel
+                .roles
+                .iter()
+                .find(|r| r.id == role)
+                .map(|r| r.permissions)
+                .unwrap_or(channel.default_permissions),
+            None if channel_id == 0 => extension.get_permissions_from_role_id(role).unwrap_or(0),
+            None => 0,
+        }
+    }
+
+    pub fn require_message_permission(
+        extension: &FireflyGroupExtensionWrapper<'_>,
+        username: &str,
+        channel_id: u32,
+        permission: UserPermission,
+    ) -> Result<(), MessagePermissionDenied> {
+        if has_permission(
+            Self::message_permissions(extension, username, channel_id),
+            permission as u32,
+        ) {
+            Ok(())
+        } else {
+            Err(MessagePermissionDenied {
+                permission,
+                channel_id,
+            })
+        }
+    }
+
+    /// Raw application bytes remain supported on the legacy group-wide stream.
+    /// Both pin flags are authenticated inside the MLS ciphertext, never taken
+    /// from unauthenticated relay metadata.
+    pub fn message_metadata(data: &[u8]) -> (u32, u32) {
+        match deserialize_proto::<firefly_protos::firefly::GroupMessageInner>(data) {
+            Ok(inner) => {
+                let nested_type = match inner.message {
+                    firefly_protos::firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(p) => p.message_type,
+                    _ => 0,
+                };
+                (inner.channelId, inner.message_type | nested_type)
+            }
+            Err(_) => (0, 0),
+        }
+    }
+
+    pub fn check_message_sender(
+        extension: &FireflyGroupExtensionWrapper<'_>,
+        username: &str,
+        data: &[u8],
+    ) -> Result<(), MessagePermissionDenied> {
+        let (channel_id, message_type) = Self::message_metadata(data);
+        Self::require_message_permission(
+            extension,
+            username,
+            channel_id,
+            UserPermission::SeeMessage,
+        )?;
+        Self::require_message_permission(
+            extension,
+            username,
+            channel_id,
+            UserPermission::AddMessage,
+        )?;
+        if message_type & firefly_protos::MESSAGE_TYPE_PINNED != 0 {
+            Self::require_message_permission(
+                extension,
+                username,
+                channel_id,
+                UserPermission::PinMessage,
+            )?;
+        }
+        Ok(())
+    }
+}
+
 pub fn does_signing_identity_has_this_username(username: &str, s: &SigningIdentity) -> bool {
     on_signing_identity(s, |x| x.username == username).unwrap_or(false)
 }

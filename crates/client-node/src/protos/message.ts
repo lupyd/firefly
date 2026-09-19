@@ -623,6 +623,8 @@ export interface MessagePayload {
   editedOf?: bigint | undefined;
   replyingTo?: bigint | undefined;
   deleted?: bigint | undefined;
+  /** Optional for compatibility with callers predating pinned messages; defaults to zero. */
+  messageType?: number;
 }
 
 export interface CallMessage {
@@ -644,11 +646,15 @@ export interface UserMessageInner {
   messagePayload?: MessagePayload | undefined;
   selfMessage?: SelfUserMessage | undefined;
   nonce: number;
+  /** Optional for compatibility with callers predating pinned messages; defaults to zero. */
+  messageType?: number;
 }
 
 export interface GroupMessageInner {
   channelId: number;
   messagePayload?: MessagePayload | undefined;
+  /** Optional for compatibility with callers predating pinned messages; defaults to zero. */
+  messageType?: number;
 }
 
 export interface RequestGroupReAdds {
@@ -7049,7 +7055,7 @@ export const EncryptedFiles: MessageFns<EncryptedFiles> = {
 };
 
 function createBaseMessagePayload(): MessagePayload {
-  return { text: "", files: undefined, editedOf: undefined, replyingTo: undefined, deleted: undefined };
+  return { text: "", files: undefined, editedOf: undefined, replyingTo: undefined, deleted: undefined, messageType: 0 };
 }
 
 export const MessagePayload: MessageFns<MessagePayload> = {
@@ -7077,6 +7083,9 @@ export const MessagePayload: MessageFns<MessagePayload> = {
         throw new globalThis.Error("value provided for field message.deleted of type fixed64 too large");
       }
       writer.uint32(49).fixed64(message.deleted);
+    }
+    if (message.messageType !== undefined && message.messageType !== 0) {
+      writer.uint32(56).uint32(message.messageType);
     }
     return writer;
   },
@@ -7128,6 +7137,14 @@ export const MessagePayload: MessageFns<MessagePayload> = {
           message.deleted = reader.fixed64() as bigint;
           continue;
         }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.messageType = reader.uint32();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -7144,6 +7161,11 @@ export const MessagePayload: MessageFns<MessagePayload> = {
       editedOf: isSet(object.editedOf) ? BigInt(object.editedOf) : undefined,
       replyingTo: isSet(object.replyingTo) ? BigInt(object.replyingTo) : undefined,
       deleted: isSet(object.deleted) ? BigInt(object.deleted) : undefined,
+      messageType: isSet(object.messageType)
+        ? globalThis.Number(object.messageType)
+        : isSet(object.message_type)
+        ? globalThis.Number(object.message_type)
+        : 0,
     };
   },
 
@@ -7164,6 +7186,9 @@ export const MessagePayload: MessageFns<MessagePayload> = {
     if (message.deleted !== undefined) {
       obj.deleted = message.deleted.toString();
     }
+    if (message.messageType !== undefined && message.messageType !== 0) {
+      obj.messageType = Math.round(message.messageType);
+    }
     return obj;
   },
 
@@ -7183,6 +7208,7 @@ export const MessagePayload: MessageFns<MessagePayload> = {
       ? BigInt(object.replyingTo)
       : undefined;
     message.deleted = (object.deleted !== undefined && object.deleted !== null) ? BigInt(object.deleted) : undefined;
+    message.messageType = object.messageType ?? 0;
     return message;
   },
 };
@@ -7372,7 +7398,14 @@ export const SelfUserMessage: MessageFns<SelfUserMessage> = {
 };
 
 function createBaseUserMessageInner(): UserMessageInner {
-  return { plainText: undefined, callMessage: undefined, messagePayload: undefined, selfMessage: undefined, nonce: 0 };
+  return {
+    plainText: undefined,
+    callMessage: undefined,
+    messagePayload: undefined,
+    selfMessage: undefined,
+    nonce: 0,
+    messageType: 0,
+  };
 }
 
 export const UserMessageInner: MessageFns<UserMessageInner> = {
@@ -7392,6 +7425,9 @@ export const UserMessageInner: MessageFns<UserMessageInner> = {
     if (message.nonce !== 0) {
       writer.uint32(85).fixed32(message.nonce);
     }
+    if (message.messageType !== undefined && message.messageType !== 0) {
+      writer.uint32(40).uint32(message.messageType);
+    }
     return writer;
   },
 
@@ -7407,7 +7443,7 @@ export const UserMessageInner: MessageFns<UserMessageInner> = {
             break;
           }
 
-          message.plainText = Buffer.from(reader.bytes());
+          message.plainText = reader.bytes() as Buffer;
           continue;
         }
         case 2: {
@@ -7442,6 +7478,14 @@ export const UserMessageInner: MessageFns<UserMessageInner> = {
           message.nonce = reader.fixed32();
           continue;
         }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.messageType = reader.uint32();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -7458,6 +7502,11 @@ export const UserMessageInner: MessageFns<UserMessageInner> = {
       messagePayload: isSet(object.messagePayload) ? MessagePayload.fromJSON(object.messagePayload) : undefined,
       selfMessage: isSet(object.selfMessage) ? SelfUserMessage.fromJSON(object.selfMessage) : undefined,
       nonce: isSet(object.nonce) ? globalThis.Number(object.nonce) : 0,
+      messageType: isSet(object.messageType)
+        ? globalThis.Number(object.messageType)
+        : isSet(object.message_type)
+        ? globalThis.Number(object.message_type)
+        : 0,
     };
   },
 
@@ -7478,6 +7527,9 @@ export const UserMessageInner: MessageFns<UserMessageInner> = {
     if (message.nonce !== 0) {
       obj.nonce = Math.round(message.nonce);
     }
+    if (message.messageType !== undefined && message.messageType !== 0) {
+      obj.messageType = Math.round(message.messageType);
+    }
     return obj;
   },
 
@@ -7497,12 +7549,13 @@ export const UserMessageInner: MessageFns<UserMessageInner> = {
       ? SelfUserMessage.fromPartial(object.selfMessage)
       : undefined;
     message.nonce = object.nonce ?? 0;
+    message.messageType = object.messageType ?? 0;
     return message;
   },
 };
 
 function createBaseGroupMessageInner(): GroupMessageInner {
-  return { channelId: 0, messagePayload: undefined };
+  return { channelId: 0, messagePayload: undefined, messageType: 0 };
 }
 
 export const GroupMessageInner: MessageFns<GroupMessageInner> = {
@@ -7512,6 +7565,9 @@ export const GroupMessageInner: MessageFns<GroupMessageInner> = {
     }
     if (message.messagePayload !== undefined) {
       MessagePayload.encode(message.messagePayload, writer.uint32(18).fork()).join();
+    }
+    if (message.messageType !== undefined && message.messageType !== 0) {
+      writer.uint32(24).uint32(message.messageType);
     }
     return writer;
   },
@@ -7539,6 +7595,14 @@ export const GroupMessageInner: MessageFns<GroupMessageInner> = {
           message.messagePayload = MessagePayload.decode(reader, reader.uint32());
           continue;
         }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.messageType = reader.uint32();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -7552,6 +7616,11 @@ export const GroupMessageInner: MessageFns<GroupMessageInner> = {
     return {
       channelId: isSet(object.channelId) ? globalThis.Number(object.channelId) : 0,
       messagePayload: isSet(object.messagePayload) ? MessagePayload.fromJSON(object.messagePayload) : undefined,
+      messageType: isSet(object.messageType)
+        ? globalThis.Number(object.messageType)
+        : isSet(object.message_type)
+        ? globalThis.Number(object.message_type)
+        : 0,
     };
   },
 
@@ -7562,6 +7631,9 @@ export const GroupMessageInner: MessageFns<GroupMessageInner> = {
     }
     if (message.messagePayload !== undefined) {
       obj.messagePayload = MessagePayload.toJSON(message.messagePayload);
+    }
+    if (message.messageType !== undefined && message.messageType !== 0) {
+      obj.messageType = Math.round(message.messageType);
     }
     return obj;
   },
@@ -7575,6 +7647,7 @@ export const GroupMessageInner: MessageFns<GroupMessageInner> = {
     message.messagePayload = (object.messagePayload !== undefined && object.messagePayload !== null)
       ? MessagePayload.fromPartial(object.messagePayload)
       : undefined;
+    message.messageType = object.messageType ?? 0;
     return message;
   },
 };

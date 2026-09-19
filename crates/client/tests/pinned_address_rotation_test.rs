@@ -7,7 +7,7 @@ use firefly_client::db::{
 use firefly_client::websocket::FireflyWsClient;
 use firefly_protos::{
     deserialize_proto, serialize_proto,
-    firefly::{self, mod_GroupMessageInner, mod_UserMessageInner, MessagePayload},
+    firefly::{self, mod_GroupMessageInner, MessagePayload},
     MESSAGE_TYPE_PINNED,
 };
 use sqlx::SqlitePool;
@@ -449,6 +449,14 @@ async fn test_pinned_messages_persist_across_group_readd_and_rotation() {
         .await
         .expect("Alice create group");
     let group_id = group.id;
+
+    // This scenario lets Bob pin after rotating; explicitly grant that right.
+    alice_client.update_group_roles(group_id, vec![firefly_client::group::UpdateRoleProposalFfi {
+        name: "default".into(), role_id: 0,
+        permissions: firefly_core::config::DEFAULT_GROUP_PERMISSIONS
+            | firefly_core::config::UserPermission::PinMessage as u32,
+        delete: false, color: 0,
+    }]).await.expect("Grant PinMessage for rotation scenario");
 
     alice_client
         .add_group_member(group_id, bob_name.clone(), 0)

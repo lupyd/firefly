@@ -1,4 +1,15 @@
 export * as protos from './protos/message';
+/** Group/channel permission bits. Existing values and wire masks are unchanged. */
+export declare enum UserPermission {
+    SeeMessage = 1,
+    PinMessage = 2,
+    AddMessage = 4,
+    ManageChannel = 8,
+    ManageRole = 16,
+    ManageMember = 32,
+    ManageGroup = 64
+}
+export declare const DEFAULT_GROUP_PERMISSIONS: number;
 export interface RawUserMessage {
     id: number;
     other: string;

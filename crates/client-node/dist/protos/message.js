@@ -5979,7 +5979,7 @@ exports.EncryptedFiles = {
     },
 };
 function createBaseMessagePayload() {
-    return { text: "", files: undefined, editedOf: undefined, replyingTo: undefined, deleted: undefined };
+    return { text: "", files: undefined, editedOf: undefined, replyingTo: undefined, deleted: undefined, messageType: 0 };
 }
 exports.MessagePayload = {
     encode(message, writer = new wire_1.BinaryWriter()) {
@@ -6006,6 +6006,9 @@ exports.MessagePayload = {
                 throw new globalThis.Error("value provided for field message.deleted of type fixed64 too large");
             }
             writer.uint32(49).fixed64(message.deleted);
+        }
+        if (message.messageType !== undefined && message.messageType !== 0) {
+            writer.uint32(56).uint32(message.messageType);
         }
         return writer;
     },
@@ -6051,6 +6054,13 @@ exports.MessagePayload = {
                     message.deleted = reader.fixed64();
                     continue;
                 }
+                case 7: {
+                    if (tag !== 56) {
+                        break;
+                    }
+                    message.messageType = reader.uint32();
+                    continue;
+                }
             }
             if ((tag & 7) === 4 || tag === 0) {
                 break;
@@ -6066,6 +6076,11 @@ exports.MessagePayload = {
             editedOf: isSet(object.editedOf) ? BigInt(object.editedOf) : undefined,
             replyingTo: isSet(object.replyingTo) ? BigInt(object.replyingTo) : undefined,
             deleted: isSet(object.deleted) ? BigInt(object.deleted) : undefined,
+            messageType: isSet(object.messageType)
+                ? globalThis.Number(object.messageType)
+                : isSet(object.message_type)
+                    ? globalThis.Number(object.message_type)
+                    : 0,
         };
     },
     toJSON(message) {
@@ -6085,6 +6100,9 @@ exports.MessagePayload = {
         if (message.deleted !== undefined) {
             obj.deleted = message.deleted.toString();
         }
+        if (message.messageType !== undefined && message.messageType !== 0) {
+            obj.messageType = Math.round(message.messageType);
+        }
         return obj;
     },
     create(base) {
@@ -6103,6 +6121,7 @@ exports.MessagePayload = {
             ? BigInt(object.replyingTo)
             : undefined;
         message.deleted = (object.deleted !== undefined && object.deleted !== null) ? BigInt(object.deleted) : undefined;
+        message.messageType = object.messageType ?? 0;
         return message;
     },
 };
@@ -6273,7 +6292,14 @@ exports.SelfUserMessage = {
     },
 };
 function createBaseUserMessageInner() {
-    return { plainText: undefined, callMessage: undefined, messagePayload: undefined, selfMessage: undefined, nonce: 0 };
+    return {
+        plainText: undefined,
+        callMessage: undefined,
+        messagePayload: undefined,
+        selfMessage: undefined,
+        nonce: 0,
+        messageType: 0,
+    };
 }
 exports.UserMessageInner = {
     encode(message, writer = new wire_1.BinaryWriter()) {
@@ -6292,6 +6318,9 @@ exports.UserMessageInner = {
         if (message.nonce !== 0) {
             writer.uint32(85).fixed32(message.nonce);
         }
+        if (message.messageType !== undefined && message.messageType !== 0) {
+            writer.uint32(40).uint32(message.messageType);
+        }
         return writer;
     },
     decode(input, length) {
@@ -6305,7 +6334,7 @@ exports.UserMessageInner = {
                     if (tag !== 10) {
                         break;
                     }
-                    message.plainText = Buffer.from(reader.bytes());
+                    message.plainText = reader.bytes();
                     continue;
                 }
                 case 2: {
@@ -6336,6 +6365,13 @@ exports.UserMessageInner = {
                     message.nonce = reader.fixed32();
                     continue;
                 }
+                case 5: {
+                    if (tag !== 40) {
+                        break;
+                    }
+                    message.messageType = reader.uint32();
+                    continue;
+                }
             }
             if ((tag & 7) === 4 || tag === 0) {
                 break;
@@ -6351,6 +6387,11 @@ exports.UserMessageInner = {
             messagePayload: isSet(object.messagePayload) ? exports.MessagePayload.fromJSON(object.messagePayload) : undefined,
             selfMessage: isSet(object.selfMessage) ? exports.SelfUserMessage.fromJSON(object.selfMessage) : undefined,
             nonce: isSet(object.nonce) ? globalThis.Number(object.nonce) : 0,
+            messageType: isSet(object.messageType)
+                ? globalThis.Number(object.messageType)
+                : isSet(object.message_type)
+                    ? globalThis.Number(object.message_type)
+                    : 0,
         };
     },
     toJSON(message) {
@@ -6370,6 +6411,9 @@ exports.UserMessageInner = {
         if (message.nonce !== 0) {
             obj.nonce = Math.round(message.nonce);
         }
+        if (message.messageType !== undefined && message.messageType !== 0) {
+            obj.messageType = Math.round(message.messageType);
+        }
         return obj;
     },
     create(base) {
@@ -6388,11 +6432,12 @@ exports.UserMessageInner = {
             ? exports.SelfUserMessage.fromPartial(object.selfMessage)
             : undefined;
         message.nonce = object.nonce ?? 0;
+        message.messageType = object.messageType ?? 0;
         return message;
     },
 };
 function createBaseGroupMessageInner() {
-    return { channelId: 0, messagePayload: undefined };
+    return { channelId: 0, messagePayload: undefined, messageType: 0 };
 }
 exports.GroupMessageInner = {
     encode(message, writer = new wire_1.BinaryWriter()) {
@@ -6401,6 +6446,9 @@ exports.GroupMessageInner = {
         }
         if (message.messagePayload !== undefined) {
             exports.MessagePayload.encode(message.messagePayload, writer.uint32(18).fork()).join();
+        }
+        if (message.messageType !== undefined && message.messageType !== 0) {
+            writer.uint32(24).uint32(message.messageType);
         }
         return writer;
     },
@@ -6425,6 +6473,13 @@ exports.GroupMessageInner = {
                     message.messagePayload = exports.MessagePayload.decode(reader, reader.uint32());
                     continue;
                 }
+                case 3: {
+                    if (tag !== 24) {
+                        break;
+                    }
+                    message.messageType = reader.uint32();
+                    continue;
+                }
             }
             if ((tag & 7) === 4 || tag === 0) {
                 break;
@@ -6437,6 +6492,11 @@ exports.GroupMessageInner = {
         return {
             channelId: isSet(object.channelId) ? globalThis.Number(object.channelId) : 0,
             messagePayload: isSet(object.messagePayload) ? exports.MessagePayload.fromJSON(object.messagePayload) : undefined,
+            messageType: isSet(object.messageType)
+                ? globalThis.Number(object.messageType)
+                : isSet(object.message_type)
+                    ? globalThis.Number(object.message_type)
+                    : 0,
         };
     },
     toJSON(message) {
@@ -6446,6 +6506,9 @@ exports.GroupMessageInner = {
         }
         if (message.messagePayload !== undefined) {
             obj.messagePayload = exports.MessagePayload.toJSON(message.messagePayload);
+        }
+        if (message.messageType !== undefined && message.messageType !== 0) {
+            obj.messageType = Math.round(message.messageType);
         }
         return obj;
     },
@@ -6458,6 +6521,7 @@ exports.GroupMessageInner = {
         message.messagePayload = (object.messagePayload !== undefined && object.messagePayload !== null)
             ? exports.MessagePayload.fromPartial(object.messagePayload)
             : undefined;
+        message.messageType = object.messageType ?? 0;
         return message;
     },
 };

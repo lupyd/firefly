@@ -603,15 +603,113 @@ async fn test_channel_permissions_overrides_and_restriction() {
         "Result of uploading message to read-only channel: is_ok={:?}",
         send_result.is_ok()
     );
+    assert!(send_result.is_err(), "Client must reject sends without channel SeeMessage/AddMessage");
 
-    // Document whether the message was restricted at upload time or delivered:
-    if send_result.is_ok() {
-        println!(
-            "NOTE: Message upload to channel 1 succeeded at transport layer. Checking if receivers enforce channel permissions..."
-        );
-    } else {
-        println!("✓ Message upload correctly rejected for read-only channel!");
-    }
+    // Bob currently has AddMessage | ManageChannel in channel 1, but lacks SeeMessage.
+    // Sending must fail because SeeMessage is required to send in a channel.
+    let bob_chan1_msg = firefly::GroupMessageInner {
+        channelId: 1,
+        message: firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(
+            firefly::MessagePayload {
+                text: "Bob message in channel 1 without SeeMessage".into(),
+                ..Default::default()
+            },
+        ),
+        message_type: 0,
+    };
+    assert!(
+        bob.upload_group_message(group_id, bob_chan1_msg.clone(), 0).await.is_err(),
+        "Bob without SeeMessage in channel 1 must NOT be allowed to send!"
+    );
+
+    // Alice grants Role 3 SeeMessage | AddMessage in channel 1
+    alice
+        .update_group_roles_in_channel(
+            group_id,
+            1,
+            vec![UpdateRoleProposalFfi {
+                name: "channel_admin".into(),
+                role_id: 3,
+                permissions: (UserPermission::SeeMessage as u32)
+                    | (UserPermission::AddMessage as u32)
+                    | (UserPermission::ManageChannel as u32),
+                delete: false,
+                color: 2,
+            }],
+        )
+        .await
+        .expect("Alice grants SeeMessage | AddMessage in channel 1");
+    bob.check_setup().await.expect("Bob sync after channel 1 perm grant");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Bob can now send a regular message to channel 1
+    let bob_send_ok = bob.upload_group_message(group_id, bob_chan1_msg, 0).await;
+    assert!(
+        bob_send_ok.is_ok(),
+        "Bob with SeeMessage | AddMessage in channel 1 must be allowed to send: {:?}",
+        bob_send_ok.err()
+    );
+
+    // Bob attempts to send a pinned message to channel 1 without PinMessage -> MUST FAIL
+    let bob_pin_chan1 = firefly::GroupMessageInner {
+        channelId: 1,
+        message: firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(
+            firefly::MessagePayload {
+                text: "Bob pinned message in channel 1".into(),
+                ..Default::default()
+            },
+        ),
+        message_type: firefly_protos::MESSAGE_TYPE_PINNED,
+    };
+    assert!(
+        bob.upload_group_message(group_id, bob_pin_chan1.clone(), 0).await.is_err(),
+        "Bob without PinMessage in channel 1 must NOT be allowed to send pinned message!"
+    );
+
+    // Alice grants Role 3 PinMessage in channel 1
+    alice
+        .update_group_roles_in_channel(
+            group_id,
+            1,
+            vec![UpdateRoleProposalFfi {
+                name: "channel_admin".into(),
+                role_id: 3,
+                permissions: (UserPermission::SeeMessage as u32)
+                    | (UserPermission::AddMessage as u32)
+                    | (UserPermission::PinMessage as u32)
+                    | (UserPermission::ManageChannel as u32),
+                delete: false,
+                color: 2,
+            }],
+        )
+        .await
+        .expect("Alice grants PinMessage in channel 1");
+    bob.check_setup().await.expect("Bob sync after channel 1 pin grant");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Bob can now send a pinned message to channel 1
+    let bob_pin_ok = bob.upload_group_message(group_id, bob_pin_chan1, 0).await;
+    assert!(
+        bob_pin_ok.is_ok(),
+        "Bob with PinMessage in channel 1 must be allowed to send pinned message: {:?}",
+        bob_pin_ok.err()
+    );
+
+    // Non-existent channel 999 must fail closed
+    let unknown_chan_msg = firefly::GroupMessageInner {
+        channelId: 999,
+        message: firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(
+            firefly::MessagePayload {
+                text: "Message to nonexistent channel".into(),
+                ..Default::default()
+            },
+        ),
+        message_type: 0,
+    };
+    assert!(
+        bob.upload_group_message(group_id, unknown_chan_msg, 0).await.is_err(),
+        "Sending to nonexistent channel 999 must fail closed!"
+    );
 
     alice.dispose().await;
     bob.dispose().await;
@@ -653,11 +751,31 @@ async fn test_exhaustive_permission_matrix() {
 
     // Table of individual permissions to test
     let permissions_to_test = vec![
+        ("SeeMessage", UserPermission::SeeMessage as u32),
+        ("PinMessage", UserPermission::PinMessage as u32),
         ("AddMessage", UserPermission::AddMessage as u32),
         ("ManageGroup", UserPermission::ManageGroup as u32),
         ("ManageRole", UserPermission::ManageRole as u32),
         ("ManageMember", UserPermission::ManageMember as u32),
         ("ManageChannel", UserPermission::ManageChannel as u32),
+        (
+            "See_and_Add",
+            (UserPermission::SeeMessage as u32) | (UserPermission::AddMessage as u32),
+        ),
+        (
+            "See_Add_Pin",
+            (UserPermission::SeeMessage as u32)
+                | (UserPermission::AddMessage as u32)
+                | (UserPermission::PinMessage as u32),
+        ),
+        (
+            "See_and_Pin",
+            (UserPermission::SeeMessage as u32) | (UserPermission::PinMessage as u32),
+        ),
+        (
+            "Add_and_Pin",
+            (UserPermission::AddMessage as u32) | (UserPermission::PinMessage as u32),
+        ),
     ];
 
     println!("\n=======================================================");
@@ -765,12 +883,249 @@ async fn test_exhaustive_permission_matrix() {
             );
             println!("  ✓ [{}] Role creation blocked when permission bit missing", perm_name);
         }
+
+        // Message send permissions: Requires SeeMessage | AddMessage
+        let msg = firefly::GroupMessageInner {
+            channelId: 0,
+            message_type: 0,
+            message: firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(
+                firefly::MessagePayload {
+                    text: format!("test from {}", perm_name).into(),
+                    ..Default::default()
+                },
+            ),
+        };
+        let can_send = (perm_bit & ((UserPermission::SeeMessage as u32) | (UserPermission::AddMessage as u32)))
+            == ((UserPermission::SeeMessage as u32) | (UserPermission::AddMessage as u32));
+        let send_res = bob.upload_group_message(group_id, msg, 0).await;
+        assert_eq!(
+            send_res.is_ok(),
+            can_send,
+            "Bob send permission check for {perm_name} (perm_bit=0x{perm_bit:X}, can_send={can_send})"
+        );
+        println!("  ✓ [{}] Send message check: can_send={} matches is_ok={}", perm_name, can_send, send_res.is_ok());
+
+        // Pinned message permissions: Requires SeeMessage | AddMessage | PinMessage
+        let pin_msg = firefly::GroupMessageInner {
+            channelId: 0,
+            message_type: firefly_protos::MESSAGE_TYPE_PINNED,
+            message: firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(
+                firefly::MessagePayload {
+                    text: format!("pin from {}", perm_name).into(),
+                    ..Default::default()
+                },
+            ),
+        };
+        let can_pin = (perm_bit & ((UserPermission::SeeMessage as u32) | (UserPermission::AddMessage as u32) | (UserPermission::PinMessage as u32)))
+            == ((UserPermission::SeeMessage as u32) | (UserPermission::AddMessage as u32) | (UserPermission::PinMessage as u32));
+        let pin_res = bob.upload_group_message(group_id, pin_msg, 0).await;
+        assert_eq!(
+            pin_res.is_ok(),
+            can_pin,
+            "Bob pin permission check for {perm_name} (perm_bit=0x{perm_bit:X}, can_pin={can_pin})"
+        );
+        println!("  ✓ [{}] Pinned message check: can_pin={} matches is_ok={}", perm_name, can_pin, pin_res.is_ok());
     }
 
     println!("\n=======================================================");
     println!(" EXHAUSTIVE PERMISSION MATRIX TESTS PASSED");
     println!("=======================================================\n");
 
+    alice.dispose().await;
+    bob.dispose().await;
+    cleanup_dir(&test_dir);
+}
+
+#[tokio::test]
+async fn test_message_permissions_defaults_revocation_and_cached_history() {
+    use firefly_core::config::DEFAULT_GROUP_PERMISSIONS;
+    use firefly_protos::{deserialize_proto, serialize_proto};
+    let Some((base_url, ws_url)) = setup_server().await else {
+        return;
+    };
+    let run = rand::random::<u32>();
+    let test_dir = format!("/tmp/firefly/message_permissions_{run}");
+    std::fs::create_dir_all(&test_dir).unwrap();
+    let (alice, _, _) =
+        create_client_helper(&base_url, &ws_url, &test_dir, &format!("perm_a_{run}")).await;
+    let (bob, _, mut received) =
+        create_client_helper(&base_url, &ws_url, &test_dir, &format!("perm_b_{run}")).await;
+    let group_id = alice
+        .create_group("message rules".into(), "".into(), 0)
+        .await
+        .unwrap()
+        .id;
+    let ext = alice.get_group_extension(group_id).await.unwrap();
+    assert_eq!(
+        deserialize_proto::<firefly::FireflyGroupExtension>(&ext)
+            .unwrap()
+            .default_permissions,
+        DEFAULT_GROUP_PERMISSIONS
+    );
+    alice
+        .add_group_member(group_id, format!("perm_b_{run}"), 0)
+        .await
+        .unwrap();
+    bob.check_setup().await.unwrap();
+
+    async fn await_permissions(client: &FireflyWsClient, id: u64, expected: u32) {
+        for _ in 0..100 {
+            if let Ok(bytes) = client.get_group_extension(id).await {
+                if firefly_protos::deserialize_proto::<firefly::FireflyGroupExtension>(&bytes)
+                    .unwrap()
+                    .default_permissions
+                    == expected
+                {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("permission commit was not processed");
+    }
+    async fn set_default(client: &FireflyWsClient, id: u64, permissions: u32) {
+        client
+            .update_group_roles(
+                id,
+                vec![UpdateRoleProposalFfi {
+                    name: "default".into(),
+                    role_id: 0,
+                    permissions,
+                    delete: false,
+                    color: 0,
+                }],
+            )
+            .await
+            .unwrap();
+    }
+    fn msg(text: &str, pinned: bool) -> firefly::GroupMessageInner<'static> {
+        firefly::GroupMessageInner {
+            channelId: 0,
+            message_type: if pinned {
+                firefly_protos::MESSAGE_TYPE_PINNED
+            } else {
+                0
+            },
+            message: firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(
+                firefly::MessagePayload {
+                    text: text.to_owned().into(),
+                    ..Default::default()
+                },
+            ),
+        }
+    }
+    await_permissions(&bob, group_id, 5).await;
+    // Keep the same exposed history handle across revocation and restoration.
+    let history = bob.group_message_store();
+    assert!(
+        bob.upload_group_message(group_id, msg("no pin permission", true), 0)
+            .await
+            .is_err()
+    );
+    assert!(
+        bob.upload_group_message(group_id, msg("ordinary message", false), 0)
+            .await
+            .is_ok()
+    );
+    let pinned_id = alice
+        .upload_group_message(group_id, msg("owner pin", true), 0)
+        .await
+        .unwrap();
+    loop {
+        let m = tokio::time::timeout(Duration::from_secs(5), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if m.id == pinned_id {
+            break;
+        }
+    }
+    assert!(
+        history
+            .get_pinned_messages(group_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|m| m.id == pinned_id)
+    );
+
+    set_default(&alice, group_id, 7).await;
+    await_permissions(&bob, group_id, 7).await;
+    // The low-level pin upload helper cannot bypass the shared core check.
+    bob.encrypt_and_send_group_pinned(
+        group_id,
+        serialize_proto(&msg("member pin", false)).unwrap().to_vec(),
+    )
+    .await
+    .unwrap();
+
+    // Existing groups immediately lose access when SeeMessage is absent, even
+    // with AddMessage and PinMessage present. Plaintext cached earlier is hidden.
+    set_default(&alice, group_id, 6).await;
+    await_permissions(&bob, group_id, 6).await;
+    assert!(
+        history
+            .get(group_id, u64::MAX / 2, 100)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        history
+            .get_pinned_messages(group_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(history.get_all_last_messages().await.unwrap().is_empty());
+    assert!(history.get_last_message_of_group(group_id).await.is_err());
+    assert!(
+        bob.upload_group_message(group_id, msg("blind send", false), 0)
+            .await
+            .is_err()
+    );
+    assert!(
+        bob.encrypt_and_send_group_pinned(
+            group_id,
+            serialize_proto(&msg("blind pin", false)).unwrap().to_vec()
+        )
+        .await
+        .is_err()
+    );
+    while received.try_recv().is_ok() {}
+    alice
+        .upload_group_message(group_id, msg("hidden while revoked", false), 0)
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), received.recv())
+            .await
+            .is_err()
+    );
+
+    // Commits still flow while application reads are denied; restoring access
+    // must work without resetting MLS state or replaying denied plaintext.
+    set_default(&alice, group_id, 5).await;
+    await_permissions(&bob, group_id, 5).await;
+    assert!(
+        !history
+            .get_pinned_messages(group_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let visible_id = alice
+        .upload_group_message(group_id, msg("visible again", false), 0)
+        .await
+        .unwrap();
+    let visible = tokio::time::timeout(Duration::from_secs(5), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(visible.id, visible_id);
+    for item in history.get(group_id, u64::MAX / 2, 100).await.unwrap() {
+        assert!(!String::from_utf8_lossy(&item.message).contains("hidden while revoked"));
+    }
     alice.dispose().await;
     bob.dispose().await;
     cleanup_dir(&test_dir);

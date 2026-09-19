@@ -398,13 +398,46 @@ impl FireflyMlsGroup {
     }
 
     pub async fn encrypt(&self, data: &[u8]) -> anyhow::Result<Vec<u8>> {
-        Ok(self
-            .group
-            .lock()
-            .await
+        let mut group = self.group.lock().await;
+        let extension = group
+            .context()
+            .extensions()
+            .get_as::<FireflyGroupExtension>()?
+            .context("no firefly extension on group")?;
+        let username = get_username_from_signing_identity(
+            &group
+                .member_at_index(group.current_member_index())
+                .context("local MLS member missing")?
+                .signing_identity,
+        )?;
+        rules::FireflyMlsRules::check_message_sender(&extension.deserialize()?, &username, data)?;
+        Ok(group
             .encrypt_application_message(data, Vec::new())
             .await?
             .to_bytes()?)
+    }
+
+    /// Check current read access, including for plaintext cached in local storage.
+    pub async fn can_see_message(&self, channel_id: u32) -> anyhow::Result<bool> {
+        let group = self.group.lock().await;
+        let extension = group
+            .context()
+            .extensions()
+            .get_as::<FireflyGroupExtension>()?
+            .context("no firefly extension on group")?;
+        let username = get_username_from_signing_identity(
+            &group
+                .member_at_index(group.current_member_index())
+                .context("local MLS member missing")?
+                .signing_identity,
+        )?;
+        Ok(rules::FireflyMlsRules::require_message_permission(
+            &extension.deserialize()?,
+            &username,
+            channel_id,
+            config::UserPermission::SeeMessage,
+        )
+        .is_ok())
     }
 
     pub async fn process(&self, message: &[u8]) -> anyhow::Result<FireflyMlsReceivedMessage> {
@@ -421,6 +454,36 @@ impl FireflyMlsGroup {
                         .ok_or(anyhow::anyhow!("member at index doesn't exist"))?
                         .signing_identity,
                 )?;
+
+                let extension = group
+                    .context()
+                    .extensions()
+                    .get_as::<FireflyGroupExtension>()?
+                    .context("no firefly extension on group")?;
+                let wrapper = extension.deserialize()?;
+                let local_username = get_username_from_signing_identity(
+                    &group
+                        .member_at_index(group.current_member_index())
+                        .context("local MLS member missing")?
+                        .signing_identity,
+                )?;
+                let data = application_message_description.data();
+                let permission_result =
+                    rules::FireflyMlsRules::check_message_sender(&wrapper, &sender_username, data)
+                        .and_then(|_| {
+                            rules::FireflyMlsRules::require_message_permission(
+                                &wrapper,
+                                &local_username,
+                                rules::FireflyMlsRules::message_metadata(data).0,
+                                config::UserPermission::SeeMessage,
+                            )
+                        });
+                if let Err(denied) = permission_result {
+                    // Decryption consumes a ratchet generation even when policy
+                    // rejects the plaintext. Persist it, but never expose data.
+                    group.write_to_storage().await?;
+                    return Err(denied.into());
+                }
 
                 FireflyMlsReceivedMessage::Message(EncryptedMessage {
                     sender: sender_username,

@@ -1,14 +1,13 @@
 use std::{
     collections::HashMap,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Context;
 use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
 use firefly_core::{
     FireflyAuthTokenCallback, FireflyIdentity, FireflyMlsClient, FireflyMlsGroup,
-    config::{UpdateRoleInChannelProposal, UpdateRoleProposal, UpdateUserProposal, UserPermission},
+    config::{UpdateRoleInChannelProposal, UpdateRoleProposal, UpdateUserProposal},
     extension::FireflyGroupExtensionWrapper,
 };
 use firefly_protos::firefly::{FireflyGroupMember, FireflyGroupRole};
@@ -268,7 +267,7 @@ impl FfiMlsClient {
 
         let mut ext = FireflyGroupExtensionWrapper::new(Default::default());
 
-        ext.update_group(group_name.clone(), UserPermission::AddMessage as u32);
+        ext.update_group(group_name.clone(), firefly_core::config::DEFAULT_GROUP_PERMISSIONS);
 
         ext.update_role(FireflyGroupRole {
             id: 1,
@@ -387,6 +386,10 @@ impl FfiMlsGroup {
 
     pub async fn encrypt(&self, data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
         self.group.encrypt(&data).await
+    }
+
+    pub async fn can_see_message(&self, channel_id: u32) -> anyhow::Result<bool> {
+        self.group.can_see_message(channel_id).await
     }
 
     pub async fn re_add_member(&self, username: String, address: u64) -> anyhow::Result<u64> {

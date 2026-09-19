@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::SystemTime;
 use tokio::sync::RwLock;
 use rand::RngCore;
 use libsignal_protocol::{kem::KeyType, *};
@@ -360,6 +359,29 @@ pub trait GroupMessageStorage: Send + Sync {
     ) -> anyhow::Result<()>;
 }
 
+pub(crate) fn is_same_pinned_group_message(a_bytes: &[u8], b_bytes: &[u8]) -> bool {
+    if a_bytes == b_bytes {
+        return true;
+    }
+    if let (Ok(a), Ok(b)) = (
+        firefly_protos::deserialize_proto::<firefly_protos::firefly::GroupMessageInner>(a_bytes),
+        firefly_protos::deserialize_proto::<firefly_protos::firefly::GroupMessageInner>(b_bytes),
+    ) {
+        if a.channelId == b.channelId {
+            match (&a.message, &b.message) {
+                (
+                    firefly_protos::firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(pa),
+                    firefly_protos::firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(pb),
+                ) => {
+                    return pa.text == pb.text && pa.files == pb.files;
+                }
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
 #[derive(Clone, Default)]
 pub struct MemoryGroupMessageStore {
     messages: Arc<RwLock<Vec<GroupMessage>>>,
@@ -385,6 +407,19 @@ impl GroupMessageStorage for MemoryGroupMessageStore {
         message_type: u32,
     ) -> anyhow::Result<()> {
         let mut guard = self.messages.write().await;
+        let mut message_type = message_type;
+        if message_type & firefly_protos::MESSAGE_TYPE_PINNED != 0 {
+            let newest = guard.iter().filter(|m| m.group_id == group_id && m.channel_id == channel_id
+                && m.message_type & firefly_protos::MESSAGE_TYPE_PINNED != 0
+                && is_same_pinned_group_message(&m.message, message))
+                .map(|m| m.id).chain(std::iter::once(id)).max().unwrap_or(id);
+            for existing in guard.iter_mut().filter(|m| m.group_id == group_id && m.channel_id == channel_id
+                && m.id != newest && is_same_pinned_group_message(&m.message, message)) {
+                existing.message_type &= !firefly_protos::MESSAGE_TYPE_PINNED;
+            }
+            if id != newest { message_type &= !firefly_protos::MESSAGE_TYPE_PINNED; }
+        }
+        guard.retain(|m| m.group_id != group_id || m.id != id);
         guard.push(GroupMessage {
             id,
             group_id,

@@ -34,6 +34,8 @@ export type {
   RawGroupInfo,
 };
 
+export { UserPermission, DEFAULT_GROUP_PERMISSIONS } from 'firefly-client-node';
+
 const GroupMessageInner = protos.GroupMessageInner;
 const UserMessageInner = protos.UserMessageInner;
 

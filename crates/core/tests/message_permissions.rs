@@ -1,0 +1,143 @@
+use firefly_core::{
+    config::{DEFAULT_GROUP_PERMISSIONS, UserPermission},
+    extension::FireflyGroupExtensionWrapper,
+    rules::{FireflyMlsRules, has_permission},
+};
+use firefly_protos::{firefly::*, serialize_proto};
+
+const SEE: u32 = UserPermission::SeeMessage as u32;
+const PIN: u32 = UserPermission::PinMessage as u32;
+const ADD: u32 = UserPermission::AddMessage as u32;
+
+fn extension(default_permissions: u32) -> FireflyGroupExtensionWrapper<'static> {
+    FireflyGroupExtensionWrapper::new(FireflyGroupExtension {
+        default_permissions,
+        ..Default::default()
+    })
+}
+
+fn payload(channel: u32, outer: u32, nested: u32) -> Vec<u8> {
+    serialize_proto(&GroupMessageInner {
+        channelId: channel,
+        message_type: outer,
+        message: mod_GroupMessageInner::OneOfmessage::messagePayload(MessagePayload {
+            text: "hello".into(),
+            message_type: nested,
+            ..Default::default()
+        }),
+    })
+    .unwrap()
+    .to_vec()
+}
+
+#[test]
+fn permission_values_and_new_group_default_are_wire_compatible() {
+    assert_eq!((SEE, PIN, ADD), (1, 2, 4));
+    assert_eq!(UserPermission::ManageChannel as u32, 8);
+    assert_eq!(UserPermission::ManageRole as u32, 16);
+    assert_eq!(UserPermission::ManageMember as u32, 32);
+    assert_eq!(UserPermission::ManageGroup as u32, 64);
+    assert_eq!(DEFAULT_GROUP_PERMISSIONS, SEE | ADD);
+    assert!(!has_permission(DEFAULT_GROUP_PERMISSIONS, PIN));
+    // Existing masks are not silently upgraded, including old AddMessage-only groups.
+    let old = extension(ADD).serialize().unwrap();
+    let decoded = FireflyGroupExtensionWrapper::deserialize(&old).unwrap();
+    assert_eq!(decoded.default_permissions(), ADD);
+    assert!(FireflyMlsRules::check_message_sender(&decoded, "member", &payload(0, 0, 0)).is_err());
+}
+
+#[test]
+fn exhaustive_send_read_and_pin_bit_combinations() {
+    for mask in 0..128 {
+        let ext = extension(mask);
+        let read = FireflyMlsRules::require_message_permission(
+            &ext,
+            "member",
+            0,
+            UserPermission::SeeMessage,
+        );
+        assert_eq!(read.is_ok(), mask & SEE != 0, "read mask={mask}");
+        for (outer, nested) in [(0, 0), (1, 0), (0, 1), (1, 1), (0x80, 0), (0x80, 0x81)] {
+            let pinned = (outer | nested) & 1 != 0;
+            let required = SEE | ADD | if pinned { PIN } else { 0 };
+            assert_eq!(
+                FireflyMlsRules::check_message_sender(&ext, "member", &payload(0, outer, nested))
+                    .is_ok(),
+                mask & required == required,
+                "mask={mask}, outer={outer}, nested={nested}",
+            );
+        }
+    }
+}
+
+#[test]
+fn channel_overrides_replace_defaults_and_missing_channels_fail_closed() {
+    let mut ext = extension(SEE | ADD | PIN);
+    ext.update_role(FireflyGroupRole {
+        id: 1,
+        name: "member".into(),
+        permissions: SEE | ADD,
+        ..Default::default()
+    });
+    ext.update_member(FireflyGroupMember {
+        username: "alice".into(),
+        role: 1,
+    });
+    ext.update_channel(FireflyGroupChannel {
+        id: 7,
+        default_permissions: SEE,
+        ..Default::default()
+    });
+    // Channel defaults restrict even a group role with more permissions.
+    assert_eq!(FireflyMlsRules::message_permissions(&ext, "alice", 7), SEE);
+    assert_eq!(
+        FireflyMlsRules::message_permissions(&ext, "default_member", 7),
+        SEE
+    );
+    assert!(FireflyMlsRules::check_message_sender(&ext, "alice", &payload(7, 0, 0)).is_err());
+    ext.update_channel_role_permissions(7, 1, SEE | ADD | PIN)
+        .unwrap();
+    assert!(FireflyMlsRules::check_message_sender(&ext, "alice", &payload(7, 0, 1)).is_ok());
+    ext.update_channel_role_permissions(7, 1, 0).unwrap();
+    assert!(
+        FireflyMlsRules::require_message_permission(&ext, "alice", 7, UserPermission::SeeMessage)
+            .is_err()
+    );
+    assert_eq!(FireflyMlsRules::message_permissions(&ext, "alice", 999), 0);
+    assert!(FireflyMlsRules::check_message_sender(&ext, "alice", &payload(999, 0, 0)).is_err());
+    // Explicit channel zero overrides the group-wide fallback too.
+    ext.update_channel(FireflyGroupChannel {
+        id: 0,
+        default_permissions: 0,
+        ..Default::default()
+    });
+    assert_eq!(FireflyMlsRules::message_permissions(&ext, "alice", 0), 0);
+}
+
+#[test]
+fn raw_legacy_payloads_use_group_wide_permissions_without_bypassing_them() {
+    for data in [b"Hello".as_slice(), b"", &[0xff, 0xff]] {
+        assert!(
+            FireflyMlsRules::check_message_sender(&extension(SEE | ADD), "member", data).is_ok()
+        );
+        assert!(FireflyMlsRules::check_message_sender(&extension(ADD), "member", data).is_err());
+        assert!(FireflyMlsRules::check_message_sender(&extension(SEE), "member", data).is_err());
+    }
+}
+
+#[test]
+fn undefined_roles_fail_closed_and_default_roster_members_need_no_extension_entry() {
+    let ext = FireflyGroupExtensionWrapper::new(FireflyGroupExtension {
+        default_permissions: SEE | ADD | PIN,
+        members: vec![FireflyGroupMember {
+            username: "broken".into(),
+            role: 999,
+        }],
+        ..Default::default()
+    });
+    assert_eq!(FireflyMlsRules::message_permissions(&ext, "broken", 0), 0);
+    assert_eq!(
+        FireflyMlsRules::message_permissions(&ext, "authenticated_default_member", 0),
+        SEE | ADD | PIN
+    );
+}

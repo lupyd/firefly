@@ -33,7 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.protos = exports.FireflyClientNode = exports.initLogger = exports.FireflyBot = exports.FireflyClient = void 0;
+exports.protos = exports.FireflyClientNode = exports.initLogger = exports.FireflyBot = exports.FireflyClient = exports.DEFAULT_GROUP_PERMISSIONS = exports.UserPermission = void 0;
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const http = __importStar(require("http"));
@@ -43,6 +43,9 @@ const firefly_client_node_1 = require("firefly-client-node");
 Object.defineProperty(exports, "FireflyClientNode", { enumerable: true, get: function () { return firefly_client_node_1.FireflyClientNode; } });
 Object.defineProperty(exports, "protos", { enumerable: true, get: function () { return firefly_client_node_1.protos; } });
 Object.defineProperty(exports, "initLogger", { enumerable: true, get: function () { return firefly_client_node_1.initLogger; } });
+var firefly_client_node_2 = require("firefly-client-node");
+Object.defineProperty(exports, "UserPermission", { enumerable: true, get: function () { return firefly_client_node_2.UserPermission; } });
+Object.defineProperty(exports, "DEFAULT_GROUP_PERMISSIONS", { enumerable: true, get: function () { return firefly_client_node_2.DEFAULT_GROUP_PERMISSIONS; } });
 const GroupMessageInner = firefly_client_node_1.protos.GroupMessageInner;
 const UserMessageInner = firefly_client_node_1.protos.UserMessageInner;
 // PKCE utilities

@@ -269,7 +269,7 @@ async fn group_flow() {
     let dave_name = format!("dave_gc_{}", test_run_id);
 
     let mut wrapper = FireflyGroupExtensionWrapper::new(Default::default());
-    wrapper.update_group("alice's group".into(), UserPermission::AddMessage as u32);
+    wrapper.update_group("alice's group".into(), firefly_core::config::DEFAULT_GROUP_PERMISSIONS);
     wrapper.update_role(FireflyGroupRole {
         id: 1,
         name: "owner".into(),
@@ -753,4 +753,179 @@ async fn group_flow() {
         .unwrap();
 
     log::info!("All permission tests passed!");
+}
+
+/// An unchecked MLS peer represents an old/malicious sender and the relay never
+/// participates in authorization. The receiving Firefly rules must reject it.
+#[tokio::test]
+async fn message_permissions_reject_unchecked_mls_peers() {
+    use firefly_core::storage_provider::{
+        FfiGroupStateStorage, FfiKeyPackageStorage, FfiPreSharedKeyStorage,
+    };
+    use firefly_core::{
+        client::load_client, config::FireflyIdentityProvider,
+        extension::FireflyGroupExtension as MlsExtension, rules::MessagePermissionDenied,
+    };
+    use firefly_protos::firefly::{GroupMessageInner, MessagePayload, mod_GroupMessageInner};
+    use mls_rs::extension::MlsExtension as _;
+    use mls_rs::{ExtensionList, MlsMessage};
+
+    if !setup_server().await {
+        return;
+    }
+    let run = rand::random::<u32>();
+    let alice_name = format!("rules_a_{run}");
+    let bob_name = format!("rules_b_{run}");
+    let (alice, _) = new_test_user(&alice_name, 1, None).await;
+    let (bob, _) = new_test_user(&bob_name, 1, None).await;
+    let raw_client = |client: &FireflyMlsClient, name: &str| {
+        let (gs, kp, psk) = store_map.lock().unwrap().get(name).unwrap().clone();
+        load_client(
+            client.get_identity().as_ref().clone(),
+            FfiKeyPackageStorage::new(kp as Arc<dyn MlsKeyPackageStorage>),
+            FfiGroupStateStorage::new(gs as Arc<dyn MlsGroupStateStorage>),
+            FfiPreSharedKeyStorage::new(psk as Arc<dyn MlsPreSharedKeyStorage>),
+            FireflyIdentityProvider::new(get_base_url().into()),
+        )
+        .unwrap()
+    };
+    let raw_a = raw_client(&alice, &alice_name);
+    let raw_b = raw_client(&bob, &bob_name);
+    let payload = |outer, nested| {
+        serialize_proto(&GroupMessageInner {
+            channelId: 0,
+            message_type: outer,
+            message: mod_GroupMessageInner::OneOfmessage::messagePayload(MessagePayload {
+                text: "authenticated ciphertext".into(),
+                message_type: nested,
+                ..Default::default()
+            }),
+        })
+        .unwrap()
+        .to_vec()
+    };
+    let normal = payload(0, 0);
+    let outer_pin = payload(1, 0);
+    let nested_pin = payload(0, 1);
+
+    for mask in 0..8 {
+        let mut extension = FireflyGroupExtensionWrapper::new(FireflyGroupExtension {
+            default_permissions: mask,
+            ..Default::default()
+        });
+        extension.update_role(FireflyGroupRole {
+            id: 1,
+            name: "owner".into(),
+            permissions: u32::MAX,
+            ..Default::default()
+        });
+        extension.update_member(FireflyGroupMember {
+            username: alice_name.clone().into(),
+            role: 1,
+        });
+        let mut extensions = ExtensionList::new();
+        extensions.set(
+            MlsExtension::new(extension)
+                .unwrap()
+                .into_extension()
+                .unwrap(),
+        );
+        let mut ga = raw_a
+            .create_group(extensions, Default::default(), None)
+            .await
+            .unwrap();
+        let kp = bob.generate_key_package().await.unwrap();
+        let commit = ga
+            .commit_builder()
+            .add_member(MlsMessage::from_bytes(&kp).unwrap())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        ga.apply_pending_commit().await.unwrap();
+        let (mut gb, _) = raw_b
+            .join_group(None, &commit.welcome_messages[0], None)
+            .await
+            .unwrap();
+        let forged_pin = gb
+            .encrypt_application_message(&nested_pin, Vec::new())
+            .await
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        let forged_normal = gb
+            .encrypt_application_message(&normal, Vec::new())
+            .await
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        let from_owner = ga
+            .encrypt_application_message(&normal, Vec::new())
+            .await
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        let pin_from_owner = ga
+            .encrypt_application_message(&outer_pin, Vec::new())
+            .await
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        let group_a = FireflyMlsGroup::new(
+            mask as u64,
+            ga,
+            get_base_url().into(),
+            Arc::new(TokenCallbacks {
+                token: alice_name.clone(),
+            }),
+        );
+        let group_b = FireflyMlsGroup::new(
+            mask as u64,
+            gb,
+            get_base_url().into(),
+            Arc::new(TokenCallbacks {
+                token: bob_name.clone(),
+            }),
+        );
+        let can_send = mask & 5 == 5;
+        let can_pin = mask & 7 == 7;
+        let can_read = mask & 1 != 0;
+        assert_eq!(
+            group_b.encrypt(&normal).await.is_ok(),
+            can_send,
+            "send mask={mask}"
+        );
+        assert_eq!(
+            group_b.encrypt(&outer_pin).await.is_ok(),
+            can_pin,
+            "outer pin mask={mask}"
+        );
+        assert_eq!(
+            group_b.encrypt(&nested_pin).await.is_ok(),
+            can_pin,
+            "nested pin mask={mask}"
+        );
+        let received = group_a.process(&forged_pin).await;
+        assert_eq!(received.is_ok(), can_pin, "unchecked pin mask={mask}");
+        if let Err(err) = received {
+            assert!(err.downcast_ref::<MessagePermissionDenied>().is_some());
+        }
+        assert_eq!(
+            group_a.process(&forged_normal).await.is_ok(),
+            can_send,
+            "unchecked send mask={mask}"
+        );
+        assert_eq!(
+            group_b.process(&from_owner).await.is_ok(),
+            can_read,
+            "receive mask={mask}"
+        );
+        assert_eq!(
+            group_b.process(&pin_from_owner).await.is_ok(),
+            can_read,
+            "receive pin needs SeeMessage, not PinMessage mask={mask}"
+        );
+        assert_eq!(group_b.can_see_message(0).await.unwrap(), can_read);
+        assert!(!group_b.can_see_message(999).await.unwrap());
+    }
 }

@@ -33,10 +33,22 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.FireflyClientNode = exports.initLogger = exports.protos = void 0;
+exports.FireflyClientNode = exports.initLogger = exports.DEFAULT_GROUP_PERMISSIONS = exports.UserPermission = exports.protos = void 0;
 // @ts-ignore
 const wasmPkg = __importStar(require("../wasm/firefly_client_node.js"));
 exports.protos = __importStar(require("./protos/message"));
+/** Group/channel permission bits. Existing values and wire masks are unchanged. */
+var UserPermission;
+(function (UserPermission) {
+    UserPermission[UserPermission["SeeMessage"] = 1] = "SeeMessage";
+    UserPermission[UserPermission["PinMessage"] = 2] = "PinMessage";
+    UserPermission[UserPermission["AddMessage"] = 4] = "AddMessage";
+    UserPermission[UserPermission["ManageChannel"] = 8] = "ManageChannel";
+    UserPermission[UserPermission["ManageRole"] = 16] = "ManageRole";
+    UserPermission[UserPermission["ManageMember"] = 32] = "ManageMember";
+    UserPermission[UserPermission["ManageGroup"] = 64] = "ManageGroup";
+})(UserPermission || (exports.UserPermission = UserPermission = {}));
+exports.DEFAULT_GROUP_PERMISSIONS = UserPermission.SeeMessage | UserPermission.AddMessage;
 const initLogger = (filePath) => {
     if (typeof wasmPkg.init_logger === 'function') {
         wasmPkg.init_logger(filePath);
