@@ -184,6 +184,44 @@ impl<'a> From<&'a str> for MeetingSignalType {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum HistorySignalType {
+    HISTORY_SIGNAL_REQUEST_CREATED = 0,
+    HISTORY_SIGNAL_CHUNK_PUBLISHED = 1,
+    HISTORY_SIGNAL_CHUNK_DISAPPROVED = 2,
+    HISTORY_SIGNAL_REQUEST_FULFILLED = 3,
+}
+
+impl Default for HistorySignalType {
+    fn default() -> Self {
+        HistorySignalType::HISTORY_SIGNAL_REQUEST_CREATED
+    }
+}
+
+impl From<i32> for HistorySignalType {
+    fn from(i: i32) -> Self {
+        match i {
+            0 => HistorySignalType::HISTORY_SIGNAL_REQUEST_CREATED,
+            1 => HistorySignalType::HISTORY_SIGNAL_CHUNK_PUBLISHED,
+            2 => HistorySignalType::HISTORY_SIGNAL_CHUNK_DISAPPROVED,
+            3 => HistorySignalType::HISTORY_SIGNAL_REQUEST_FULFILLED,
+            _ => Self::default(),
+        }
+    }
+}
+
+impl<'a> From<&'a str> for HistorySignalType {
+    fn from(s: &'a str) -> Self {
+        match s {
+            "HISTORY_SIGNAL_REQUEST_CREATED" => HistorySignalType::HISTORY_SIGNAL_REQUEST_CREATED,
+            "HISTORY_SIGNAL_CHUNK_PUBLISHED" => HistorySignalType::HISTORY_SIGNAL_CHUNK_PUBLISHED,
+            "HISTORY_SIGNAL_CHUNK_DISAPPROVED" => HistorySignalType::HISTORY_SIGNAL_CHUNK_DISAPPROVED,
+            "HISTORY_SIGNAL_REQUEST_FULFILLED" => HistorySignalType::HISTORY_SIGNAL_REQUEST_FULFILLED,
+            _ => Self::default(),
+        }
+    }
+}
+
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Default, PartialEq, Clone)]
 pub struct UserMessage<'a> {
@@ -1470,6 +1508,13 @@ impl<'a> MessageRead<'a> for Request<'a> {
                 Ok(98) => msg.payload = firefly::mod_Request::OneOfpayload::leaveMeeting(r.read_message::<firefly::LeaveMeetingRequest>(bytes)?),
                 Ok(106) => msg.payload = firefly::mod_Request::OneOfpayload::endMeeting(r.read_message::<firefly::EndMeetingRequest>(bytes)?),
                 Ok(114) => msg.payload = firefly::mod_Request::OneOfpayload::getActiveSession(r.read_message::<firefly::GetActiveSessionRequest>(bytes)?),
+                Ok(122) => msg.payload = firefly::mod_Request::OneOfpayload::createHistoryRequest(r.read_message::<firefly::CreateHistoryRequest>(bytes)?),
+                Ok(130) => msg.payload = firefly::mod_Request::OneOfpayload::claimHistoryRequest(r.read_message::<firefly::ClaimHistoryRequest>(bytes)?),
+                Ok(138) => msg.payload = firefly::mod_Request::OneOfpayload::publishHistoryChunk(r.read_message::<firefly::PublishHistoryChunkRequest>(bytes)?),
+                Ok(146) => msg.payload = firefly::mod_Request::OneOfpayload::disapproveHistoryChunk(r.read_message::<firefly::DisapproveHistoryChunkRequest>(bytes)?),
+                Ok(154) => msg.payload = firefly::mod_Request::OneOfpayload::getHistoryChunks(r.read_message::<firefly::GetHistoryChunksRequest>(bytes)?),
+                Ok(162) => msg.payload = firefly::mod_Request::OneOfpayload::getPendingHistoryRequests(r.read_message::<firefly::GetPendingHistoryRequests>(bytes)?),
+                Ok(170) => msg.payload = firefly::mod_Request::OneOfpayload::closeHistoryRequest(r.read_message::<firefly::CloseHistoryRequest>(bytes)?),
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -1496,6 +1541,13 @@ impl<'a> MessageWrite for Request<'a> {
             firefly::mod_Request::OneOfpayload::leaveMeeting(ref m) => 1 + sizeof_len((m).get_size()),
             firefly::mod_Request::OneOfpayload::endMeeting(ref m) => 1 + sizeof_len((m).get_size()),
             firefly::mod_Request::OneOfpayload::getActiveSession(ref m) => 1 + sizeof_len((m).get_size()),
+            firefly::mod_Request::OneOfpayload::createHistoryRequest(ref m) => 1 + sizeof_len((m).get_size()),
+            firefly::mod_Request::OneOfpayload::claimHistoryRequest(ref m) => 2 + sizeof_len((m).get_size()),
+            firefly::mod_Request::OneOfpayload::publishHistoryChunk(ref m) => 2 + sizeof_len((m).get_size()),
+            firefly::mod_Request::OneOfpayload::disapproveHistoryChunk(ref m) => 2 + sizeof_len((m).get_size()),
+            firefly::mod_Request::OneOfpayload::getHistoryChunks(ref m) => 2 + sizeof_len((m).get_size()),
+            firefly::mod_Request::OneOfpayload::getPendingHistoryRequests(ref m) => 2 + sizeof_len((m).get_size()),
+            firefly::mod_Request::OneOfpayload::closeHistoryRequest(ref m) => 2 + sizeof_len((m).get_size()),
             firefly::mod_Request::OneOfpayload::None => 0,
     }    }
 
@@ -1514,6 +1566,13 @@ impl<'a> MessageWrite for Request<'a> {
             firefly::mod_Request::OneOfpayload::leaveMeeting(ref m) => { w.write_with_tag(98, |w| w.write_message(m))? },
             firefly::mod_Request::OneOfpayload::endMeeting(ref m) => { w.write_with_tag(106, |w| w.write_message(m))? },
             firefly::mod_Request::OneOfpayload::getActiveSession(ref m) => { w.write_with_tag(114, |w| w.write_message(m))? },
+            firefly::mod_Request::OneOfpayload::createHistoryRequest(ref m) => { w.write_with_tag(122, |w| w.write_message(m))? },
+            firefly::mod_Request::OneOfpayload::claimHistoryRequest(ref m) => { w.write_with_tag(130, |w| w.write_message(m))? },
+            firefly::mod_Request::OneOfpayload::publishHistoryChunk(ref m) => { w.write_with_tag(138, |w| w.write_message(m))? },
+            firefly::mod_Request::OneOfpayload::disapproveHistoryChunk(ref m) => { w.write_with_tag(146, |w| w.write_message(m))? },
+            firefly::mod_Request::OneOfpayload::getHistoryChunks(ref m) => { w.write_with_tag(154, |w| w.write_message(m))? },
+            firefly::mod_Request::OneOfpayload::getPendingHistoryRequests(ref m) => { w.write_with_tag(162, |w| w.write_message(m))? },
+            firefly::mod_Request::OneOfpayload::closeHistoryRequest(ref m) => { w.write_with_tag(170, |w| w.write_message(m))? },
             firefly::mod_Request::OneOfpayload::None => {},
     }        Ok(())
     }
@@ -1538,6 +1597,13 @@ pub enum OneOfpayload<'a> {
     leaveMeeting(firefly::LeaveMeetingRequest),
     endMeeting(firefly::EndMeetingRequest),
     getActiveSession(firefly::GetActiveSessionRequest),
+    createHistoryRequest(firefly::CreateHistoryRequest),
+    claimHistoryRequest(firefly::ClaimHistoryRequest),
+    publishHistoryChunk(firefly::PublishHistoryChunkRequest<'a>),
+    disapproveHistoryChunk(firefly::DisapproveHistoryChunkRequest<'a>),
+    getHistoryChunks(firefly::GetHistoryChunksRequest),
+    getPendingHistoryRequests(firefly::GetPendingHistoryRequests),
+    closeHistoryRequest(firefly::CloseHistoryRequest),
     None,
 }
 
@@ -1574,6 +1640,10 @@ impl<'a> MessageRead<'a> for Response<'a> {
                 Ok(82) => msg.body = firefly::mod_Response::OneOfbody::createMeetingResponse(r.read_message::<firefly::CreateMeetingResponse>(bytes)?),
                 Ok(90) => msg.body = firefly::mod_Response::OneOfbody::joinMeetingResponse(r.read_message::<firefly::JoinMeetingResponse>(bytes)?),
                 Ok(114) => msg.body = firefly::mod_Response::OneOfbody::getActiveSessionResponse(r.read_message::<firefly::GetActiveSessionResponse>(bytes)?),
+                Ok(122) => msg.body = firefly::mod_Response::OneOfbody::getHistoryChunksResponse(r.read_message::<firefly::GetHistoryChunksResponse>(bytes)?),
+                Ok(130) => msg.body = firefly::mod_Response::OneOfbody::getPendingHistoryRequestsResponse(r.read_message::<firefly::GetPendingHistoryRequestsResponse>(bytes)?),
+                Ok(138) => msg.body = firefly::mod_Response::OneOfbody::historySuccess(r.read_message::<firefly::HistoryOperationSuccess>(bytes)?),
+                Ok(146) => msg.body = firefly::mod_Response::OneOfbody::claimHistoryResponse(r.read_message::<firefly::ClaimHistoryResponse>(bytes)?),
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -1598,6 +1668,10 @@ impl<'a> MessageWrite for Response<'a> {
             firefly::mod_Response::OneOfbody::createMeetingResponse(ref m) => 1 + sizeof_len((m).get_size()),
             firefly::mod_Response::OneOfbody::joinMeetingResponse(ref m) => 1 + sizeof_len((m).get_size()),
             firefly::mod_Response::OneOfbody::getActiveSessionResponse(ref m) => 1 + sizeof_len((m).get_size()),
+            firefly::mod_Response::OneOfbody::getHistoryChunksResponse(ref m) => 1 + sizeof_len((m).get_size()),
+            firefly::mod_Response::OneOfbody::getPendingHistoryRequestsResponse(ref m) => 2 + sizeof_len((m).get_size()),
+            firefly::mod_Response::OneOfbody::historySuccess(ref m) => 2 + sizeof_len((m).get_size()),
+            firefly::mod_Response::OneOfbody::claimHistoryResponse(ref m) => 2 + sizeof_len((m).get_size()),
             firefly::mod_Response::OneOfbody::None => 0,
     }    }
 
@@ -1614,6 +1688,10 @@ impl<'a> MessageWrite for Response<'a> {
             firefly::mod_Response::OneOfbody::createMeetingResponse(ref m) => { w.write_with_tag(82, |w| w.write_message(m))? },
             firefly::mod_Response::OneOfbody::joinMeetingResponse(ref m) => { w.write_with_tag(90, |w| w.write_message(m))? },
             firefly::mod_Response::OneOfbody::getActiveSessionResponse(ref m) => { w.write_with_tag(114, |w| w.write_message(m))? },
+            firefly::mod_Response::OneOfbody::getHistoryChunksResponse(ref m) => { w.write_with_tag(122, |w| w.write_message(m))? },
+            firefly::mod_Response::OneOfbody::getPendingHistoryRequestsResponse(ref m) => { w.write_with_tag(130, |w| w.write_message(m))? },
+            firefly::mod_Response::OneOfbody::historySuccess(ref m) => { w.write_with_tag(138, |w| w.write_message(m))? },
+            firefly::mod_Response::OneOfbody::claimHistoryResponse(ref m) => { w.write_with_tag(146, |w| w.write_message(m))? },
             firefly::mod_Response::OneOfbody::None => {},
     }        Ok(())
     }
@@ -1635,6 +1713,10 @@ pub enum OneOfbody<'a> {
     createMeetingResponse(firefly::CreateMeetingResponse<'a>),
     joinMeetingResponse(firefly::JoinMeetingResponse<'a>),
     getActiveSessionResponse(firefly::GetActiveSessionResponse<'a>),
+    getHistoryChunksResponse(firefly::GetHistoryChunksResponse<'a>),
+    getPendingHistoryRequestsResponse(firefly::GetPendingHistoryRequestsResponse<'a>),
+    historySuccess(firefly::HistoryOperationSuccess),
+    claimHistoryResponse(firefly::ClaimHistoryResponse<'a>),
     None,
 }
 
@@ -1671,6 +1753,7 @@ impl<'a> MessageRead<'a> for ServerMessage<'a> {
                 Ok(146) => msg.message = firefly::mod_ServerMessage::OneOfmessage::groupJoinRequests(r.read_message::<firefly::GroupJoinRequests>(bytes)?),
                 Ok(162) => msg.message = firefly::mod_ServerMessage::OneOfmessage::callSignal(r.read_message::<firefly::CallSignal>(bytes)?),
                 Ok(170) => msg.message = firefly::mod_ServerMessage::OneOfmessage::groupMeetingSignal(r.read_message::<firefly::GroupMeetingSignal>(bytes)?),
+                Ok(178) => msg.message = firefly::mod_ServerMessage::OneOfmessage::groupHistorySignal(r.read_message::<firefly::GroupHistorySignal>(bytes)?),
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -1697,6 +1780,7 @@ impl<'a> MessageWrite for ServerMessage<'a> {
             firefly::mod_ServerMessage::OneOfmessage::groupJoinRequests(ref m) => 2 + sizeof_len((m).get_size()),
             firefly::mod_ServerMessage::OneOfmessage::callSignal(ref m) => 2 + sizeof_len((m).get_size()),
             firefly::mod_ServerMessage::OneOfmessage::groupMeetingSignal(ref m) => 2 + sizeof_len((m).get_size()),
+            firefly::mod_ServerMessage::OneOfmessage::groupHistorySignal(ref m) => 2 + sizeof_len((m).get_size()),
             firefly::mod_ServerMessage::OneOfmessage::None => 0,
     }    }
 
@@ -1715,6 +1799,7 @@ impl<'a> MessageWrite for ServerMessage<'a> {
             firefly::mod_ServerMessage::OneOfmessage::groupJoinRequests(ref m) => { w.write_with_tag(146, |w| w.write_message(m))? },
             firefly::mod_ServerMessage::OneOfmessage::callSignal(ref m) => { w.write_with_tag(162, |w| w.write_message(m))? },
             firefly::mod_ServerMessage::OneOfmessage::groupMeetingSignal(ref m) => { w.write_with_tag(170, |w| w.write_message(m))? },
+            firefly::mod_ServerMessage::OneOfmessage::groupHistorySignal(ref m) => { w.write_with_tag(178, |w| w.write_message(m))? },
             firefly::mod_ServerMessage::OneOfmessage::None => {},
     }        Ok(())
     }
@@ -1740,6 +1825,7 @@ pub enum OneOfmessage<'a> {
     groupJoinRequests(firefly::GroupJoinRequests<'a>),
     callSignal(firefly::CallSignal<'a>),
     groupMeetingSignal(firefly::GroupMeetingSignal<'a>),
+    groupHistorySignal(firefly::GroupHistorySignal<'a>),
     None,
 }
 
@@ -3609,6 +3695,671 @@ impl<'a> MessageWrite for GroupMeetingSignal<'a> {
         if self.type_pb != firefly::MeetingSignalType::MEETING_SIGNAL_STARTED { w.write_with_tag(32, |w| w.write_enum(*&self.type_pb as i32))?; }
         if self.username != "" { w.write_with_tag(42, |w| w.write_string(&**&self.username))?; }
         if self.cf_meeting_id != "" { w.write_with_tag(50, |w| w.write_string(&**&self.cf_meeting_id))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct GroupHistoryRequestItem<'a> {
+    pub id: u64,
+    pub group_id: u64,
+    pub requester_address: u64,
+    pub requester_username: Cow<'a, str>,
+    pub start_msg_id: u64,
+    pub end_msg_id: u64,
+    pub status: u32,
+    pub claimed_by: u64,
+    pub created_at: u64,
+}
+
+impl<'a> MessageRead<'a> for GroupHistoryRequestItem<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(9) => msg.id = r.read_fixed64(bytes)?,
+                Ok(16) => msg.group_id = r.read_uint64(bytes)?,
+                Ok(24) => msg.requester_address = r.read_uint64(bytes)?,
+                Ok(34) => msg.requester_username = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(41) => msg.start_msg_id = r.read_fixed64(bytes)?,
+                Ok(49) => msg.end_msg_id = r.read_fixed64(bytes)?,
+                Ok(56) => msg.status = r.read_uint32(bytes)?,
+                Ok(64) => msg.claimed_by = r.read_uint64(bytes)?,
+                Ok(73) => msg.created_at = r.read_fixed64(bytes)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for GroupHistoryRequestItem<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.id == 0u64 { 0 } else { 1 + 8 }
+        + if self.group_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.group_id) as u64) }
+        + if self.requester_address == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.requester_address) as u64) }
+        + if self.requester_username == "" { 0 } else { 1 + sizeof_len((&self.requester_username).len()) }
+        + if self.start_msg_id == 0u64 { 0 } else { 1 + 8 }
+        + if self.end_msg_id == 0u64 { 0 } else { 1 + 8 }
+        + if self.status == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.status) as u64) }
+        + if self.claimed_by == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.claimed_by) as u64) }
+        + if self.created_at == 0u64 { 0 } else { 1 + 8 }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.id != 0u64 { w.write_with_tag(9, |w| w.write_fixed64(*&self.id))?; }
+        if self.group_id != 0u64 { w.write_with_tag(16, |w| w.write_uint64(*&self.group_id))?; }
+        if self.requester_address != 0u64 { w.write_with_tag(24, |w| w.write_uint64(*&self.requester_address))?; }
+        if self.requester_username != "" { w.write_with_tag(34, |w| w.write_string(&**&self.requester_username))?; }
+        if self.start_msg_id != 0u64 { w.write_with_tag(41, |w| w.write_fixed64(*&self.start_msg_id))?; }
+        if self.end_msg_id != 0u64 { w.write_with_tag(49, |w| w.write_fixed64(*&self.end_msg_id))?; }
+        if self.status != 0u32 { w.write_with_tag(56, |w| w.write_uint32(*&self.status))?; }
+        if self.claimed_by != 0u64 { w.write_with_tag(64, |w| w.write_uint64(*&self.claimed_by))?; }
+        if self.created_at != 0u64 { w.write_with_tag(73, |w| w.write_fixed64(*&self.created_at))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct GroupHistoryChunkItem<'a> {
+    pub id: u64,
+    pub group_id: u64,
+    pub start_msg_id: u64,
+    pub end_msg_id: u64,
+    pub msg_count: u32,
+    pub unencrypted_hash: Cow<'a, [u8]>,
+    pub chunk_url: Cow<'a, str>,
+    pub uploaded_by: Cow<'a, str>,
+    pub status: u32,
+    pub disapproved_by: Cow<'a, str>,
+    pub disapproved_reason: Cow<'a, str>,
+    pub created_at: u64,
+}
+
+impl<'a> MessageRead<'a> for GroupHistoryChunkItem<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.id = r.read_uint64(bytes)?,
+                Ok(16) => msg.group_id = r.read_uint64(bytes)?,
+                Ok(25) => msg.start_msg_id = r.read_fixed64(bytes)?,
+                Ok(33) => msg.end_msg_id = r.read_fixed64(bytes)?,
+                Ok(40) => msg.msg_count = r.read_uint32(bytes)?,
+                Ok(50) => msg.unencrypted_hash = r.read_bytes(bytes).map(Cow::Borrowed)?,
+                Ok(58) => msg.chunk_url = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(66) => msg.uploaded_by = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(72) => msg.status = r.read_uint32(bytes)?,
+                Ok(82) => msg.disapproved_by = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(90) => msg.disapproved_reason = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(97) => msg.created_at = r.read_fixed64(bytes)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for GroupHistoryChunkItem<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.id) as u64) }
+        + if self.group_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.group_id) as u64) }
+        + if self.start_msg_id == 0u64 { 0 } else { 1 + 8 }
+        + if self.end_msg_id == 0u64 { 0 } else { 1 + 8 }
+        + if self.msg_count == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.msg_count) as u64) }
+        + if self.unencrypted_hash == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.unencrypted_hash).len()) }
+        + if self.chunk_url == "" { 0 } else { 1 + sizeof_len((&self.chunk_url).len()) }
+        + if self.uploaded_by == "" { 0 } else { 1 + sizeof_len((&self.uploaded_by).len()) }
+        + if self.status == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.status) as u64) }
+        + if self.disapproved_by == "" { 0 } else { 1 + sizeof_len((&self.disapproved_by).len()) }
+        + if self.disapproved_reason == "" { 0 } else { 1 + sizeof_len((&self.disapproved_reason).len()) }
+        + if self.created_at == 0u64 { 0 } else { 1 + 8 }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.id))?; }
+        if self.group_id != 0u64 { w.write_with_tag(16, |w| w.write_uint64(*&self.group_id))?; }
+        if self.start_msg_id != 0u64 { w.write_with_tag(25, |w| w.write_fixed64(*&self.start_msg_id))?; }
+        if self.end_msg_id != 0u64 { w.write_with_tag(33, |w| w.write_fixed64(*&self.end_msg_id))?; }
+        if self.msg_count != 0u32 { w.write_with_tag(40, |w| w.write_uint32(*&self.msg_count))?; }
+        if self.unencrypted_hash != Cow::Borrowed(b"") { w.write_with_tag(50, |w| w.write_bytes(&**&self.unencrypted_hash))?; }
+        if self.chunk_url != "" { w.write_with_tag(58, |w| w.write_string(&**&self.chunk_url))?; }
+        if self.uploaded_by != "" { w.write_with_tag(66, |w| w.write_string(&**&self.uploaded_by))?; }
+        if self.status != 0u32 { w.write_with_tag(72, |w| w.write_uint32(*&self.status))?; }
+        if self.disapproved_by != "" { w.write_with_tag(82, |w| w.write_string(&**&self.disapproved_by))?; }
+        if self.disapproved_reason != "" { w.write_with_tag(90, |w| w.write_string(&**&self.disapproved_reason))?; }
+        if self.created_at != 0u64 { w.write_with_tag(97, |w| w.write_fixed64(*&self.created_at))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct GroupHistoryChunkKey<'a> {
+    pub group_id: u64,
+    pub start_msg_id: u64,
+    pub end_msg_id: u64,
+    pub key: Cow<'a, [u8]>,
+    pub nonce: Cow<'a, [u8]>,
+}
+
+impl<'a> MessageRead<'a> for GroupHistoryChunkKey<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.group_id = r.read_uint64(bytes)?,
+                Ok(17) => msg.start_msg_id = r.read_fixed64(bytes)?,
+                Ok(25) => msg.end_msg_id = r.read_fixed64(bytes)?,
+                Ok(34) => msg.key = r.read_bytes(bytes).map(Cow::Borrowed)?,
+                Ok(42) => msg.nonce = r.read_bytes(bytes).map(Cow::Borrowed)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for GroupHistoryChunkKey<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.group_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.group_id) as u64) }
+        + if self.start_msg_id == 0u64 { 0 } else { 1 + 8 }
+        + if self.end_msg_id == 0u64 { 0 } else { 1 + 8 }
+        + if self.key == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.key).len()) }
+        + if self.nonce == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.nonce).len()) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.group_id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.group_id))?; }
+        if self.start_msg_id != 0u64 { w.write_with_tag(17, |w| w.write_fixed64(*&self.start_msg_id))?; }
+        if self.end_msg_id != 0u64 { w.write_with_tag(25, |w| w.write_fixed64(*&self.end_msg_id))?; }
+        if self.key != Cow::Borrowed(b"") { w.write_with_tag(34, |w| w.write_bytes(&**&self.key))?; }
+        if self.nonce != Cow::Borrowed(b"") { w.write_with_tag(42, |w| w.write_bytes(&**&self.nonce))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct GroupHistoryKeysPayload<'a> {
+    pub keys: Vec<firefly::GroupHistoryChunkKey<'a>>,
+}
+
+impl<'a> MessageRead<'a> for GroupHistoryKeysPayload<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(10) => msg.keys.push(r.read_message::<firefly::GroupHistoryChunkKey>(bytes)?),
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for GroupHistoryKeysPayload<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + self.keys.iter().map(|s| 1 + sizeof_len((s).get_size())).sum::<usize>()
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        for s in &self.keys { w.write_with_tag(10, |w| w.write_message(s))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct CreateHistoryRequest {
+    pub group_id: u64,
+    pub start_msg_id: u64,
+    pub end_msg_id: u64,
+}
+
+impl<'a> MessageRead<'a> for CreateHistoryRequest {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.group_id = r.read_uint64(bytes)?,
+                Ok(17) => msg.start_msg_id = r.read_fixed64(bytes)?,
+                Ok(25) => msg.end_msg_id = r.read_fixed64(bytes)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl MessageWrite for CreateHistoryRequest {
+    fn get_size(&self) -> usize {
+        0
+        + if self.group_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.group_id) as u64) }
+        + if self.start_msg_id == 0u64 { 0 } else { 1 + 8 }
+        + if self.end_msg_id == 0u64 { 0 } else { 1 + 8 }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.group_id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.group_id))?; }
+        if self.start_msg_id != 0u64 { w.write_with_tag(17, |w| w.write_fixed64(*&self.start_msg_id))?; }
+        if self.end_msg_id != 0u64 { w.write_with_tag(25, |w| w.write_fixed64(*&self.end_msg_id))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct ClaimHistoryRequest {
+    pub group_id: u64,
+    pub request_id: u64,
+    pub start_msg_id: u64,
+    pub end_msg_id: u64,
+}
+
+impl<'a> MessageRead<'a> for ClaimHistoryRequest {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.group_id = r.read_uint64(bytes)?,
+                Ok(17) => msg.request_id = r.read_fixed64(bytes)?,
+                Ok(25) => msg.start_msg_id = r.read_fixed64(bytes)?,
+                Ok(33) => msg.end_msg_id = r.read_fixed64(bytes)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl MessageWrite for ClaimHistoryRequest {
+    fn get_size(&self) -> usize {
+        0
+        + if self.group_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.group_id) as u64) }
+        + if self.request_id == 0u64 { 0 } else { 1 + 8 }
+        + if self.start_msg_id == 0u64 { 0 } else { 1 + 8 }
+        + if self.end_msg_id == 0u64 { 0 } else { 1 + 8 }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.group_id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.group_id))?; }
+        if self.request_id != 0u64 { w.write_with_tag(17, |w| w.write_fixed64(*&self.request_id))?; }
+        if self.start_msg_id != 0u64 { w.write_with_tag(25, |w| w.write_fixed64(*&self.start_msg_id))?; }
+        if self.end_msg_id != 0u64 { w.write_with_tag(33, |w| w.write_fixed64(*&self.end_msg_id))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct ClaimHistoryResponse<'a> {
+    pub granted: bool,
+    pub message: Cow<'a, str>,
+}
+
+impl<'a> MessageRead<'a> for ClaimHistoryResponse<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.granted = r.read_bool(bytes)?,
+                Ok(18) => msg.message = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for ClaimHistoryResponse<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.granted == false { 0 } else { 1 + sizeof_varint(*(&self.granted) as u64) }
+        + if self.message == "" { 0 } else { 1 + sizeof_len((&self.message).len()) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.granted != false { w.write_with_tag(8, |w| w.write_bool(*&self.granted))?; }
+        if self.message != "" { w.write_with_tag(18, |w| w.write_string(&**&self.message))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct PublishHistoryChunkRequest<'a> {
+    pub group_id: u64,
+    pub start_msg_id: u64,
+    pub end_msg_id: u64,
+    pub msg_count: u32,
+    pub unencrypted_hash: Cow<'a, [u8]>,
+    pub chunk_url: Cow<'a, str>,
+}
+
+impl<'a> MessageRead<'a> for PublishHistoryChunkRequest<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.group_id = r.read_uint64(bytes)?,
+                Ok(17) => msg.start_msg_id = r.read_fixed64(bytes)?,
+                Ok(25) => msg.end_msg_id = r.read_fixed64(bytes)?,
+                Ok(32) => msg.msg_count = r.read_uint32(bytes)?,
+                Ok(42) => msg.unencrypted_hash = r.read_bytes(bytes).map(Cow::Borrowed)?,
+                Ok(50) => msg.chunk_url = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for PublishHistoryChunkRequest<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.group_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.group_id) as u64) }
+        + if self.start_msg_id == 0u64 { 0 } else { 1 + 8 }
+        + if self.end_msg_id == 0u64 { 0 } else { 1 + 8 }
+        + if self.msg_count == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.msg_count) as u64) }
+        + if self.unencrypted_hash == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.unencrypted_hash).len()) }
+        + if self.chunk_url == "" { 0 } else { 1 + sizeof_len((&self.chunk_url).len()) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.group_id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.group_id))?; }
+        if self.start_msg_id != 0u64 { w.write_with_tag(17, |w| w.write_fixed64(*&self.start_msg_id))?; }
+        if self.end_msg_id != 0u64 { w.write_with_tag(25, |w| w.write_fixed64(*&self.end_msg_id))?; }
+        if self.msg_count != 0u32 { w.write_with_tag(32, |w| w.write_uint32(*&self.msg_count))?; }
+        if self.unencrypted_hash != Cow::Borrowed(b"") { w.write_with_tag(42, |w| w.write_bytes(&**&self.unencrypted_hash))?; }
+        if self.chunk_url != "" { w.write_with_tag(50, |w| w.write_string(&**&self.chunk_url))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct DisapproveHistoryChunkRequest<'a> {
+    pub group_id: u64,
+    pub chunk_id: u64,
+    pub reason: Cow<'a, str>,
+}
+
+impl<'a> MessageRead<'a> for DisapproveHistoryChunkRequest<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.group_id = r.read_uint64(bytes)?,
+                Ok(16) => msg.chunk_id = r.read_uint64(bytes)?,
+                Ok(26) => msg.reason = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for DisapproveHistoryChunkRequest<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.group_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.group_id) as u64) }
+        + if self.chunk_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.chunk_id) as u64) }
+        + if self.reason == "" { 0 } else { 1 + sizeof_len((&self.reason).len()) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.group_id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.group_id))?; }
+        if self.chunk_id != 0u64 { w.write_with_tag(16, |w| w.write_uint64(*&self.chunk_id))?; }
+        if self.reason != "" { w.write_with_tag(26, |w| w.write_string(&**&self.reason))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct GetHistoryChunksRequest {
+    pub group_id: u64,
+    pub since_msg_id: u64,
+    pub until_msg_id: u64,
+}
+
+impl<'a> MessageRead<'a> for GetHistoryChunksRequest {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.group_id = r.read_uint64(bytes)?,
+                Ok(17) => msg.since_msg_id = r.read_fixed64(bytes)?,
+                Ok(25) => msg.until_msg_id = r.read_fixed64(bytes)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl MessageWrite for GetHistoryChunksRequest {
+    fn get_size(&self) -> usize {
+        0
+        + if self.group_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.group_id) as u64) }
+        + if self.since_msg_id == 0u64 { 0 } else { 1 + 8 }
+        + if self.until_msg_id == 0u64 { 0 } else { 1 + 8 }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.group_id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.group_id))?; }
+        if self.since_msg_id != 0u64 { w.write_with_tag(17, |w| w.write_fixed64(*&self.since_msg_id))?; }
+        if self.until_msg_id != 0u64 { w.write_with_tag(25, |w| w.write_fixed64(*&self.until_msg_id))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct GetHistoryChunksResponse<'a> {
+    pub chunks: Vec<firefly::GroupHistoryChunkItem<'a>>,
+}
+
+impl<'a> MessageRead<'a> for GetHistoryChunksResponse<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(10) => msg.chunks.push(r.read_message::<firefly::GroupHistoryChunkItem>(bytes)?),
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for GetHistoryChunksResponse<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + self.chunks.iter().map(|s| 1 + sizeof_len((s).get_size())).sum::<usize>()
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        for s in &self.chunks { w.write_with_tag(10, |w| w.write_message(s))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct GetPendingHistoryRequests {
+    pub group_ids: Vec<u64>,
+}
+
+impl<'a> MessageRead<'a> for GetPendingHistoryRequests {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(10) => msg.group_ids = r.read_packed(bytes, |r, bytes| Ok(r.read_uint64(bytes)?))?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl MessageWrite for GetPendingHistoryRequests {
+    fn get_size(&self) -> usize {
+        0
+        + if self.group_ids.is_empty() { 0 } else { 1 + sizeof_len(self.group_ids.iter().map(|s| sizeof_varint(*(s) as u64)).sum::<usize>()) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        w.write_packed_with_tag(10, &self.group_ids, |w, m| w.write_uint64(*m), &|m| sizeof_varint(*(m) as u64))?;
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct GetPendingHistoryRequestsResponse<'a> {
+    pub requests: Vec<firefly::GroupHistoryRequestItem<'a>>,
+}
+
+impl<'a> MessageRead<'a> for GetPendingHistoryRequestsResponse<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(10) => msg.requests.push(r.read_message::<firefly::GroupHistoryRequestItem>(bytes)?),
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for GetPendingHistoryRequestsResponse<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + self.requests.iter().map(|s| 1 + sizeof_len((s).get_size())).sum::<usize>()
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        for s in &self.requests { w.write_with_tag(10, |w| w.write_message(s))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct CloseHistoryRequest {
+    pub group_id: u64,
+    pub request_id: u64,
+}
+
+impl<'a> MessageRead<'a> for CloseHistoryRequest {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.group_id = r.read_uint64(bytes)?,
+                Ok(17) => msg.request_id = r.read_fixed64(bytes)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl MessageWrite for CloseHistoryRequest {
+    fn get_size(&self) -> usize {
+        0
+        + if self.group_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.group_id) as u64) }
+        + if self.request_id == 0u64 { 0 } else { 1 + 8 }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.group_id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.group_id))?; }
+        if self.request_id != 0u64 { w.write_with_tag(17, |w| w.write_fixed64(*&self.request_id))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct HistoryOperationSuccess { }
+
+impl<'a> MessageRead<'a> for HistoryOperationSuccess {
+    fn from_reader(r: &mut BytesReader, _: &[u8]) -> Result<Self> {
+        r.read_to_end();
+        Ok(Self::default())
+    }
+}
+
+impl MessageWrite for HistoryOperationSuccess { }
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct GroupHistorySignal<'a> {
+    pub group_id: u64,
+    pub type_pb: firefly::HistorySignalType,
+    pub request_id: u64,
+    pub chunk_id: u64,
+    pub username: Cow<'a, str>,
+}
+
+impl<'a> MessageRead<'a> for GroupHistorySignal<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.group_id = r.read_uint64(bytes)?,
+                Ok(16) => msg.type_pb = r.read_enum(bytes)?,
+                Ok(25) => msg.request_id = r.read_fixed64(bytes)?,
+                Ok(32) => msg.chunk_id = r.read_uint64(bytes)?,
+                Ok(42) => msg.username = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for GroupHistorySignal<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.group_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.group_id) as u64) }
+        + if self.type_pb == firefly::HistorySignalType::HISTORY_SIGNAL_REQUEST_CREATED { 0 } else { 1 + sizeof_varint(*(&self.type_pb) as u64) }
+        + if self.request_id == 0u64 { 0 } else { 1 + 8 }
+        + if self.chunk_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.chunk_id) as u64) }
+        + if self.username == "" { 0 } else { 1 + sizeof_len((&self.username).len()) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.group_id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.group_id))?; }
+        if self.type_pb != firefly::HistorySignalType::HISTORY_SIGNAL_REQUEST_CREATED { w.write_with_tag(16, |w| w.write_enum(*&self.type_pb as i32))?; }
+        if self.request_id != 0u64 { w.write_with_tag(25, |w| w.write_fixed64(*&self.request_id))?; }
+        if self.chunk_id != 0u64 { w.write_with_tag(32, |w| w.write_uint64(*&self.chunk_id))?; }
+        if self.username != "" { w.write_with_tag(42, |w| w.write_string(&**&self.username))?; }
         Ok(())
     }
 }

@@ -29,6 +29,15 @@ pub struct ReadUserMessagesUpto {
     pub upto_message_id: u64,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct GroupHistorySignal {
+    pub group_id: u64,
+    pub signal_type: i32, // Maps to HistorySignalType enum: 0=REQUEST_CREATED, 1=CHUNK_PUBLISHED, 2=CHUNK_DISAPPROVED, 3=REQUEST_FULFILLED
+    pub request_id: u64,
+    pub chunk_id: u64,
+    pub username: String,
+}
+
 #[async_trait::async_trait]
 pub trait FireflyWsClientCallback: Send + Sync {
     fn name(&self) -> &str;
@@ -45,5 +54,8 @@ pub trait FireflyWsClientCallback: Send + Sync {
 
     async fn on_group_meeting_signal(&self, _signal: GroupMeetingSignal) {}
 
+    async fn on_group_history_signal(&self, _signal: GroupHistorySignal) {}
+
     async fn on_read_user_messages_upto(&self, _read: ReadUserMessagesUpto) {}
 }
+

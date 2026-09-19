@@ -6,6 +6,8 @@ use quick_protobuf::Writer;
 
 pub const MESSAGE_TYPE_NORMAL: u32 = 0;
 pub const MESSAGE_TYPE_PINNED: u32 = 1 << 0;
+pub const MESSAGE_TYPE_HIDDEN: u32 = 1 << 1;
+pub const MESSAGE_TYPE_HISTORY_KEYS: u32 = 1 << 2;
 
 pub fn deserialize_proto<'a, 'b: 'a, T: quick_protobuf::MessageRead<'a> + Sized>(
     bytes: &'b [u8],

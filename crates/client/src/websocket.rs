@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::Context;
+use base64::Engine;
 use bytes::Bytes;
 use firefly_protos::firefly::{self};
 use futures::{SinkExt, StreamExt};
@@ -26,17 +27,22 @@ use crate::{
     db::{
         auth::get_claims_from_token,
         conversations::ConversationSettings,
-        favourites::{FavoriteMessagesStore, FavouriteMessagesStore},
+        favourites::FavouriteMessagesStore,
         ffi_stores::FfiKeyStores,
         group_messages::GroupMessagesStore,
         group_stores::{GroupInfo, GroupInfoStore, GroupKeyPackageStore, SelfGroupKeyPackageStore},
+        history_keys::HistoryKeysStore,
         keyvalue::{KEY_FCM_TOKEN, KEY_LAST_RECEIVED_MESSAGE_ID, KeyValueStore},
         messages::{MessagesStore, UserMessage},
         search::{SearchEngine, SearchResultItem, SearchScope},
         setup_pool_from_path,
     },
     group::{FfiMlsClient, FfiMlsGroup},
-    storage::{FavouriteMessage, FavouriteMessageStorage, FavouriteSource},
+    history::{
+        compute_unencrypted_hash, decrypt_and_unpack_chunk, pack_messages_into_chunk,
+        DEFAULT_CHUNK_SIZE,
+    },
+    storage::{FavouriteMessage, FavouriteMessageStorage},
     logger::CURRENT_CLIENT,
     utils::{
         HTTP_CLIENT, deserialize_proto, get_current_timestamp_microseconds_since_epoch,
@@ -44,6 +50,7 @@ use crate::{
         serialize_proto, write_url_comma_seperated,
     },
 };
+
 
 // Trait removed, imported from callbacks module
 
@@ -64,6 +71,7 @@ impl Connection {
         firefly_mls_client: Arc<FfiMlsClient>,
         group_info_store: GroupInfoStore,
         group_messages_store: GroupMessagesStore,
+        history_keys_store: HistoryKeysStore,
         address_id: u64,
         device_id: u8,
         firefly_base_url: String,
@@ -88,6 +96,7 @@ impl Connection {
                                     &firefly_mls_client,
                                     &group_info_store,
                                     &group_messages_store,
+                                    &history_keys_store,
                                     sender2.clone(),
                                     address_id,
                                     device_id,
@@ -97,6 +106,7 @@ impl Connection {
                                 {
                                     log::error!("failed to handle server message: {}", err);
                                 }
+
                             }
                             Err(err) => log::error!("failed to deserialize message: {}", err),
                         }
@@ -200,6 +210,7 @@ pub struct FireflyWsClient {
     retry_interval: Duration,
     firefly_base_url: String,
     firefly_base_ws_url: String,
+    cdn_base_url: std::sync::RwLock<Option<String>>,
     key_stores: Arc<FfiKeyStores>,
 
     key_value_store: KeyValueStore,
@@ -218,6 +229,7 @@ pub struct FireflyWsClient {
     group_messages_store: GroupMessagesStore,
     messages_store: MessagesStore,
     favourite_messages_store: FavouriteMessagesStore,
+    pub history_keys_store: HistoryKeysStore,
     firefly_mls_client: Arc<tokio::sync::OnceCell<Arc<FfiMlsClient>>>,
     group_info_store: GroupInfoStore,
     self_group_key_packages_store: SelfGroupKeyPackageStore,
@@ -246,6 +258,7 @@ impl FireflyWsClient {
         let favourite_messages_store = FavouriteMessagesStore::new(pool.clone()).await?;
         let self_group_key_packages_store = SelfGroupKeyPackageStore::new(pool.clone()).await?;
         let group_key_packages_store = GroupKeyPackageStore::new(pool.clone()).await?;
+        let history_keys_store = HistoryKeysStore::new(pool.clone()).await?;
 
         let last_connection_established_timestamp = get_current_timestamp_millis_since_epoch();
 
@@ -257,6 +270,11 @@ impl FireflyWsClient {
             retry_interval: Duration::from_millis(retry_interval_in_ms),
             firefly_base_url,
             firefly_base_ws_url,
+            cdn_base_url: std::sync::RwLock::new(
+                std::env::var("FIREFLY_CDN_URL")
+                    .or_else(|_| std::env::var("CDN_URL"))
+                    .ok(),
+            ),
             key_stores,
             last_connection_tried_timestamp: last_connection_established_timestamp.into(),
 
@@ -270,10 +288,12 @@ impl FireflyWsClient {
             group_messages_store: groups_store,
             messages_store,
             favourite_messages_store,
+            history_keys_store,
             self_group_key_packages_store,
             group_key_packages_store,
             fully_initialized: AtomicBool::new(false),
             firefly_mls_client: Default::default(),
+
             group_info_store,
             next_request_id: Default::default(),
             last_connection_error: std::sync::Mutex::new(None),
@@ -459,6 +479,7 @@ impl FireflyWsClient {
                 firefly_mls_client.clone(),
                 self.group_info_store.clone(),
                 self.group_messages_store.clone(),
+                self.history_keys_store.clone(),
                 self.addressId.load(std::sync::atomic::Ordering::Relaxed),
                 self.key_stores
                     .store()
@@ -1246,6 +1267,7 @@ impl FireflyWsClient {
                     firefly_mls_client,
                     &self.group_info_store,
                     &self.group_messages_store,
+                    &self.history_keys_store,
                     &self.key_value_store,
                     &self.callbacks,
                     false,
@@ -3021,6 +3043,505 @@ impl FireflyWsClient {
     pub fn key_stores(&self) -> &Arc<crate::db::ffi_stores::FfiKeyStores> {
         &self.key_stores
     }
+
+    pub fn history_keys_store(&self) -> &HistoryKeysStore {
+        &self.history_keys_store
+    }
+
+    pub async fn request_group_history(
+        &self,
+        group_id: u64,
+        start_msg_id: u64,
+        end_msg_id: u64,
+    ) -> anyhow::Result<()> {
+        let req = firefly::Request {
+            payload: firefly::mod_Request::OneOfpayload::createHistoryRequest(
+                firefly::CreateHistoryRequest {
+                    group_id,
+                    start_msg_id,
+                    end_msg_id,
+                },
+            ),
+            ..Default::default()
+        };
+        let response_bytes = self.request(req).await?;
+        let response = deserialize_proto::<firefly::Response>(&response_bytes)?;
+        if let Some(err) = response.error {
+            return Err(anyhow::anyhow!("server error {}: {}", err.errorCode, err.error));
+        }
+        Ok(())
+    }
+
+    pub async fn claim_group_history_request(
+        &self,
+        group_id: u64,
+        request_id: u64,
+        start_msg_id: u64,
+        end_msg_id: u64,
+    ) -> anyhow::Result<bool> {
+        let req = firefly::Request {
+            payload: firefly::mod_Request::OneOfpayload::claimHistoryRequest(
+                firefly::ClaimHistoryRequest {
+                    group_id,
+                    request_id,
+                    start_msg_id,
+                    end_msg_id,
+                },
+            ),
+            ..Default::default()
+        };
+        let response_bytes = self.request(req).await?;
+        let response = deserialize_proto::<firefly::Response>(&response_bytes)?;
+        if let Some(err) = response.error {
+            return Err(anyhow::anyhow!("server error {}: {}", err.errorCode, err.error));
+        }
+        match response.body {
+            firefly::mod_Response::OneOfbody::claimHistoryResponse(res) => Ok(res.granted),
+            _ => Err(anyhow::anyhow!("unexpected response body for claimHistoryRequest")),
+        }
+    }
+
+    pub async fn publish_group_history_chunk(
+        &self,
+        group_id: u64,
+        start_msg_id: u64,
+        end_msg_id: u64,
+        msg_count: u32,
+        unencrypted_hash: Vec<u8>,
+        chunk_url: String,
+    ) -> anyhow::Result<()> {
+        let req = firefly::Request {
+            payload: firefly::mod_Request::OneOfpayload::publishHistoryChunk(
+                firefly::PublishHistoryChunkRequest {
+                    group_id,
+                    start_msg_id,
+                    end_msg_id,
+                    msg_count,
+                    unencrypted_hash: unencrypted_hash.into(),
+                    chunk_url: chunk_url.into(),
+                },
+            ),
+            ..Default::default()
+        };
+        let response_bytes = self.request(req).await?;
+        let response = deserialize_proto::<firefly::Response>(&response_bytes)?;
+        if let Some(err) = response.error {
+            return Err(anyhow::anyhow!("server error {}: {}", err.errorCode, err.error));
+        }
+        Ok(())
+    }
+
+    pub async fn disapprove_group_history_chunk(
+        &self,
+        group_id: u64,
+        chunk_id: u64,
+        reason: String,
+    ) -> anyhow::Result<()> {
+        let _ = self.history_keys_store.record_disapproval(group_id, chunk_id, &reason).await;
+
+        let req = firefly::Request {
+            payload: firefly::mod_Request::OneOfpayload::disapproveHistoryChunk(
+                firefly::DisapproveHistoryChunkRequest {
+                    group_id,
+                    chunk_id,
+                    reason: reason.into(),
+                },
+            ),
+            ..Default::default()
+        };
+        let response_bytes = self.request(req).await?;
+        let response = deserialize_proto::<firefly::Response>(&response_bytes)?;
+        if let Some(err) = response.error {
+            return Err(anyhow::anyhow!("server error {}: {}", err.errorCode, err.error));
+        }
+        Ok(())
+    }
+
+    pub async fn get_group_history_chunks(
+        &self,
+        group_id: u64,
+        since_msg_id: u64,
+        until_msg_id: u64,
+    ) -> anyhow::Result<Vec<firefly::GroupHistoryChunkItem<'static>>> {
+        let req = firefly::Request {
+            payload: firefly::mod_Request::OneOfpayload::getHistoryChunks(
+                firefly::GetHistoryChunksRequest {
+                    group_id,
+                    since_msg_id,
+                    until_msg_id,
+                },
+            ),
+            ..Default::default()
+        };
+        let response_bytes = self.request(req).await?;
+        let response = deserialize_proto::<firefly::Response>(&response_bytes)?;
+        if let Some(err) = response.error {
+            return Err(anyhow::anyhow!("server error {}: {}", err.errorCode, err.error));
+        }
+        match response.body {
+            firefly::mod_Response::OneOfbody::getHistoryChunksResponse(res) => {
+                let chunks = res.chunks.into_iter().map(|c| firefly::GroupHistoryChunkItem {
+                    id: c.id,
+                    group_id: c.group_id,
+                    start_msg_id: c.start_msg_id,
+                    end_msg_id: c.end_msg_id,
+                    msg_count: c.msg_count,
+                    unencrypted_hash: c.unencrypted_hash.to_vec().into(),
+                    chunk_url: c.chunk_url.to_string().into(),
+                    created_at: c.created_at,
+                    uploaded_by: c.uploaded_by.to_string().into(),
+                    status: c.status,
+                    disapproved_by: c.disapproved_by.to_string().into(),
+                    disapproved_reason: c.disapproved_reason.to_string().into(),
+                }).collect();
+                Ok(chunks)
+            }
+            _ => Err(anyhow::anyhow!("unexpected response body for getHistoryChunks")),
+        }
+    }
+
+    pub async fn get_pending_group_history_requests(
+        &self,
+        group_ids: Vec<u64>,
+    ) -> anyhow::Result<Vec<firefly::GroupHistoryRequestItem<'static>>> {
+        let req = firefly::Request {
+            payload: firefly::mod_Request::OneOfpayload::getPendingHistoryRequests(
+                firefly::GetPendingHistoryRequests {
+                    group_ids,
+                },
+            ),
+            ..Default::default()
+        };
+        let response_bytes = self.request(req).await?;
+        let response = deserialize_proto::<firefly::Response>(&response_bytes)?;
+        if let Some(err) = response.error {
+            return Err(anyhow::anyhow!("server error {}: {}", err.errorCode, err.error));
+        }
+        match response.body {
+            firefly::mod_Response::OneOfbody::getPendingHistoryRequestsResponse(res) => {
+                let requests = res.requests.into_iter().map(|r| firefly::GroupHistoryRequestItem {
+                    id: r.id,
+                    group_id: r.group_id,
+                    requester_address: r.requester_address,
+                    requester_username: r.requester_username.to_string().into(),
+                    start_msg_id: r.start_msg_id,
+                    end_msg_id: r.end_msg_id,
+                    status: r.status,
+                    claimed_by: r.claimed_by,
+                    created_at: r.created_at,
+                }).collect();
+                Ok(requests)
+            }
+            _ => Err(anyhow::anyhow!("unexpected response body for getPendingHistoryRequests")),
+        }
+    }
+
+    pub async fn close_group_history_request(
+        &self,
+        group_id: u64,
+        request_id: u64,
+    ) -> anyhow::Result<()> {
+        let req = firefly::Request {
+            payload: firefly::mod_Request::OneOfpayload::closeHistoryRequest(
+                firefly::CloseHistoryRequest {
+                    group_id,
+                    request_id,
+                },
+            ),
+            ..Default::default()
+        };
+        let response_bytes = self.request(req).await?;
+        let response = deserialize_proto::<firefly::Response>(&response_bytes)?;
+        if let Some(err) = response.error {
+            return Err(anyhow::anyhow!("server error {}: {}", err.errorCode, err.error));
+        }
+        Ok(())
+    }
+
+    pub async fn share_group_history_keys(
+        &self,
+        group_id: u64,
+        keys: Vec<firefly::GroupHistoryChunkKey<'static>>,
+    ) -> anyhow::Result<u64> {
+        let payload = firefly::GroupHistoryKeysPayload { keys };
+        let serialized = serialize_proto(&payload)?;
+        let text = hex::encode(&serialized);
+        let message_type = firefly_protos::MESSAGE_TYPE_HIDDEN | firefly_protos::MESSAGE_TYPE_HISTORY_KEYS;
+
+        let inner = firefly::GroupMessageInner {
+            channelId: 0,
+            message: firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(
+                firefly::MessagePayload {
+                    text: text.into(),
+                    files: None,
+                    ext: firefly::mod_MessagePayload::OneOfext::None,
+                    message_type,
+                },
+            ),
+            message_type,
+        };
+
+        self.upload_group_message(group_id, inner, 0).await
+    }
+
+    pub fn set_cdn_url(&self, url: String) {
+        if let Ok(mut cdn) = self.cdn_base_url.write() {
+            *cdn = Some(url);
+        }
+    }
+
+    pub fn get_cdn_url(&self) -> String {
+        if let Ok(cdn) = self.cdn_base_url.read() {
+            if let Some(ref url) = *cdn {
+                return url.trim_end_matches('/').to_string();
+            }
+        }
+        if let Ok(env_url) = std::env::var("FIREFLY_CDN_URL").or_else(|_| std::env::var("CDN_URL")) {
+            return env_url.trim_end_matches('/').to_string();
+        }
+        format!("{}/cdn", self.firefly_base_url.trim_end_matches('/'))
+    }
+
+    pub async fn upload_chunk_blob(
+        &self,
+        _group_id: u64,
+        blob_bytes: Vec<u8>,
+    ) -> anyhow::Result<String> {
+        let token = self
+            .callbacks
+            .get_access_token()
+            .await
+            .context("token not found")?;
+        let cdn_base = self.get_cdn_url();
+        let cdn_base = cdn_base.trim_end_matches('/');
+        // Generate random ID for CDN chunk
+        let random_id = format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>());
+        let upload_url = format!("{}/group_chunks/{}", cdn_base, random_id);
+
+        let response = HTTP_CLIENT
+            .put(&upload_url)
+            .bearer_auth(token)
+            .header("Content-Type", "application/octet-stream")
+            .body(blob_bytes)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "upload chunk blob to cdn failed [{}]: {}",
+                response.status(),
+                response.text().await?
+            ));
+        }
+
+        Ok(upload_url)
+    }
+
+    pub async fn download_chunk_blob(&self, url_or_path: &str) -> anyhow::Result<Vec<u8>> {
+        let full_url = if url_or_path.starts_with("http://") || url_or_path.starts_with("https://") {
+            url_or_path.to_string()
+        } else {
+            let base = self.get_cdn_url();
+            let base = base.trim_end_matches('/');
+            let path = if url_or_path.starts_with('/') {
+                url_or_path.to_string()
+            } else {
+                format!("/{}", url_or_path)
+            };
+            format!("{}{}", base, path)
+        };
+
+        let mut req = HTTP_CLIENT.get(&full_url);
+        if let Some(token) = self.callbacks.get_access_token().await {
+            req = req.bearer_auth(token);
+        }
+        let response = req.send().await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "download chunk blob failed [{}]: {}",
+                response.status(),
+                response.text().await?
+            ));
+        }
+
+        let bytes = response.bytes().await?;
+        Ok(bytes.to_vec())
+    }
+
+    pub async fn fulfill_group_history(
+        &self,
+        group_id: u64,
+        request_id: u64,
+        start_msg_id: u64,
+        end_msg_id: u64,
+    ) -> anyhow::Result<bool> {
+        let granted = self
+            .claim_group_history_request(group_id, request_id, start_msg_id, end_msg_id)
+            .await?;
+        if !granted {
+            log::info!(
+                "claim_group_history_request: lease not granted for group {} req {}",
+                group_id,
+                request_id
+            );
+            return Ok(false);
+        }
+
+        let msgs = self
+            .group_messages_store
+            .get_range(group_id, start_msg_id, end_msg_id)
+            .await?;
+        if msgs.is_empty() {
+            log::warn!(
+                "fulfill_group_history: no local messages found for group {} range [{}..{}]",
+                group_id,
+                start_msg_id,
+                end_msg_id
+            );
+            let _ = self.close_group_history_request(group_id, request_id).await;
+            return Ok(true);
+        }
+
+        let mut shared_keys = Vec::new();
+        for chunk_msgs in msgs.chunks(DEFAULT_CHUNK_SIZE) {
+            let packed = pack_messages_into_chunk(chunk_msgs)?;
+
+            let chunk_url = self.upload_chunk_blob(group_id, packed.blob).await?;
+
+            self.publish_group_history_chunk(
+                group_id,
+                packed.start_msg_id,
+                packed.end_msg_id,
+                packed.msg_count,
+                packed.unencrypted_hash,
+                chunk_url,
+            )
+            .await?;
+
+            self.history_keys_store
+                .save_chunk_key(
+                    group_id,
+                    packed.start_msg_id,
+                    packed.end_msg_id,
+                    &packed.key,
+                    &packed.nonce,
+                )
+                .await?;
+
+            shared_keys.push(firefly::GroupHistoryChunkKey {
+                group_id,
+                start_msg_id: packed.start_msg_id,
+                end_msg_id: packed.end_msg_id,
+                key: packed.key.into(),
+                nonce: packed.nonce.into(),
+            });
+        }
+
+        if !shared_keys.is_empty() {
+            self.share_group_history_keys(group_id, shared_keys).await?;
+        }
+
+        self.close_group_history_request(group_id, request_id).await?;
+
+        Ok(true)
+    }
+
+    pub async fn fetch_and_verify_group_history(
+        &self,
+        group_id: u64,
+        since_msg_id: u64,
+        until_msg_id: u64,
+    ) -> anyhow::Result<usize> {
+        let chunks = self.get_group_history_chunks(group_id, since_msg_id, until_msg_id).await?;
+        let mut total_imported = 0;
+
+        for chunk in chunks {
+            if self.history_keys_store.is_chunk_disapproved(group_id, chunk.id).await? {
+                log::warn!("skipping disapproved chunk {}", chunk.id);
+                continue;
+            }
+
+            let key_opt = self.history_keys_store.get_chunk_key(group_id, chunk.start_msg_id, chunk.end_msg_id).await?;
+            let (key, _nonce) = match key_opt {
+                Some((k, n)) => (k, n),
+                None => {
+                    log::info!("no key yet for chunk {} [{}..{}], skipping", chunk.id, chunk.start_msg_id, chunk.end_msg_id);
+                    continue;
+                }
+            };
+
+            let blob = match self.download_chunk_blob(&chunk.chunk_url).await {
+                Ok(b) => b,
+                Err(err) => {
+                    log::error!("failed to download chunk {}: {:?}", chunk.id, err);
+                    continue;
+                }
+            };
+
+            match decrypt_and_unpack_chunk(&blob, &key, &chunk.unencrypted_hash) {
+                Ok(records) => {
+                    for r in records {
+                        self.group_messages_store.add(
+                            r.id,
+                            r.group_id,
+                            r.channel_id,
+                            r.epoch,
+                            &r.by,
+                            &r.message,
+                            r.message_type,
+                        ).await?;
+                        total_imported += 1;
+                    }
+                }
+                Err(err) => {
+                    log::error!("chunk {} failed verification: {:?}; disapproving!", chunk.id, err);
+                    let _ = self.disapprove_group_history_chunk(
+                        group_id,
+                        chunk.id,
+                        format!("verification failed: {}", err),
+                    ).await;
+                }
+            }
+        }
+
+        Ok(total_imported)
+    }
+
+    pub async fn verify_published_chunks(&self, group_id: u64) -> anyhow::Result<()> {
+        let chunks = self.get_group_history_chunks(group_id, 0, 0).await?;
+        for chunk in chunks {
+            if self.history_keys_store.is_chunk_disapproved(group_id, chunk.id).await? {
+                continue;
+            }
+
+            let local_msgs = self.group_messages_store.get_range(group_id, chunk.start_msg_id, chunk.end_msg_id).await?;
+            if local_msgs.is_empty() {
+                continue;
+            }
+
+            if local_msgs.len() == chunk.msg_count as usize
+                && local_msgs.first().unwrap().id == chunk.start_msg_id
+                && local_msgs.last().unwrap().id == chunk.end_msg_id
+            {
+                let local_hash = compute_unencrypted_hash(&local_msgs)?;
+                if local_hash != chunk.unencrypted_hash.as_ref() {
+                    log::warn!(
+                        "Chunk {} hash mismatch! local={:?}, chunk={:?}. Disapproving!",
+                        chunk.id,
+                        local_hash,
+                        chunk.unencrypted_hash
+                    );
+                    let _ = self.disapprove_group_history_chunk(
+                        group_id,
+                        chunk.id,
+                        "unencrypted hash mismatch with local messages".to_string(),
+                    ).await;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn on_group_message(
@@ -3028,6 +3549,7 @@ async fn on_group_message(
     firefly_mls_client: &FfiMlsClient,
     group_info_store: &GroupInfoStore,
     group_message_store: &GroupMessagesStore,
+    history_keys_store: &HistoryKeysStore,
     key_value_store: &KeyValueStore,
     callbacks: &Arc<dyn FireflyWsClientCallback>,
     is_commit: bool,
@@ -3100,6 +3622,56 @@ async fn on_group_message(
                     }
             }).unwrap_or(0);
 
+            if message_type & firefly_protos::MESSAGE_TYPE_HISTORY_KEYS != 0 {
+                let raw_keys_bytes = if let Some(inner_msg) = inner.as_ref() {
+                    match &inner_msg.message {
+                        firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(p) => {
+                            if let Ok(raw) = hex::decode(p.text.as_bytes()) {
+                                Some(raw)
+                            } else if let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(p.text.as_bytes()) {
+                                Some(raw)
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+
+                let keys_payload = raw_keys_bytes
+                    .as_deref()
+                    .and_then(|raw| deserialize_proto::<firefly::GroupHistoryKeysPayload>(raw).ok())
+                    .or_else(|| {
+                        deserialize_proto::<firefly::GroupHistoryKeysPayload>(&encrypted_group_message.message).ok()
+                    });
+
+                if let Some(keys_payload) = keys_payload {
+                    for key in keys_payload.keys {
+                        if let Err(err) = history_keys_store
+                            .save_chunk_key(
+                                groupId,
+                                key.start_msg_id,
+                                key.end_msg_id,
+                                &key.key,
+                                &key.nonce,
+                            )
+                            .await
+                        {
+                            log::error!("failed to save history chunk key: {:?}", err);
+                        } else {
+                            log::info!(
+                                "saved history chunk key: group={}, range=[{}-{}]",
+                                groupId,
+                                key.start_msg_id,
+                                key.end_msg_id
+                            );
+                        }
+                    }
+                }
+            }
+
             group_message_store
                 .add(
                     msg.id,
@@ -3130,7 +3702,9 @@ async fn on_group_message(
                 epoch,
                 message_type,
             );
-            callbacks.on_group_message(message).await;
+            if message_type & firefly_protos::MESSAGE_TYPE_HIDDEN == 0 {
+                callbacks.on_group_message(message).await;
+            }
         }
         _ => {
             group_message_store
@@ -3683,6 +4257,7 @@ async fn on_server_message(
     firefly_mls_client: &Arc<FfiMlsClient>,
     group_info_store: &GroupInfoStore,
     group_message_store: &GroupMessagesStore,
+    history_keys_store: &HistoryKeysStore,
     sender: Sender<Bytes>,
     address_id: u64,
     device_id: u8,
@@ -3722,6 +4297,7 @@ async fn on_server_message(
                 firefly_mls_client,
                 group_info_store,
                 group_message_store,
+                history_keys_store,
                 key_value_store,
                 callbacks,
                 false,
@@ -3753,6 +4329,7 @@ async fn on_server_message(
                     firefly_mls_client,
                     group_info_store,
                     group_message_store,
+                    history_keys_store,
                     key_value_store,
                     callbacks,
                     false,
@@ -3807,6 +4384,7 @@ async fn on_server_message(
                     firefly_mls_client,
                     group_info_store,
                     group_message_store,
+                    history_keys_store,
                     key_value_store,
                     callbacks,
                     true,
@@ -3942,6 +4520,24 @@ async fn on_server_message(
                 upto_message_id: read_upto.uptoMessageId,
             };
             callbacks.on_read_user_messages_upto(ffi_read).await;
+        }
+        firefly::mod_ServerMessage::OneOfmessage::groupHistorySignal(signal) => {
+            log::info!(
+                "received group history signal: group_id={}, signal_type={:?}, request_id={}, chunk_id={}, username={}",
+                signal.group_id,
+                signal.type_pb,
+                signal.request_id,
+                signal.chunk_id,
+                signal.username,
+            );
+            let s = crate::callbacks::GroupHistorySignal {
+                group_id: signal.group_id,
+                signal_type: signal.type_pb as i32,
+                request_id: signal.request_id,
+                chunk_id: signal.chunk_id,
+                username: signal.username.to_string(),
+            };
+            callbacks.on_group_history_signal(s).await;
         }
         firefly::mod_ServerMessage::OneOfmessage::pong(_pong_bytes) => {}
         firefly::mod_ServerMessage::OneOfmessage::ping(_ping_bytes) => {}

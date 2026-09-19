@@ -82,10 +82,15 @@ impl GroupMessagesStore {
         group.can_see_message(channel_id).await
     }
 
-    async fn visible_messages(
+    pub async fn visible_messages(
         &self,
         messages: Vec<GroupMessage>,
     ) -> anyhow::Result<Vec<GroupMessage>> {
+        let messages: Vec<GroupMessage> = messages
+            .into_iter()
+            .filter(|m| m.message_type & firefly_protos::MESSAGE_TYPE_HIDDEN == 0)
+            .collect();
+
         let Some(access) = &self.read_access else {
             return Ok(messages);
         };
@@ -116,6 +121,7 @@ impl GroupMessagesStore {
             }
         }
         Ok(visible)
+
     }
 
     pub async fn update_cursor(&self, id: u64, group_id: u64, epoch: u32) -> anyhow::Result<()> {
@@ -218,6 +224,33 @@ impl GroupMessagesStore {
         )
         .await
     }
+
+    pub async fn get_range(
+        &self,
+        group_id: u64,
+        start_id: u64,
+        end_id: u64,
+    ) -> anyhow::Result<Vec<GroupMessage>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, by, message, channel_id, group_id, epoch, message_type
+            FROM group_messages
+            WHERE group_id = ? AND id >= ? AND id <= ?
+            ORDER BY id ASC
+            "#,
+        )
+        .bind(group_id as i64)
+        .bind(start_id as i64)
+        .bind(end_id as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.iter()
+            .map(GroupMessage::from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
 
     pub async fn get_pinned_messages(&self, group_id: u64) -> anyhow::Result<Vec<GroupMessage>> {
         let _pin_write = self.pin_writes.lock().await;

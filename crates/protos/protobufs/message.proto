@@ -207,6 +207,13 @@ message Request {
     LeaveMeetingRequest leaveMeeting = 12;
     EndMeetingRequest endMeeting = 13;
     GetActiveSessionRequest getActiveSession = 14;
+    CreateHistoryRequest createHistoryRequest = 15;
+    ClaimHistoryRequest claimHistoryRequest = 16;
+    PublishHistoryChunkRequest publishHistoryChunk = 17;
+    DisapproveHistoryChunkRequest disapproveHistoryChunk = 18;
+    GetHistoryChunksRequest getHistoryChunks = 19;
+    GetPendingHistoryRequests getPendingHistoryRequests = 20;
+    CloseHistoryRequest closeHistoryRequest = 21;
   }
 }
 
@@ -224,6 +231,10 @@ message Response {
     CreateMeetingResponse createMeetingResponse = 10;
     JoinMeetingResponse joinMeetingResponse = 11;
     GetActiveSessionResponse getActiveSessionResponse = 14;
+    GetHistoryChunksResponse getHistoryChunksResponse = 15;
+    GetPendingHistoryRequestsResponse getPendingHistoryRequestsResponse = 16;
+    HistoryOperationSuccess historySuccess = 17;
+    ClaimHistoryResponse claimHistoryResponse = 18;
   }
 }
 
@@ -248,6 +259,7 @@ message ServerMessage {
     GroupJoinRequests groupJoinRequests = 18;
     CallSignal callSignal = 20;
     GroupMeetingSignal groupMeetingSignal = 21;
+    GroupHistorySignal groupHistorySignal = 22;
   }
 }
 
@@ -578,5 +590,120 @@ message GroupMeetingSignal {
   string username = 5;             // Who triggered the event
   string cf_meeting_id = 6;
 }
+
+// ─── Group History Chunks & Requests ─────────────────────────
+
+message GroupHistoryRequestItem {
+  fixed64 id = 1;
+  uint64 group_id = 2;
+  uint64 requester_address = 3;
+  string requester_username = 4;
+  fixed64 start_msg_id = 5;
+  fixed64 end_msg_id = 6;
+  uint32 status = 7; // 0=pending, 1=in_progress, 2=fulfilled, 3=closed
+  uint64 claimed_by = 8;
+  fixed64 created_at = 9;
+}
+
+message GroupHistoryChunkItem {
+  uint64 id = 1;
+  uint64 group_id = 2;
+  fixed64 start_msg_id = 3;
+  fixed64 end_msg_id = 4;
+  uint32 msg_count = 5;
+  bytes unencrypted_hash = 6;
+  string chunk_url = 7;
+  string uploaded_by = 8;
+  uint32 status = 9; // 0=valid, 1=disapproved
+  string disapproved_by = 10;
+  string disapproved_reason = 11;
+  fixed64 created_at = 12;
+}
+
+message GroupHistoryChunkKey {
+  uint64 group_id = 1;
+  fixed64 start_msg_id = 2;
+  fixed64 end_msg_id = 3;
+  bytes key = 4;
+  bytes nonce = 5;
+}
+
+message GroupHistoryKeysPayload {
+  repeated GroupHistoryChunkKey keys = 1;
+}
+
+message CreateHistoryRequest {
+  uint64 group_id = 1;
+  fixed64 start_msg_id = 2;
+  fixed64 end_msg_id = 3;
+}
+
+message ClaimHistoryRequest {
+  uint64 group_id = 1;
+  fixed64 request_id = 2;
+  fixed64 start_msg_id = 3;
+  fixed64 end_msg_id = 4;
+}
+
+message ClaimHistoryResponse {
+  bool granted = 1;
+  string message = 2;
+}
+
+message PublishHistoryChunkRequest {
+  uint64 group_id = 1;
+  fixed64 start_msg_id = 2;
+  fixed64 end_msg_id = 3;
+  uint32 msg_count = 4;
+  bytes unencrypted_hash = 5;
+  string chunk_url = 6;
+}
+
+message DisapproveHistoryChunkRequest {
+  uint64 group_id = 1;
+  uint64 chunk_id = 2;
+  string reason = 3;
+}
+
+message GetHistoryChunksRequest {
+  uint64 group_id = 1;
+  fixed64 since_msg_id = 2;
+  fixed64 until_msg_id = 3;
+}
+
+message GetHistoryChunksResponse {
+  repeated GroupHistoryChunkItem chunks = 1;
+}
+
+message GetPendingHistoryRequests {
+  repeated uint64 group_ids = 1;
+}
+
+message GetPendingHistoryRequestsResponse {
+  repeated GroupHistoryRequestItem requests = 1;
+}
+
+message CloseHistoryRequest {
+  uint64 group_id = 1;
+  fixed64 request_id = 2;
+}
+
+message HistoryOperationSuccess {}
+
+enum HistorySignalType {
+  HISTORY_SIGNAL_REQUEST_CREATED = 0;
+  HISTORY_SIGNAL_CHUNK_PUBLISHED = 1;
+  HISTORY_SIGNAL_CHUNK_DISAPPROVED = 2;
+  HISTORY_SIGNAL_REQUEST_FULFILLED = 3;
+}
+
+message GroupHistorySignal {
+  uint64 group_id = 1;
+  HistorySignalType type = 2;
+  fixed64 request_id = 3;
+  uint64 chunk_id = 4;
+  string username = 5;
+}
+
 
 

@@ -76,62 +76,66 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     )
     .await?;
 
-    // Fast path: If standard_v1 is already applied, return immediately without any table scans.
-    let already_applied: Option<i64> = sqlx::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 1")
+    // Fast path: If history_chunks_v2 is already applied, return immediately without any table scans.
+    let already_applied: Option<i64> = sqlx::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 2")
         .fetch_optional(&mut *conn)
         .await?;
     if already_applied.is_some() {
         return Ok(());
     }
 
-    // 2. Base tables creation if they don't already exist
-    conn.execute(
-        r#"
-        CREATE TABLE IF NOT EXISTS user_messages (
-            id INTEGER NOT NULL,
-            other TEXT NOT NULL,
-            sent_by_other BOOLEAN NOT NULL,
-            message BLOB NOT NULL,
-            message_type INTEGER NOT NULL DEFAULT 0,
-            text TEXT NOT NULL DEFAULT ''
-        );
-
-        CREATE TABLE IF NOT EXISTS last_seen_user_timestamps (
-            other TEXT NOT NULL PRIMARY KEY,
-            id INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS group_messages (
-            id INTEGER NOT NULL,
-            group_id INTEGER NOT NULL,
-            by TEXT NOT NULL,
-            message BLOB NOT NULL,
-            channel_id INTEGER NOT NULL,
-            epoch INTEGER NOT NULL DEFAULT 0,
-            message_type INTEGER NOT NULL DEFAULT 0,
-            text TEXT NOT NULL DEFAULT '',
-            PRIMARY KEY (group_id, id)
-        );
-
-        CREATE TABLE IF NOT EXISTS favourite_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source TEXT NOT NULL,
-            message_id INTEGER NOT NULL,
-            other TEXT,
-            group_id INTEGER,
-            channel_id INTEGER,
-            by TEXT NOT NULL,
-            text TEXT NOT NULL DEFAULT '',
-            message BLOB NOT NULL,
-            message_type INTEGER NOT NULL DEFAULT 0,
-            epoch INTEGER NOT NULL DEFAULT 0,
-            created_at INTEGER NOT NULL
-        );
-        "#,
-    )
-    .await?;
-
+    let v1_applied: Option<i64> = sqlx::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 1")
+        .fetch_optional(&mut *conn)
+        .await?;
     drop(conn);
+
+    if v1_applied.is_none() {
+        // 2. Base tables creation if they don't already exist
+        pool.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS user_messages (
+                id INTEGER NOT NULL,
+                other TEXT NOT NULL,
+                sent_by_other BOOLEAN NOT NULL,
+                message BLOB NOT NULL,
+                message_type INTEGER NOT NULL DEFAULT 0,
+                text TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS last_seen_user_timestamps (
+                other TEXT NOT NULL PRIMARY KEY,
+                id INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS group_messages (
+                id INTEGER NOT NULL,
+                group_id INTEGER NOT NULL,
+                by TEXT NOT NULL,
+                message BLOB NOT NULL,
+                channel_id INTEGER NOT NULL,
+                epoch INTEGER NOT NULL DEFAULT 0,
+                message_type INTEGER NOT NULL DEFAULT 0,
+                text TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (group_id, id)
+            );
+
+            CREATE TABLE IF NOT EXISTS favourite_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL,
+                message_id INTEGER NOT NULL,
+                other TEXT,
+                group_id INTEGER,
+                channel_id INTEGER,
+                by TEXT NOT NULL,
+                text TEXT NOT NULL DEFAULT '',
+                message BLOB NOT NULL,
+                message_type INTEGER NOT NULL DEFAULT 0,
+                epoch INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+            "#,
+        )
+        .await?;
 
     // 3. Migrate user_messages columns
     ensure_column(pool, "user_messages", "message_type", "INTEGER NOT NULL DEFAULT 0").await?;
@@ -278,12 +282,52 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         let _ = pool.execute("INSERT INTO group_messages_fts(group_messages_fts) VALUES('rebuild')").await;
     }
 
-    // Record migration applied
-    let now = get_current_timestamp_millis_since_epoch() as i64;
-    let _ = sqlx::query("INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (1, 'standard_v1', ?)")
-        .bind(now)
-        .execute(pool)
-        .await;
+        // Record migration 1 applied
+        let now = get_current_timestamp_millis_since_epoch() as i64;
+        let _ = sqlx::query("INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (1, 'standard_v1', ?)")
+            .bind(now)
+            .execute(pool)
+            .await;
+    }
+
+    // 10. Migration v2: Group History Chunks Keys and Disapprovals
+    let v2_applied: Option<i64> = sqlx::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 2")
+        .fetch_optional(pool)
+        .await?;
+    if v2_applied.is_none() {
+        pool.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS group_history_chunk_keys (
+                group_id INTEGER NOT NULL,
+                start_msg_id INTEGER NOT NULL,
+                end_msg_id INTEGER NOT NULL,
+                key BLOB NOT NULL,
+                nonce BLOB NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (group_id, start_msg_id, end_msg_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS group_history_chunk_keys_idx
+                ON group_history_chunk_keys (group_id, start_msg_id);
+
+            CREATE TABLE IF NOT EXISTS group_history_disapprovals (
+                group_id INTEGER NOT NULL,
+                chunk_id INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                disapproved_at INTEGER NOT NULL,
+                PRIMARY KEY (group_id, chunk_id)
+            );
+            "#,
+        )
+        .await?;
+
+        let now = get_current_timestamp_millis_since_epoch() as i64;
+        let _ = sqlx::query("INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (2, 'history_chunks_v2', ?)")
+            .bind(now)
+            .execute(pool)
+            .await;
+    }
 
     Ok(())
 }
+

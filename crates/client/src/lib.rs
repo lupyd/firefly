@@ -16,6 +16,7 @@ pub mod db;
 pub mod error;
 
 pub mod group;
+pub mod history;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod logger;

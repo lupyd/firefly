@@ -577,6 +577,56 @@ $$ LANGUAGE sql IMMUTABLE;
 ALTER TABLE user_messages DROP CONSTRAINT IF EXISTS user_messages_from_id_fkey;
 ALTER TABLE user_messages ADD CONSTRAINT check_from_id_exists CHECK (check_address_exists(from_id));
 
+-- # migrations
+-- Group History Chunks, Requests, and Worker Locks
+CREATE TABLE IF NOT EXISTS group_history_requests (
+    id BIGINT NOT NULL DEFAULT now_us() PRIMARY KEY,
+    group_id BIGINT NOT NULL REFERENCES groups (id) ON DELETE CASCADE,
+    requester_address BIGINT NOT NULL REFERENCES addresses (id) ON DELETE CASCADE,
+    requester_username VARCHAR NOT NULL,
+    start_msg_id BIGINT NOT NULL DEFAULT 0,
+    end_msg_id BIGINT NOT NULL DEFAULT 0,
+    status SMALLINT NOT NULL DEFAULT 0, -- 0 = pending, 1 = in_progress, 2 = fulfilled, 3 = closed
+    claimed_by BIGINT REFERENCES addresses (id) ON DELETE SET NULL,
+    claimed_at BIGINT,
+    created_at BIGINT NOT NULL DEFAULT now_us(),
+    fulfilled_at BIGINT
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_history_requests_pending
+    ON group_history_requests (group_id, status)
+    WHERE status IN (0, 1);
+
+CREATE TABLE IF NOT EXISTS group_history_chunks (
+    id BIGSERIAL PRIMARY KEY,
+    group_id BIGINT NOT NULL REFERENCES groups (id) ON DELETE CASCADE,
+    start_msg_id BIGINT NOT NULL,
+    end_msg_id BIGINT NOT NULL,
+    msg_count INT NOT NULL,
+    unencrypted_hash BYTEA NOT NULL,
+    chunk_url VARCHAR NOT NULL,
+    uploaded_by VARCHAR NOT NULL,
+    status SMALLINT NOT NULL DEFAULT 0, -- 0 = valid, 1 = disapproved
+    disapproved_by VARCHAR,
+    disapproved_reason VARCHAR,
+    created_at BIGINT NOT NULL DEFAULT now_us()
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_history_chunks_active
+    ON group_history_chunks (group_id, start_msg_id, end_msg_id)
+    WHERE status = 0;
+
+CREATE TABLE IF NOT EXISTS group_history_chunk_locks (
+    group_id BIGINT NOT NULL REFERENCES groups (id) ON DELETE CASCADE,
+    start_msg_id BIGINT NOT NULL,
+    end_msg_id BIGINT NOT NULL,
+    locked_by BIGINT NOT NULL REFERENCES addresses (id) ON DELETE CASCADE,
+    locked_at BIGINT NOT NULL DEFAULT now_us(),
+    expires_at BIGINT NOT NULL,
+    PRIMARY KEY (group_id, start_msg_id, end_msg_id)
+);
+
+
 
 
 

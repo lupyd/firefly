@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use sqlx::{Executor, Row, SqlitePool};
+use sqlx::{Row, SqlitePool};
 
 use crate::db::group_messages::{extract_group_message_text, GroupMessage};
 use crate::db::group_stores::GroupInfoStore;

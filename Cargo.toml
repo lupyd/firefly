@@ -14,6 +14,8 @@ firefly-core = { path = "crates/core" }
 firefly-client = { path = "crates/client" }
 
 anyhow = "1.0.100"
+aes-gcm = "0.10.3"
+flate2 = "1.0"
 async-trait = "0.1.89"
 base64 = "0.22.1"
 bytes = "1.11.0"

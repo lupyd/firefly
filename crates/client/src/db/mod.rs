@@ -10,6 +10,7 @@ pub mod favourites;
 pub mod ffi_stores;
 pub mod group_messages;
 pub mod group_stores;
+pub mod history_keys;
 pub mod keyvalue;
 pub mod messages;
 pub mod migrations;
