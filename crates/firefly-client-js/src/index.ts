@@ -18,6 +18,9 @@ import {
   RawUserMessage,
   RawGroupMessage,
   RawGroupInfo,
+  RawFavouriteMessage,
+  RawFavoriteMessage,
+  RawSearchResultItem,
 } from 'firefly-client-node';
 
 export type {
@@ -32,6 +35,9 @@ export type {
   RawUserMessage,
   RawGroupMessage,
   RawGroupInfo,
+  RawFavouriteMessage,
+  RawFavoriteMessage,
+  RawSearchResultItem,
 };
 
 export { UserPermission, DEFAULT_GROUP_PERMISSIONS } from 'firefly-client-node';
@@ -342,6 +348,106 @@ export class FireflyClient {
       throw new Error('Client not initialized');
     }
     return await this.client.getOnlineStatus(usernames);
+  }
+
+  // Favourite messages APIs
+  async addFavourite(favourite: RawFavouriteMessage): Promise<number> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    return await this.client.addFavourite(favourite);
+  }
+
+  async addFavorite(favorite: RawFavouriteMessage): Promise<number> {
+    return await this.addFavourite(favorite);
+  }
+
+  async removeUserFavourite(other: string, messageId: number): Promise<boolean> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    return await this.client.removeUserFavourite(other, messageId);
+  }
+
+  async removeUserFavorite(other: string, messageId: number): Promise<boolean> {
+    return await this.removeUserFavourite(other, messageId);
+  }
+
+  async removeGroupFavourite(groupId: number, messageId: number): Promise<boolean> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    return await this.client.removeGroupFavourite(groupId, messageId);
+  }
+
+  async removeGroupFavorite(groupId: number, messageId: number): Promise<boolean> {
+    return await this.removeGroupFavourite(groupId, messageId);
+  }
+
+  async removeFavouriteById(favouriteId: number): Promise<boolean> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    return await this.client.removeFavouriteById(favouriteId);
+  }
+
+  async removeFavoriteById(favoriteId: number): Promise<boolean> {
+    return await this.removeFavouriteById(favoriteId);
+  }
+
+  async isUserFavourite(other: string, messageId: number): Promise<boolean> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    return await this.client.isUserFavourite(other, messageId);
+  }
+
+  async isUserFavorite(other: string, messageId: number): Promise<boolean> {
+    return await this.isUserFavourite(other, messageId);
+  }
+
+  async isGroupFavourite(groupId: number, messageId: number): Promise<boolean> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    return await this.client.isGroupFavourite(groupId, messageId);
+  }
+
+  async isGroupFavorite(groupId: number, messageId: number): Promise<boolean> {
+    return await this.isGroupFavourite(groupId, messageId);
+  }
+
+  async getFavourites(limit: number = 50, offset: number = 0): Promise<RawFavouriteMessage[]> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    return await this.client.getFavourites(limit, offset);
+  }
+
+  async getFavorites(limit: number = 50, offset: number = 0): Promise<RawFavouriteMessage[]> {
+    return await this.getFavourites(limit, offset);
+  }
+
+  async getUserFavourites(other?: string, limit: number = 50, offset: number = 0): Promise<RawFavouriteMessage[]> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    return await this.client.getUserFavourites(other, limit, offset);
+  }
+
+  async getUserFavorites(other?: string, limit: number = 50, offset: number = 0): Promise<RawFavouriteMessage[]> {
+    return await this.getUserFavourites(other, limit, offset);
+  }
+
+  async getGroupFavourites(groupId?: number, channelId?: number, limit: number = 50, offset: number = 0): Promise<RawFavouriteMessage[]> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    return await this.client.getGroupFavourites(groupId, channelId, limit, offset);
+  }
+
+  async getGroupFavorites(groupId?: number, channelId?: number, limit: number = 50, offset: number = 0): Promise<RawFavouriteMessage[]> {
+    return await this.getGroupFavourites(groupId, channelId, limit, offset);
   }
 
   // Dispose client

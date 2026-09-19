@@ -34,6 +34,34 @@ export interface RawGroupInfo {
     identifier: Uint8Array;
     groupId?: number;
 }
+export interface RawFavouriteMessage {
+    id: number;
+    source: 'user' | 'group';
+    messageId: number;
+    other?: string;
+    groupId?: number;
+    channelId?: number;
+    by: string;
+    text: string;
+    message: Uint8Array;
+    messageType: number;
+    epoch?: number;
+    createdAt: number;
+}
+export type RawFavoriteMessage = RawFavouriteMessage;
+export interface RawSearchResultItem {
+    source: 'user' | 'group';
+    messageId: number;
+    groupId?: number;
+    channelId?: number;
+    other?: string;
+    by: string;
+    text: string;
+    snippet: string;
+    messageType: number;
+    epoch?: number;
+    score: number;
+}
 export interface MlsKeyPackageStorage {
     insert(id: Uint8Array, keyPackageData: Uint8Array): Promise<boolean> | boolean;
     delete(id: Uint8Array): Promise<boolean> | boolean;
@@ -110,4 +138,22 @@ export declare class FireflyClientNode {
     getConversations(token: string): Promise<any[]>;
     getGroupExtension(groupId: number): Promise<Uint8Array>;
     exportGroupMeetingKey(groupId: number): Promise<Uint8Array>;
+    addFavourite(favourite: RawFavouriteMessage): Promise<number>;
+    addFavorite(favorite: RawFavouriteMessage): Promise<number>;
+    removeUserFavourite(other: string, messageId: number): Promise<boolean>;
+    removeUserFavorite(other: string, messageId: number): Promise<boolean>;
+    removeGroupFavourite(groupId: number, messageId: number): Promise<boolean>;
+    removeGroupFavorite(groupId: number, messageId: number): Promise<boolean>;
+    removeFavouriteById(favouriteId: number): Promise<boolean>;
+    removeFavoriteById(favoriteId: number): Promise<boolean>;
+    isUserFavourite(other: string, messageId: number): Promise<boolean>;
+    isUserFavorite(other: string, messageId: number): Promise<boolean>;
+    isGroupFavourite(groupId: number, messageId: number): Promise<boolean>;
+    isGroupFavorite(groupId: number, messageId: number): Promise<boolean>;
+    getFavourites(limit?: number, offset?: number): Promise<RawFavouriteMessage[]>;
+    getFavorites(limit?: number, offset?: number): Promise<RawFavouriteMessage[]>;
+    getUserFavourites(other?: string, limit?: number, offset?: number): Promise<RawFavouriteMessage[]>;
+    getUserFavorites(other?: string, limit?: number, offset?: number): Promise<RawFavouriteMessage[]>;
+    getGroupFavourites(groupId?: number, channelId?: number, limit?: number, offset?: number): Promise<RawFavouriteMessage[]>;
+    getGroupFavorites(groupId?: number, channelId?: number, limit?: number, offset?: number): Promise<RawFavouriteMessage[]>;
 }

@@ -5,6 +5,7 @@ use firefly_client::db::{
     messages::{MessagesStore, UserMessage},
     search::{sanitize_fts5_query, SearchEngine, SearchSource},
 };
+use firefly_client::storage::FavouriteMessageStorage;
 use firefly_protos::{
     serialize_proto,
     firefly::{self, mod_GroupMessageInner, mod_UserMessageInner, MessagePayload},
@@ -394,3 +395,126 @@ fn test_query_sanitizer_safety() {
         }
     }
 }
+
+/// Test 7: Regression test for user report: "message_type column does not exist".
+/// Ensures older databases lacking `message_type`, `text`, or `epoch` columns are migrated
+/// without consequences, preserving data, enabling pinned messages, favourites, and search.
+#[tokio::test]
+async fn test_legacy_database_initialization_with_missing_message_type_column() {
+    let pool = create_memory_pool().await;
+
+    // Simulate an existing database created before `message_type` existed
+    pool.execute(
+        r#"
+        CREATE TABLE user_messages (
+            id INTEGER NOT NULL,
+            other TEXT NOT NULL,
+            sent_by_other BOOLEAN NOT NULL,
+            message BLOB NOT NULL
+        );
+
+        CREATE TABLE group_messages (
+            id INTEGER NOT NULL,
+            group_id INTEGER NOT NULL,
+            by TEXT NOT NULL,
+            message BLOB NOT NULL,
+            channel_id INTEGER NOT NULL,
+            PRIMARY KEY (group_id, id)
+        );
+        "#,
+    )
+    .await
+    .unwrap();
+
+    // Populate with legacy rows
+    let user_msg_inner = firefly::UserMessageInner {
+        nonce: 0,
+        message: mod_UserMessageInner::OneOfmessage::messagePayload(MessagePayload {
+            text: "Hello from legacy user message".into(),
+            files: None,
+            ext: firefly::mod_MessagePayload::OneOfext::None,
+            message_type: 0,
+        }),
+        message_type: 0,
+    };
+    let user_bytes = serialize_proto(&user_msg_inner).unwrap().to_vec();
+
+    sqlx::query("INSERT INTO user_messages (id, other, sent_by_other, message) VALUES (?, ?, ?, ?)")
+        .bind(10i64)
+        .bind("alice")
+        .bind(true)
+        .bind(&user_bytes)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let group_msg_inner = firefly::GroupMessageInner {
+        channelId: 1,
+        message: mod_GroupMessageInner::OneOfmessage::messagePayload(MessagePayload {
+            text: "Hello from legacy group message".into(),
+            files: None,
+            ext: firefly::mod_MessagePayload::OneOfext::None,
+            message_type: 0,
+        }),
+        message_type: 0,
+    };
+    let group_bytes = serialize_proto(&group_msg_inner).unwrap().to_vec();
+
+    sqlx::query("INSERT INTO group_messages (id, group_id, by, message, channel_id) VALUES (?, ?, ?, ?, ?)")
+        .bind(20i64)
+        .bind(100i64)
+        .bind("bob")
+        .bind(&group_bytes)
+        .bind(1i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Initialize stores concurrently - must not fail with "message_type column does not exist"
+    let user_store = MessagesStore::new(pool.clone()).await.unwrap();
+    let group_store = GroupMessagesStore::new(pool.clone()).await.unwrap();
+    let favourite_store = firefly_client::db::favourites::FavouriteMessagesStore::new(pool.clone())
+        .await
+        .unwrap();
+
+    // 1. Query messages before
+    let msgs = user_store.get_last_messages_of("alice", 100, 10).await.unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].message_type, 0);
+
+    // 2. Query pinned messages
+    let pinned = user_store.get_pinned_messages_of("alice").await.unwrap();
+    assert_eq!(pinned.len(), 0);
+
+    // 3. Update message_type on legacy row
+    user_store.update_message_type("alice", 10, 1).await.unwrap();
+    let pinned_after = user_store.get_pinned_messages_of("alice").await.unwrap();
+    assert_eq!(pinned_after.len(), 1);
+    assert_eq!(pinned_after[0].id, 10);
+    assert_eq!(pinned_after[0].message_type, 1);
+
+    // 4. Query group messages
+    let grp_msgs = group_store.get(100, 100, 10).await.unwrap();
+    assert_eq!(grp_msgs.len(), 1);
+    assert_eq!(grp_msgs[0].message_type, 0);
+    assert_eq!(grp_msgs[0].epoch, 0);
+
+    // 5. Update group message pinned status
+    group_store.update_message_type(100, 20, 1).await.unwrap();
+    let pinned_grp = group_store.get_pinned_messages(100).await.unwrap();
+    assert_eq!(pinned_grp.len(), 1);
+    assert_eq!(pinned_grp[0].id, 20);
+
+    // 6. Add favourites from legacy messages
+    favourite_store.add_user_message(&msgs[0], None).await.unwrap();
+    favourite_store.add_group_message(&grp_msgs[0], None).await.unwrap();
+
+    let favs = favourite_store.get_all(10, 0).await.unwrap();
+    assert_eq!(favs.len(), 2);
+
+    // 7. Search migrated messages
+    let search_engine = SearchEngine::with_group_messages_store(pool.clone(), group_store.clone());
+    let search_res = search_engine.search_all("legacy", 10, 0).await.unwrap();
+    assert_eq!(search_res.len(), 2);
+}
+

@@ -12,6 +12,7 @@ use firefly_client::callbacks::{CallSignal, FireflyWsClientCallback, GroupMeetin
 use firefly_client::group::FfiMlsClient;
 use firefly_client::libsignal_protocol::{DeviceId, ProtocolAddress};
 use firefly_client::storage::{
+    FavouriteMessage, FavouriteMessageStorage, FavouriteSource, MemoryFavouriteMessageStore,
     GroupInfo, GroupInfoStorage, GroupMessage, GroupMessageStorage, KeyValueStorage,
     MemoryGroupInfoStore, MemoryGroupMessageStore, MemoryKeyStores, MemoryKeyValueStore,
     MemoryMlsGroupStateStorage, MemoryMlsKeyPackageStorage, MemoryMlsPreSharedKeyStorage,
@@ -71,6 +72,104 @@ pub struct JsGroupInfo {
 pub struct JsConversation {
     pub other: String,
     pub settings: f64,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsFavouriteMessage {
+    pub id: f64,
+    pub source: String,
+    pub message_id: f64,
+    pub other: Option<String>,
+    pub group_id: Option<f64>,
+    pub channel_id: Option<f64>,
+    pub by: String,
+    pub text: String,
+    pub message: Vec<u8>,
+    pub message_type: f64,
+    pub epoch: Option<f64>,
+    pub created_at: f64,
+}
+
+impl From<FavouriteMessage> for JsFavouriteMessage {
+    fn from(f: FavouriteMessage) -> Self {
+        Self {
+            id: f.id as f64,
+            source: match f.source {
+                FavouriteSource::User => "user".to_string(),
+                FavouriteSource::Group => "group".to_string(),
+            },
+            message_id: f.message_id as f64,
+            other: f.other,
+            group_id: f.group_id.map(|g| g as f64),
+            channel_id: f.channel_id.map(|c| c as f64),
+            by: f.by,
+            text: f.text,
+            message: f.message,
+            message_type: f.message_type as f64,
+            epoch: f.epoch.map(|e| e as f64),
+            created_at: f.created_at as f64,
+        }
+    }
+}
+
+impl From<JsFavouriteMessage> for FavouriteMessage {
+    fn from(j: JsFavouriteMessage) -> Self {
+        Self {
+            id: j.id as u64,
+            source: if j.source == "user" {
+                FavouriteSource::User
+            } else {
+                FavouriteSource::Group
+            },
+            message_id: j.message_id as u64,
+            other: j.other,
+            group_id: j.group_id.map(|g| g as u64),
+            channel_id: j.channel_id.map(|c| c as u32),
+            by: j.by,
+            text: j.text,
+            message: j.message,
+            message_type: j.message_type as u32,
+            epoch: j.epoch.map(|e| e as u32),
+            created_at: j.created_at as u64,
+        }
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsSearchResultItem {
+    pub source: String,
+    pub message_id: f64,
+    pub group_id: Option<f64>,
+    pub channel_id: Option<f64>,
+    pub other: Option<String>,
+    pub by: String,
+    pub text: String,
+    pub snippet: String,
+    pub message_type: f64,
+    pub epoch: Option<f64>,
+    pub score: f64,
+}
+
+fn extract_user_text(message: &[u8]) -> String {
+    if let Ok(inner) = deserialize_proto::<firefly::UserMessageInner>(message) {
+        match inner.message {
+            firefly::mod_UserMessageInner::OneOfmessage::messagePayload(p) => return p.text.to_string(),
+            firefly::mod_UserMessageInner::OneOfmessage::plainText(b) => return String::from_utf8_lossy(&b).to_string(),
+            _ => {}
+        }
+    }
+    String::from_utf8_lossy(message).to_string()
+}
+
+fn extract_group_text(message: &[u8]) -> String {
+    if let Ok(inner) = deserialize_proto::<firefly::GroupMessageInner>(message) {
+        if let firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(p) = inner.message {
+            return p.text.to_string();
+        }
+    }
+    String::from_utf8_lossy(message).to_string()
 }
 
 struct WasmClientCallbacks {
@@ -857,12 +956,57 @@ impl MlsGroupStateStorage for JsMlsGroupStateStorage {
     }
 }
 
+pub struct JsFavouriteMessageStorage {
+    fallback: Arc<dyn FavouriteMessageStorage>,
+}
+
+unsafe impl Send for JsFavouriteMessageStorage {}
+unsafe impl Sync for JsFavouriteMessageStorage {}
+
+#[async_trait::async_trait]
+impl FavouriteMessageStorage for JsFavouriteMessageStorage {
+    async fn add(&self, favourite: FavouriteMessage) -> anyhow::Result<u64> {
+        self.fallback.add(favourite).await
+    }
+    async fn remove_user_favourite(&self, other: &str, message_id: u64) -> anyhow::Result<bool> {
+        self.fallback.remove_user_favourite(other, message_id).await
+    }
+    async fn remove_group_favourite(&self, group_id: u64, message_id: u64) -> anyhow::Result<bool> {
+        self.fallback.remove_group_favourite(group_id, message_id).await
+    }
+    async fn remove_by_id(&self, favourite_id: u64) -> anyhow::Result<bool> {
+        self.fallback.remove_by_id(favourite_id).await
+    }
+    async fn is_user_favourite(&self, other: &str, message_id: u64) -> anyhow::Result<bool> {
+        self.fallback.is_user_favourite(other, message_id).await
+    }
+    async fn is_group_favourite(&self, group_id: u64, message_id: u64) -> anyhow::Result<bool> {
+        self.fallback.is_group_favourite(group_id, message_id).await
+    }
+    async fn get_by_id(&self, favourite_id: u64) -> anyhow::Result<Option<FavouriteMessage>> {
+        self.fallback.get_by_id(favourite_id).await
+    }
+    async fn get_all(&self, limit: u32, offset: u32) -> anyhow::Result<Vec<FavouriteMessage>> {
+        self.fallback.get_all(limit, offset).await
+    }
+    async fn get_user_favourites(&self, other: Option<&str>, limit: u32, offset: u32) -> anyhow::Result<Vec<FavouriteMessage>> {
+        self.fallback.get_user_favourites(other, limit, offset).await
+    }
+    async fn get_group_favourites(&self, group_id: Option<u64>, channel_id: Option<u32>, limit: u32, offset: u32) -> anyhow::Result<Vec<FavouriteMessage>> {
+        self.fallback.get_group_favourites(group_id, channel_id, limit, offset).await
+    }
+    async fn clear_all(&self) -> anyhow::Result<()> {
+        self.fallback.clear_all().await
+    }
+}
+
 #[wasm_bindgen]
 pub struct FireflyClientNode {
     key_stores: Arc<tokio::sync::RwLock<MemoryKeyStores>>,
     key_value_store: Arc<dyn KeyValueStorage>,
     group_messages_store: Arc<dyn GroupMessageStorage>,
     user_messages_store: Arc<dyn UserMessageStorage>,
+    favourite_messages_store: Arc<dyn FavouriteMessageStorage>,
     group_info_store: Arc<dyn GroupInfoStorage>,
     key_package_storage: Arc<dyn MlsKeyPackageStorage>,
     group_state_storage: Arc<dyn MlsGroupStateStorage>,
@@ -1008,6 +1152,7 @@ impl FireflyClientNode {
             let default_key_value = Arc::new(MemoryKeyValueStore::new());
             let default_group_messages = Arc::new(MemoryGroupMessageStore::new());
             let default_user_messages = Arc::new(MemoryUserMessageStore::new());
+            let default_favourites = Arc::new(MemoryFavouriteMessageStore::new());
             let default_group_info = Arc::new(MemoryGroupInfoStore::new());
             let default_kp = Arc::new(MemoryMlsKeyPackageStorage::new());
             let default_gs = Arc::new(MemoryMlsGroupStateStorage::new());
@@ -1026,6 +1171,7 @@ impl FireflyClientNode {
                 key_value_store,
                 group_messages_store,
                 user_messages_store,
+                favourite_messages_store,
                 group_info_store,
                 key_package_storage,
                 group_state_storage,
@@ -1034,6 +1180,7 @@ impl FireflyClientNode {
                 Arc<dyn KeyValueStorage>,
                 Arc<dyn GroupMessageStorage>,
                 Arc<dyn UserMessageStorage>,
+                Arc<dyn FavouriteMessageStorage>,
                 Arc<dyn GroupInfoStorage>,
                 Arc<dyn MlsKeyPackageStorage>,
                 Arc<dyn MlsGroupStateStorage>,
@@ -1060,6 +1207,10 @@ impl FireflyClientNode {
                     js_delete_by_group: gms_obj.as_ref().and_then(|o| get_js_fn(o, &["deleteByGroupId"])),
                     js_update_cursor: gms_obj.as_ref().and_then(|o| get_js_fn(o, &["updateCursor"])),
                     fallback: default_group_messages,
+                });
+
+                let fms: Arc<dyn FavouriteMessageStorage> = Arc::new(JsFavouriteMessageStorage {
+                    fallback: default_favourites,
                 });
 
                 let gis: Arc<dyn GroupInfoStorage> = Arc::new(JsGroupInfoStorage {
@@ -1097,12 +1248,13 @@ impl FireflyClientNode {
                     fallback: default_psk,
                 });
 
-                (kvs, gms, ums, gis, kp, gs, psk)
+                (kvs, gms, ums, fms, gis, kp, gs, psk)
             } else {
                 (
                     default_key_value,
                     default_group_messages,
                     default_user_messages,
+                    default_favourites,
                     default_group_info,
                     default_kp,
                     default_gs,
@@ -1115,6 +1267,7 @@ impl FireflyClientNode {
                 key_value_store,
                 group_messages_store,
                 user_messages_store,
+                favourite_messages_store,
                 group_info_store,
                 key_package_storage,
                 group_state_storage,
@@ -2379,5 +2532,146 @@ impl FireflyClientNode {
             let empty: Vec<u8> = Vec::new();
             serde_wasm_bindgen::to_value(&empty).map_err(|e| JsValue::from_str(&e.to_string()))
         })
+    }
+
+    #[wasm_bindgen(js_name = addFavourite)]
+    pub fn add_favourite(&self, favourite: JsValue) -> js_sys::Promise {
+        let store = self.favourite_messages_store.clone();
+        future_to_promise(async move {
+            let js_fav: JsFavouriteMessage = serde_wasm_bindgen::from_value(favourite)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let fav: FavouriteMessage = js_fav.into();
+            let id = store.add(fav).await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            Ok(JsValue::from_f64(id as f64))
+        })
+    }
+
+    #[wasm_bindgen(js_name = addFavorite)]
+    pub fn add_favorite(&self, favorite: JsValue) -> js_sys::Promise {
+        self.add_favourite(favorite)
+    }
+
+    #[wasm_bindgen(js_name = removeUserFavourite)]
+    pub fn remove_user_favourite(&self, other: String, message_id: f64) -> js_sys::Promise {
+        let store = self.favourite_messages_store.clone();
+        future_to_promise(async move {
+            let res = store.remove_user_favourite(&other, message_id as u64).await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            Ok(JsValue::from_bool(res))
+        })
+    }
+
+    #[wasm_bindgen(js_name = removeUserFavorite)]
+    pub fn remove_user_favorite(&self, other: String, message_id: f64) -> js_sys::Promise {
+        self.remove_user_favourite(other, message_id)
+    }
+
+    #[wasm_bindgen(js_name = removeGroupFavourite)]
+    pub fn remove_group_favourite(&self, group_id: f64, message_id: f64) -> js_sys::Promise {
+        let store = self.favourite_messages_store.clone();
+        future_to_promise(async move {
+            let res = store.remove_group_favourite(group_id as u64, message_id as u64).await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            Ok(JsValue::from_bool(res))
+        })
+    }
+
+    #[wasm_bindgen(js_name = removeGroupFavorite)]
+    pub fn remove_group_favorite(&self, group_id: f64, message_id: f64) -> js_sys::Promise {
+        self.remove_group_favourite(group_id, message_id)
+    }
+
+    #[wasm_bindgen(js_name = removeFavouriteById)]
+    pub fn remove_favourite_by_id(&self, favourite_id: f64) -> js_sys::Promise {
+        let store = self.favourite_messages_store.clone();
+        future_to_promise(async move {
+            let res = store.remove_by_id(favourite_id as u64).await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            Ok(JsValue::from_bool(res))
+        })
+    }
+
+    #[wasm_bindgen(js_name = removeFavoriteById)]
+    pub fn remove_favorite_by_id(&self, favorite_id: f64) -> js_sys::Promise {
+        self.remove_favourite_by_id(favorite_id)
+    }
+
+    #[wasm_bindgen(js_name = isUserFavourite)]
+    pub fn is_user_favourite(&self, other: String, message_id: f64) -> js_sys::Promise {
+        let store = self.favourite_messages_store.clone();
+        future_to_promise(async move {
+            let res = store.is_user_favourite(&other, message_id as u64).await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            Ok(JsValue::from_bool(res))
+        })
+    }
+
+    #[wasm_bindgen(js_name = isUserFavorite)]
+    pub fn is_user_favorite(&self, other: String, message_id: f64) -> js_sys::Promise {
+        self.is_user_favourite(other, message_id)
+    }
+
+    #[wasm_bindgen(js_name = isGroupFavourite)]
+    pub fn is_group_favourite(&self, group_id: f64, message_id: f64) -> js_sys::Promise {
+        let store = self.favourite_messages_store.clone();
+        future_to_promise(async move {
+            let res = store.is_group_favourite(group_id as u64, message_id as u64).await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            Ok(JsValue::from_bool(res))
+        })
+    }
+
+    #[wasm_bindgen(js_name = isGroupFavorite)]
+    pub fn is_group_favorite(&self, group_id: f64, message_id: f64) -> js_sys::Promise {
+        self.is_group_favourite(group_id, message_id)
+    }
+
+    #[wasm_bindgen(js_name = getFavourites)]
+    pub fn get_favourites(&self, limit: f64, offset: f64) -> js_sys::Promise {
+        let store = self.favourite_messages_store.clone();
+        future_to_promise(async move {
+            let list = store.get_all(limit as u32, offset as u32).await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let js_list: Vec<JsFavouriteMessage> = list.into_iter().map(Into::into).collect();
+            serde_wasm_bindgen::to_value(&js_list).map_err(|e| JsValue::from_str(&e.to_string()))
+        })
+    }
+
+    #[wasm_bindgen(js_name = getFavorites)]
+    pub fn get_favorites(&self, limit: f64, offset: f64) -> js_sys::Promise {
+        self.get_favourites(limit, offset)
+    }
+
+    #[wasm_bindgen(js_name = getUserFavourites)]
+    pub fn get_user_favourites(&self, other: Option<String>, limit: f64, offset: f64) -> js_sys::Promise {
+        let store = self.favourite_messages_store.clone();
+        future_to_promise(async move {
+            let list = store.get_user_favourites(other.as_deref(), limit as u32, offset as u32).await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let js_list: Vec<JsFavouriteMessage> = list.into_iter().map(Into::into).collect();
+            serde_wasm_bindgen::to_value(&js_list).map_err(|e| JsValue::from_str(&e.to_string()))
+        })
+    }
+
+    #[wasm_bindgen(js_name = getUserFavorites)]
+    pub fn get_user_favorites(&self, other: Option<String>, limit: f64, offset: f64) -> js_sys::Promise {
+        self.get_user_favourites(other, limit, offset)
+    }
+
+    #[wasm_bindgen(js_name = getGroupFavourites)]
+    pub fn get_group_favourites(&self, group_id: Option<f64>, channel_id: Option<f64>, limit: f64, offset: f64) -> js_sys::Promise {
+        let store = self.favourite_messages_store.clone();
+        future_to_promise(async move {
+            let list = store.get_group_favourites(group_id.map(|g| g as u64), channel_id.map(|c| c as u32), limit as u32, offset as u32).await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let js_list: Vec<JsFavouriteMessage> = list.into_iter().map(Into::into).collect();
+            serde_wasm_bindgen::to_value(&js_list).map_err(|e| JsValue::from_str(&e.to_string()))
+        })
+    }
+
+    #[wasm_bindgen(js_name = getGroupFavorites)]
+    pub fn get_group_favorites(&self, group_id: Option<f64>, channel_id: Option<f64>, limit: f64, offset: f64) -> js_sys::Promise {
+        self.get_group_favourites(group_id, channel_id, limit, offset)
     }
 }

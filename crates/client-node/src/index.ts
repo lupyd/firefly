@@ -43,6 +43,37 @@ export interface RawGroupInfo {
   groupId?: number;
 }
 
+export interface RawFavouriteMessage {
+  id: number;
+  source: 'user' | 'group';
+  messageId: number;
+  other?: string;
+  groupId?: number;
+  channelId?: number;
+  by: string;
+  text: string;
+  message: Uint8Array;
+  messageType: number;
+  epoch?: number;
+  createdAt: number;
+}
+
+export type RawFavoriteMessage = RawFavouriteMessage;
+
+export interface RawSearchResultItem {
+  source: 'user' | 'group';
+  messageId: number;
+  groupId?: number;
+  channelId?: number;
+  other?: string;
+  by: string;
+  text: string;
+  snippet: string;
+  messageType: number;
+  epoch?: number;
+  score: number;
+}
+
 // ---------------------------------------------------------------------------
 // Core MLS Storage Providers (1-to-1 with firefly_core::storage_provider)
 // ---------------------------------------------------------------------------
@@ -247,5 +278,77 @@ export class FireflyClientNode {
 
   async exportGroupMeetingKey(groupId: number): Promise<Uint8Array> {
     return await this.inner.exportGroupMeetingKey(groupId);
+  }
+
+  async addFavourite(favourite: RawFavouriteMessage): Promise<number> {
+    return await this.inner.addFavourite(favourite);
+  }
+
+  async addFavorite(favorite: RawFavouriteMessage): Promise<number> {
+    return await this.addFavourite(favorite);
+  }
+
+  async removeUserFavourite(other: string, messageId: number): Promise<boolean> {
+    return await this.inner.removeUserFavourite(other, messageId);
+  }
+
+  async removeUserFavorite(other: string, messageId: number): Promise<boolean> {
+    return await this.removeUserFavourite(other, messageId);
+  }
+
+  async removeGroupFavourite(groupId: number, messageId: number): Promise<boolean> {
+    return await this.inner.removeGroupFavourite(groupId, messageId);
+  }
+
+  async removeGroupFavorite(groupId: number, messageId: number): Promise<boolean> {
+    return await this.removeGroupFavourite(groupId, messageId);
+  }
+
+  async removeFavouriteById(favouriteId: number): Promise<boolean> {
+    return await this.inner.removeFavouriteById(favouriteId);
+  }
+
+  async removeFavoriteById(favoriteId: number): Promise<boolean> {
+    return await this.removeFavouriteById(favoriteId);
+  }
+
+  async isUserFavourite(other: string, messageId: number): Promise<boolean> {
+    return await this.inner.isUserFavourite(other, messageId);
+  }
+
+  async isUserFavorite(other: string, messageId: number): Promise<boolean> {
+    return await this.isUserFavourite(other, messageId);
+  }
+
+  async isGroupFavourite(groupId: number, messageId: number): Promise<boolean> {
+    return await this.inner.isGroupFavourite(groupId, messageId);
+  }
+
+  async isGroupFavorite(groupId: number, messageId: number): Promise<boolean> {
+    return await this.isGroupFavourite(groupId, messageId);
+  }
+
+  async getFavourites(limit: number = 50, offset: number = 0): Promise<RawFavouriteMessage[]> {
+    return await this.inner.getFavourites(limit, offset);
+  }
+
+  async getFavorites(limit: number = 50, offset: number = 0): Promise<RawFavouriteMessage[]> {
+    return await this.getFavourites(limit, offset);
+  }
+
+  async getUserFavourites(other?: string, limit: number = 50, offset: number = 0): Promise<RawFavouriteMessage[]> {
+    return await this.inner.getUserFavourites(other ?? null, limit, offset);
+  }
+
+  async getUserFavorites(other?: string, limit: number = 50, offset: number = 0): Promise<RawFavouriteMessage[]> {
+    return await this.getUserFavourites(other, limit, offset);
+  }
+
+  async getGroupFavourites(groupId?: number, channelId?: number, limit: number = 50, offset: number = 0): Promise<RawFavouriteMessage[]> {
+    return await this.inner.getGroupFavourites(groupId ?? null, channelId ?? null, limit, offset);
+  }
+
+  async getGroupFavorites(groupId?: number, channelId?: number, limit: number = 50, offset: number = 0): Promise<RawFavouriteMessage[]> {
+    return await this.getGroupFavourites(groupId, channelId, limit, offset);
   }
 }

@@ -735,6 +735,226 @@ impl ConversationStorage for MemoryConversationStore {
 }
 
 // ---------------------------------------------------------------------------
+// Favourite Messages Store Trait & Memory Implementation
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FavouriteSource {
+    User,
+    Group,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct FavouriteMessage {
+    pub id: u64,
+    pub source: FavouriteSource,
+    pub message_id: u64,
+    pub other: Option<String>,
+    pub group_id: Option<u64>,
+    pub channel_id: Option<u32>,
+    pub by: String,
+    pub text: String,
+    pub message: Vec<u8>,
+    pub message_type: u32,
+    pub epoch: Option<u32>,
+    pub created_at: u64,
+}
+
+#[async_trait::async_trait]
+pub trait FavouriteMessageStorage: Send + Sync {
+    async fn add(&self, favourite: FavouriteMessage) -> anyhow::Result<u64>;
+    async fn remove_user_favourite(&self, other: &str, message_id: u64) -> anyhow::Result<bool>;
+    async fn remove_group_favourite(&self, group_id: u64, message_id: u64) -> anyhow::Result<bool>;
+    async fn remove_by_id(&self, favourite_id: u64) -> anyhow::Result<bool>;
+    async fn is_user_favourite(&self, other: &str, message_id: u64) -> anyhow::Result<bool>;
+    async fn is_group_favourite(&self, group_id: u64, message_id: u64) -> anyhow::Result<bool>;
+    async fn get_by_id(&self, favourite_id: u64) -> anyhow::Result<Option<FavouriteMessage>>;
+    async fn get_all(&self, limit: u32, offset: u32) -> anyhow::Result<Vec<FavouriteMessage>>;
+    async fn get_user_favourites(
+        &self,
+        other: Option<&str>,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<FavouriteMessage>>;
+    async fn get_group_favourites(
+        &self,
+        group_id: Option<u64>,
+        channel_id: Option<u32>,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<FavouriteMessage>>;
+    async fn clear_all(&self) -> anyhow::Result<()>;
+}
+
+#[derive(Clone, Default)]
+pub struct MemoryFavouriteMessageStore {
+    data: Arc<RwLock<Vec<FavouriteMessage>>>,
+    next_id: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl MemoryFavouriteMessageStore {
+    pub fn new() -> Self {
+        Self {
+            data: Arc::new(RwLock::new(Vec::new())),
+            next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl FavouriteMessageStorage for MemoryFavouriteMessageStore {
+    async fn add(&self, mut favourite: FavouriteMessage) -> anyhow::Result<u64> {
+        let mut guard = self.data.write().await;
+        // Check if already exists
+        match favourite.source {
+            FavouriteSource::User => {
+                if let Some(existing) = guard.iter().find(|m| {
+                    m.source == FavouriteSource::User
+                        && m.message_id == favourite.message_id
+                        && m.other == favourite.other
+                }) {
+                    return Ok(existing.id);
+                }
+            }
+            FavouriteSource::Group => {
+                if let Some(existing) = guard.iter().find(|m| {
+                    m.source == FavouriteSource::Group
+                        && m.message_id == favourite.message_id
+                        && m.group_id == favourite.group_id
+                }) {
+                    return Ok(existing.id);
+                }
+            }
+        }
+        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        favourite.id = id;
+        guard.push(favourite);
+        Ok(id)
+    }
+
+    async fn remove_user_favourite(&self, other: &str, message_id: u64) -> anyhow::Result<bool> {
+        let mut guard = self.data.write().await;
+        let initial_len = guard.len();
+        guard.retain(|m| {
+            !(m.source == FavouriteSource::User
+                && m.message_id == message_id
+                && m.other.as_deref() == Some(other))
+        });
+        Ok(guard.len() < initial_len)
+    }
+
+    async fn remove_group_favourite(&self, group_id: u64, message_id: u64) -> anyhow::Result<bool> {
+        let mut guard = self.data.write().await;
+        let initial_len = guard.len();
+        guard.retain(|m| {
+            !(m.source == FavouriteSource::Group
+                && m.message_id == message_id
+                && m.group_id == Some(group_id))
+        });
+        Ok(guard.len() < initial_len)
+    }
+
+    async fn remove_by_id(&self, favourite_id: u64) -> anyhow::Result<bool> {
+        let mut guard = self.data.write().await;
+        let initial_len = guard.len();
+        guard.retain(|m| m.id != favourite_id);
+        Ok(guard.len() < initial_len)
+    }
+
+    async fn is_user_favourite(&self, other: &str, message_id: u64) -> anyhow::Result<bool> {
+        let guard = self.data.read().await;
+        Ok(guard.iter().any(|m| {
+            m.source == FavouriteSource::User
+                && m.message_id == message_id
+                && m.other.as_deref() == Some(other)
+        }))
+    }
+
+    async fn is_group_favourite(&self, group_id: u64, message_id: u64) -> anyhow::Result<bool> {
+        let guard = self.data.read().await;
+        Ok(guard.iter().any(|m| {
+            m.source == FavouriteSource::Group
+                && m.message_id == message_id
+                && m.group_id == Some(group_id)
+        }))
+    }
+
+    async fn get_by_id(&self, favourite_id: u64) -> anyhow::Result<Option<FavouriteMessage>> {
+        let guard = self.data.read().await;
+        Ok(guard.iter().find(|m| m.id == favourite_id).cloned())
+    }
+
+    async fn get_all(&self, limit: u32, offset: u32) -> anyhow::Result<Vec<FavouriteMessage>> {
+        let guard = self.data.read().await;
+        let mut items = guard.clone();
+        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        let results = items
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect();
+        Ok(results)
+    }
+
+    async fn get_user_favourites(
+        &self,
+        other: Option<&str>,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<FavouriteMessage>> {
+        let guard = self.data.read().await;
+        let mut items: Vec<FavouriteMessage> = guard
+            .iter()
+            .filter(|m| {
+                m.source == FavouriteSource::User
+                    && other.map_or(true, |o| m.other.as_deref() == Some(o))
+            })
+            .cloned()
+            .collect();
+        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        let results = items
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect();
+        Ok(results)
+    }
+
+    async fn get_group_favourites(
+        &self,
+        group_id: Option<u64>,
+        channel_id: Option<u32>,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<FavouriteMessage>> {
+        let guard = self.data.read().await;
+        let mut items: Vec<FavouriteMessage> = guard
+            .iter()
+            .filter(|m| {
+                m.source == FavouriteSource::Group
+                    && group_id.map_or(true, |gid| m.group_id == Some(gid))
+                    && channel_id.map_or(true, |cid| m.channel_id == Some(cid))
+            })
+            .cloned()
+            .collect();
+        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        let results = items
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect();
+        Ok(results)
+    }
+
+    async fn clear_all(&self) -> anyhow::Result<()> {
+        let mut guard = self.data.write().await;
+        guard.clear();
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Signal Stores - Memory Implementation
 // ---------------------------------------------------------------------------
 

@@ -27,6 +27,13 @@ pub mod utils;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod websocket;
 
+pub use storage::{
+    FavouriteMessage, FavouriteMessageStorage, FavouriteSource, MemoryFavouriteMessageStore,
+};
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use db::favourites::{FavoriteMessagesStore, FavouriteMessagesStore};
+
 #[derive(Debug)]
 pub struct EncryptedMessage {
     pub cipher_text: Vec<u8>,

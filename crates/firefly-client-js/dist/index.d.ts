@@ -1,5 +1,5 @@
-import { FireflyClientNode, protos, initLogger, MlsKeyPackageStorage, MlsGroupStateStorage, MlsPreSharedKeyStorage, UserMessageStorage, GroupMessageStorage, GroupInfoStorage, KeyValueStorage, StorageProviders, RawUserMessage, RawGroupMessage, RawGroupInfo } from 'firefly-client-node';
-export type { MlsKeyPackageStorage, MlsGroupStateStorage, MlsPreSharedKeyStorage, UserMessageStorage, GroupMessageStorage, GroupInfoStorage, KeyValueStorage, StorageProviders, RawUserMessage, RawGroupMessage, RawGroupInfo, };
+import { FireflyClientNode, protos, initLogger, MlsKeyPackageStorage, MlsGroupStateStorage, MlsPreSharedKeyStorage, UserMessageStorage, GroupMessageStorage, GroupInfoStorage, KeyValueStorage, StorageProviders, RawUserMessage, RawGroupMessage, RawGroupInfo, RawFavouriteMessage, RawFavoriteMessage, RawSearchResultItem } from 'firefly-client-node';
+export type { MlsKeyPackageStorage, MlsGroupStateStorage, MlsPreSharedKeyStorage, UserMessageStorage, GroupMessageStorage, GroupInfoStorage, KeyValueStorage, StorageProviders, RawUserMessage, RawGroupMessage, RawGroupInfo, RawFavouriteMessage, RawFavoriteMessage, RawSearchResultItem, };
 export { UserPermission, DEFAULT_GROUP_PERMISSIONS } from 'firefly-client-node';
 export interface ClientConfig {
     port?: number;
@@ -83,6 +83,24 @@ export declare class FireflyClient {
     getGroupInfos(): Promise<any[]>;
     getGroupMessages(groupId: number, startBefore?: number, limit?: number): Promise<any[]>;
     getOnlineStatus(usernames: string[]): Promise<string[]>;
+    addFavourite(favourite: RawFavouriteMessage): Promise<number>;
+    addFavorite(favorite: RawFavouriteMessage): Promise<number>;
+    removeUserFavourite(other: string, messageId: number): Promise<boolean>;
+    removeUserFavorite(other: string, messageId: number): Promise<boolean>;
+    removeGroupFavourite(groupId: number, messageId: number): Promise<boolean>;
+    removeGroupFavorite(groupId: number, messageId: number): Promise<boolean>;
+    removeFavouriteById(favouriteId: number): Promise<boolean>;
+    removeFavoriteById(favoriteId: number): Promise<boolean>;
+    isUserFavourite(other: string, messageId: number): Promise<boolean>;
+    isUserFavorite(other: string, messageId: number): Promise<boolean>;
+    isGroupFavourite(groupId: number, messageId: number): Promise<boolean>;
+    isGroupFavorite(groupId: number, messageId: number): Promise<boolean>;
+    getFavourites(limit?: number, offset?: number): Promise<RawFavouriteMessage[]>;
+    getFavorites(limit?: number, offset?: number): Promise<RawFavouriteMessage[]>;
+    getUserFavourites(other?: string, limit?: number, offset?: number): Promise<RawFavouriteMessage[]>;
+    getUserFavorites(other?: string, limit?: number, offset?: number): Promise<RawFavouriteMessage[]>;
+    getGroupFavourites(groupId?: number, channelId?: number, limit?: number, offset?: number): Promise<RawFavouriteMessage[]>;
+    getGroupFavorites(groupId?: number, channelId?: number, limit?: number, offset?: number): Promise<RawFavouriteMessage[]>;
     dispose(): Promise<void>;
     private _loadSession;
     private _saveSession;

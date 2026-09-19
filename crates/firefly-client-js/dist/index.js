@@ -271,6 +271,88 @@ class FireflyClient {
         }
         return await this.client.getOnlineStatus(usernames);
     }
+    // Favourite messages APIs
+    async addFavourite(favourite) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        return await this.client.addFavourite(favourite);
+    }
+    async addFavorite(favorite) {
+        return await this.addFavourite(favorite);
+    }
+    async removeUserFavourite(other, messageId) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        return await this.client.removeUserFavourite(other, messageId);
+    }
+    async removeUserFavorite(other, messageId) {
+        return await this.removeUserFavourite(other, messageId);
+    }
+    async removeGroupFavourite(groupId, messageId) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        return await this.client.removeGroupFavourite(groupId, messageId);
+    }
+    async removeGroupFavorite(groupId, messageId) {
+        return await this.removeGroupFavourite(groupId, messageId);
+    }
+    async removeFavouriteById(favouriteId) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        return await this.client.removeFavouriteById(favouriteId);
+    }
+    async removeFavoriteById(favoriteId) {
+        return await this.removeFavouriteById(favoriteId);
+    }
+    async isUserFavourite(other, messageId) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        return await this.client.isUserFavourite(other, messageId);
+    }
+    async isUserFavorite(other, messageId) {
+        return await this.isUserFavourite(other, messageId);
+    }
+    async isGroupFavourite(groupId, messageId) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        return await this.client.isGroupFavourite(groupId, messageId);
+    }
+    async isGroupFavorite(groupId, messageId) {
+        return await this.isGroupFavourite(groupId, messageId);
+    }
+    async getFavourites(limit = 50, offset = 0) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        return await this.client.getFavourites(limit, offset);
+    }
+    async getFavorites(limit = 50, offset = 0) {
+        return await this.getFavourites(limit, offset);
+    }
+    async getUserFavourites(other, limit = 50, offset = 0) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        return await this.client.getUserFavourites(other, limit, offset);
+    }
+    async getUserFavorites(other, limit = 50, offset = 0) {
+        return await this.getUserFavourites(other, limit, offset);
+    }
+    async getGroupFavourites(groupId, channelId, limit = 50, offset = 0) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        return await this.client.getGroupFavourites(groupId, channelId, limit, offset);
+    }
+    async getGroupFavorites(groupId, channelId, limit = 50, offset = 0) {
+        return await this.getGroupFavourites(groupId, channelId, limit, offset);
+    }
     // Dispose client
     async dispose() {
         if (this.client) {

@@ -26,15 +26,17 @@ use crate::{
     db::{
         auth::get_claims_from_token,
         conversations::ConversationSettings,
+        favourites::{FavoriteMessagesStore, FavouriteMessagesStore},
         ffi_stores::FfiKeyStores,
         group_messages::GroupMessagesStore,
         group_stores::{GroupInfo, GroupInfoStore, GroupKeyPackageStore, SelfGroupKeyPackageStore},
         keyvalue::{KEY_FCM_TOKEN, KEY_LAST_RECEIVED_MESSAGE_ID, KeyValueStore},
         messages::{MessagesStore, UserMessage},
-        search::{SearchEngine, SearchResultItem, SearchScope, SearchSource},
+        search::{SearchEngine, SearchResultItem, SearchScope},
         setup_pool_from_path,
     },
     group::{FfiMlsClient, FfiMlsGroup},
+    storage::{FavouriteMessage, FavouriteMessageStorage, FavouriteSource},
     logger::CURRENT_CLIENT,
     utils::{
         HTTP_CLIENT, deserialize_proto, get_current_timestamp_microseconds_since_epoch,
@@ -215,6 +217,7 @@ pub struct FireflyWsClient {
     addressId: AtomicU64,
     group_messages_store: GroupMessagesStore,
     messages_store: MessagesStore,
+    favourite_messages_store: FavouriteMessagesStore,
     firefly_mls_client: Arc<tokio::sync::OnceCell<Arc<FfiMlsClient>>>,
     group_info_store: GroupInfoStore,
     self_group_key_packages_store: SelfGroupKeyPackageStore,
@@ -240,6 +243,7 @@ impl FireflyWsClient {
 
         let groups_store = GroupMessagesStore::new(pool.clone()).await?;
         let messages_store = MessagesStore::new(pool.clone()).await?;
+        let favourite_messages_store = FavouriteMessagesStore::new(pool.clone()).await?;
         let self_group_key_packages_store = SelfGroupKeyPackageStore::new(pool.clone()).await?;
         let group_key_packages_store = GroupKeyPackageStore::new(pool.clone()).await?;
 
@@ -265,6 +269,7 @@ impl FireflyWsClient {
             addressId: Default::default(),
             group_messages_store: groups_store,
             messages_store,
+            favourite_messages_store,
             self_group_key_packages_store,
             group_key_packages_store,
             fully_initialized: AtomicBool::new(false),
@@ -2124,6 +2129,116 @@ impl FireflyWsClient {
             offset,
         )
         .await
+    }
+
+    pub fn favourite_messages_store(&self) -> FavouriteMessagesStore {
+        self.favourite_messages_store
+            .with_read_access(self.firefly_mls_client.clone(), self.group_info_store.clone())
+    }
+
+    pub fn favorite_messages_store(&self) -> FavouriteMessagesStore {
+        self.favourite_messages_store()
+    }
+
+    pub async fn add_favourite(&self, favourite: FavouriteMessage) -> anyhow::Result<u64> {
+        self.favourite_messages_store().add(favourite).await
+    }
+
+    pub async fn favourite_user_message(
+        &self,
+        message: &UserMessage,
+        custom_text: Option<String>,
+    ) -> anyhow::Result<u64> {
+        self.favourite_messages_store()
+            .add_user_message(message, custom_text)
+            .await
+    }
+
+    pub async fn favourite_group_message(
+        &self,
+        message: &crate::db::group_messages::GroupMessage,
+        custom_text: Option<String>,
+    ) -> anyhow::Result<u64> {
+        self.favourite_messages_store()
+            .add_group_message(message, custom_text)
+            .await
+    }
+
+    pub async fn remove_user_favourite(
+        &self,
+        other: &str,
+        message_id: u64,
+    ) -> anyhow::Result<bool> {
+        self.favourite_messages_store()
+            .remove_user_favourite(other, message_id)
+            .await
+    }
+
+    pub async fn remove_group_favourite(
+        &self,
+        group_id: u64,
+        message_id: u64,
+    ) -> anyhow::Result<bool> {
+        self.favourite_messages_store()
+            .remove_group_favourite(group_id, message_id)
+            .await
+    }
+
+    pub async fn remove_favourite_by_id(&self, favourite_id: u64) -> anyhow::Result<bool> {
+        self.favourite_messages_store()
+            .remove_by_id(favourite_id)
+            .await
+    }
+
+    pub async fn is_user_favourite(
+        &self,
+        other: &str,
+        message_id: u64,
+    ) -> anyhow::Result<bool> {
+        self.favourite_messages_store()
+            .is_user_favourite(other, message_id)
+            .await
+    }
+
+    pub async fn is_group_favourite(
+        &self,
+        group_id: u64,
+        message_id: u64,
+    ) -> anyhow::Result<bool> {
+        self.favourite_messages_store()
+            .is_group_favourite(group_id, message_id)
+            .await
+    }
+
+    pub async fn get_favourites(
+        &self,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<FavouriteMessage>> {
+        self.favourite_messages_store().get_all(limit, offset).await
+    }
+
+    pub async fn get_user_favourites(
+        &self,
+        other: Option<&str>,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<FavouriteMessage>> {
+        self.favourite_messages_store()
+            .get_user_favourites(other, limit, offset)
+            .await
+    }
+
+    pub async fn get_group_favourites(
+        &self,
+        group_id: Option<u64>,
+        channel_id: Option<u32>,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<FavouriteMessage>> {
+        self.favourite_messages_store()
+            .get_group_favourites(group_id, channel_id, limit, offset)
+            .await
     }
 
     async fn join_group(
@@ -4064,6 +4179,85 @@ impl FfiFireflyWsClient {
     ) -> anyhow::Result<Vec<SearchResultItem>> {
         self.inner
             .search_group_messages(&query, group_id, channel_id, limit, offset)
+            .await
+    }
+
+    pub fn favourite_messages_store(&self) -> FavouriteMessagesStore {
+        self.inner.favourite_messages_store()
+    }
+
+    pub fn favorite_messages_store(&self) -> FavouriteMessagesStore {
+        self.inner.favorite_messages_store()
+    }
+
+    pub async fn add_favourite(&self, favourite: FavouriteMessage) -> anyhow::Result<u64> {
+        self.inner.add_favourite(favourite).await
+    }
+
+    pub async fn remove_user_favourite(
+        &self,
+        other: String,
+        message_id: u64,
+    ) -> anyhow::Result<bool> {
+        self.inner.remove_user_favourite(&other, message_id).await
+    }
+
+    pub async fn remove_group_favourite(
+        &self,
+        group_id: u64,
+        message_id: u64,
+    ) -> anyhow::Result<bool> {
+        self.inner.remove_group_favourite(group_id, message_id).await
+    }
+
+    pub async fn remove_favourite_by_id(&self, favourite_id: u64) -> anyhow::Result<bool> {
+        self.inner.remove_favourite_by_id(favourite_id).await
+    }
+
+    pub async fn is_user_favourite(
+        &self,
+        other: String,
+        message_id: u64,
+    ) -> anyhow::Result<bool> {
+        self.inner.is_user_favourite(&other, message_id).await
+    }
+
+    pub async fn is_group_favourite(
+        &self,
+        group_id: u64,
+        message_id: u64,
+    ) -> anyhow::Result<bool> {
+        self.inner.is_group_favourite(group_id, message_id).await
+    }
+
+    pub async fn get_favourites(
+        &self,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<FavouriteMessage>> {
+        self.inner.get_favourites(limit, offset).await
+    }
+
+    pub async fn get_user_favourites(
+        &self,
+        other: Option<String>,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<FavouriteMessage>> {
+        self.inner
+            .get_user_favourites(other.as_deref(), limit, offset)
+            .await
+    }
+
+    pub async fn get_group_favourites(
+        &self,
+        group_id: Option<u64>,
+        channel_id: Option<u32>,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<FavouriteMessage>> {
+        self.inner
+            .get_group_favourites(group_id, channel_id, limit, offset)
             .await
     }
 

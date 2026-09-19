@@ -145,5 +145,59 @@ class FireflyClientNode {
     async exportGroupMeetingKey(groupId) {
         return await this.inner.exportGroupMeetingKey(groupId);
     }
+    async addFavourite(favourite) {
+        return await this.inner.addFavourite(favourite);
+    }
+    async addFavorite(favorite) {
+        return await this.addFavourite(favorite);
+    }
+    async removeUserFavourite(other, messageId) {
+        return await this.inner.removeUserFavourite(other, messageId);
+    }
+    async removeUserFavorite(other, messageId) {
+        return await this.removeUserFavourite(other, messageId);
+    }
+    async removeGroupFavourite(groupId, messageId) {
+        return await this.inner.removeGroupFavourite(groupId, messageId);
+    }
+    async removeGroupFavorite(groupId, messageId) {
+        return await this.removeGroupFavourite(groupId, messageId);
+    }
+    async removeFavouriteById(favouriteId) {
+        return await this.inner.removeFavouriteById(favouriteId);
+    }
+    async removeFavoriteById(favoriteId) {
+        return await this.removeFavouriteById(favoriteId);
+    }
+    async isUserFavourite(other, messageId) {
+        return await this.inner.isUserFavourite(other, messageId);
+    }
+    async isUserFavorite(other, messageId) {
+        return await this.isUserFavourite(other, messageId);
+    }
+    async isGroupFavourite(groupId, messageId) {
+        return await this.inner.isGroupFavourite(groupId, messageId);
+    }
+    async isGroupFavorite(groupId, messageId) {
+        return await this.isGroupFavourite(groupId, messageId);
+    }
+    async getFavourites(limit = 50, offset = 0) {
+        return await this.inner.getFavourites(limit, offset);
+    }
+    async getFavorites(limit = 50, offset = 0) {
+        return await this.getFavourites(limit, offset);
+    }
+    async getUserFavourites(other, limit = 50, offset = 0) {
+        return await this.inner.getUserFavourites(other ?? null, limit, offset);
+    }
+    async getUserFavorites(other, limit = 50, offset = 0) {
+        return await this.getUserFavourites(other, limit, offset);
+    }
+    async getGroupFavourites(groupId, channelId, limit = 50, offset = 0) {
+        return await this.inner.getGroupFavourites(groupId ?? null, channelId ?? null, limit, offset);
+    }
+    async getGroupFavorites(groupId, channelId, limit = 50, offset = 0) {
+        return await this.getGroupFavourites(groupId, channelId, limit, offset);
+    }
 }
 exports.FireflyClientNode = FireflyClientNode;

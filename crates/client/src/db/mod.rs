@@ -6,11 +6,13 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 pub mod address;
 pub mod auth;
 pub mod conversations;
+pub mod favourites;
 pub mod ffi_stores;
 pub mod group_messages;
 pub mod group_stores;
 pub mod keyvalue;
 pub mod messages;
+pub mod migrations;
 pub mod search;
 pub mod stores;
 
@@ -37,6 +39,7 @@ pub async fn setup_pool_from_path(
     }
     let url = format!("sqlite://file:{}?mode=rwc", pathname);
     let pool = setup_pool(&url, max_connections).await?;
+    migrations::run_migrations(&pool).await?;
 
     Ok(pool)
 }
