@@ -17,6 +17,7 @@ pub struct LastMessageAndUnreadCount {
     pub message: UserMessage,
 }
 
+#[derive(Clone)]
 pub struct MessagesStore {
     pool: SqlitePool,
 }

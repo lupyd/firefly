@@ -1061,7 +1061,7 @@ dependencies = [
 
 [[package]]
 name = "firefly-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1095,7 +1095,7 @@ dependencies = [
 
 [[package]]
 name = "firefly-protos"
-version = "0.0.5"
+version = "0.1.0"
 dependencies = [
  "bytes",
  "pb-rs",

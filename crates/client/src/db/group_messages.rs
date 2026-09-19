@@ -73,6 +73,12 @@ impl GroupMessagesStore {
             r#"
         INSERT INTO group_messages (id, group_id, by, message, channel_id, epoch, message_type)
         VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (group_id, id) DO UPDATE SET
+            by = CASE WHEN excluded.by != '' THEN excluded.by ELSE group_messages.by END,
+            message = CASE WHEN length(excluded.message) > 0 THEN excluded.message ELSE group_messages.message END,
+            channel_id = CASE WHEN excluded.channel_id != 0 THEN excluded.channel_id ELSE group_messages.channel_id END,
+            epoch = CASE WHEN excluded.epoch != 0 THEN excluded.epoch ELSE group_messages.epoch END,
+            message_type = CASE WHEN excluded.message_type != 0 THEN excluded.message_type ELSE group_messages.message_type END
         "#,
         )
         .bind(id as i64)

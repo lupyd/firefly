@@ -3228,12 +3228,163 @@ async fn on_user_message(
 }
 
 async fn re_add_member_internal(
+    request: &firefly::GroupReAddRequest<'_>,
+    role_id: u32,
+    firefly_mls_client: &FfiMlsClient,
+    group_info_store: &GroupInfoStore,
+    group_message_store: &GroupMessagesStore,
+    pending_requests: &PendingRequests,
+    sender: &Sender<Bytes>,
+    callbacks: &Arc<dyn FireflyWsClientCallback>,
+    firefly_base_url: &str,
+    my_address_id: u64,
+) -> anyhow::Result<()> {
+    let group_id = request.group_id;
+    if request.address_id == my_address_id {
+        return Ok(());
+    }
+    let group_info = group_info_store.get(group_id).await?;
+    let group = firefly_mls_client
+        .load_group(group_id, group_info.identifier)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    let res = group
+        .re_add_member(request.username.to_string(), request.address_id)
+        .await;
+
+    let id = match res {
+        Ok(id) => id,
+        Err(err) => {
+            log::warn!(
+                "[re_add_member_internal] group.re_add_member failed, trying group.add_member: {:?}",
+                err
+            );
+            group.add_member(request.username.to_string(), role_id).await?
+        }
+    };
+
+    group_message_store
+        .update_cursor(id, group_id, group.epoch().await as u32)
+        .await?;
+
+    // Re-encrypt pinned messages for the newly joined/re-added member
+    let pinned_messages = group_message_store.get_pinned_messages(group_id).await?;
+    if !pinned_messages.is_empty() {
+        log::info!(
+            "[re_add_member_internal] Re-encrypting {} pinned messages for group {}",
+            pinned_messages.len(),
+            group_id
+        );
+        let my_uname = callbacks.name().to_string();
+        for pinned in pinned_messages {
+            let inner = match deserialize_proto::<firefly::GroupMessageInner>(&pinned.message) {
+                Ok(mut inner) => {
+                    inner.message_type |= firefly_protos::MESSAGE_TYPE_PINNED;
+                    if let firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(ref mut p) = inner.message {
+                        p.message_type |= firefly_protos::MESSAGE_TYPE_PINNED;
+                    }
+                    inner
+                }
+                Err(_) => {
+                    firefly::GroupMessageInner {
+                        channelId: pinned.channel_id,
+                        message: firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(
+                            firefly::MessagePayload {
+                                text: String::from_utf8_lossy(&pinned.message).into_owned().into(),
+                                files: None,
+                                ext: firefly::mod_MessagePayload::OneOfext::None,
+                                message_type: firefly_protos::MESSAGE_TYPE_PINNED,
+                            },
+                        ),
+                        message_type: firefly_protos::MESSAGE_TYPE_PINNED,
+                    }
+                }
+            };
+
+            if let Ok(payload) = serialize_proto(&inner) {
+                if let Ok(encrypted) = group.encrypt(payload.to_vec()).await {
+                    let _ = group.save().await;
+                    let current_epoch = group.epoch().await as u32;
+                    let group_msg = firefly::GroupMessage {
+                        id: 0,
+                        groupId: group_id,
+                        message: encrypted.into(),
+                        epoch: current_epoch,
+                    };
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    let req_id = rand::random::<u32>();
+                    let client_msg = firefly::ClientMessage {
+                        message: firefly::mod_ClientMessage::OneOfmessage::request(firefly::Request {
+                            id: req_id,
+                            payload: firefly::mod_Request::OneOfpayload::uploadGroupMessage(group_msg),
+                        }),
+                    };
+                    pending_requests.lock().unwrap().insert(req_id, tx);
+                    if let Ok(ser) = serialize_proto(&client_msg) {
+                        if sender.send(ser).await.is_ok() {
+                            if let Ok(bytes) = rx.await {
+                                if let Ok(response) = deserialize_proto::<firefly::Response<'_>>(&bytes) {
+                                    if let firefly::mod_Response::OneOfbody::groupMessageUploaded(uploaded) = response.body {
+                                        let _ = group_message_store
+                                            .update_message_type(
+                                                group_id,
+                                                pinned.id,
+                                                pinned.message_type & !firefly_protos::MESSAGE_TYPE_PINNED,
+                                            )
+                                            .await;
+                                        let _ = group_message_store
+                                            .add(
+                                                uploaded.id,
+                                                group_id,
+                                                inner.channelId,
+                                                uploaded.epoch,
+                                                &my_uname,
+                                                &payload,
+                                                firefly_protos::MESSAGE_TYPE_PINNED,
+                                            )
+                                            .await;
+                                        log::info!(
+                                            "[re_add_member_internal] Successfully re-encrypted pinned message (old_id: {}, new_id: {}) in group {}",
+                                            pinned.id,
+                                            uploaded.id,
+                                            group_id
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Delete reAdd request from server
+    if let Some(token) = callbacks.get_access_token().await {
+        let _ = HTTP_CLIENT
+            .delete(format!(
+                "{}/group/reAdd?groupId={}&address={}&myAddress={}",
+                firefly_base_url, group_id, request.address_id, my_address_id,
+            ))
+            .bearer_auth(token)
+            .send()
+            .await;
+    }
+
+    Ok(())
+}
+
+async fn add_member_internal(
     group_id: u64,
     username: String,
     role_id: u32,
     firefly_mls_client: &FfiMlsClient,
     group_info_store: &GroupInfoStore,
     group_message_store: &GroupMessagesStore,
+    pending_requests: &PendingRequests,
+    sender: &Sender<Bytes>,
+    callbacks: &Arc<dyn FireflyWsClientCallback>,
 ) -> anyhow::Result<()> {
     let group_info = group_info_store.get(group_id).await?;
     let group = firefly_mls_client
@@ -3246,6 +3397,92 @@ async fn re_add_member_internal(
     group_message_store
         .update_cursor(id, group_id, group.epoch().await as u32)
         .await?;
+
+    // Re-encrypt pinned messages for the newly joined member
+    let pinned_messages = group_message_store.get_pinned_messages(group_id).await?;
+    if !pinned_messages.is_empty() {
+        log::info!(
+            "[add_member_internal] Re-encrypting {} pinned messages for group {}",
+            pinned_messages.len(),
+            group_id
+        );
+        let my_uname = callbacks.name().to_string();
+        for pinned in pinned_messages {
+            let inner = match deserialize_proto::<firefly::GroupMessageInner>(&pinned.message) {
+                Ok(mut inner) => {
+                    inner.message_type |= firefly_protos::MESSAGE_TYPE_PINNED;
+                    if let firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(ref mut p) = inner.message {
+                        p.message_type |= firefly_protos::MESSAGE_TYPE_PINNED;
+                    }
+                    inner
+                }
+                Err(_) => {
+                    firefly::GroupMessageInner {
+                        channelId: pinned.channel_id,
+                        message: firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(
+                            firefly::MessagePayload {
+                                text: String::from_utf8_lossy(&pinned.message).into_owned().into(),
+                                files: None,
+                                ext: firefly::mod_MessagePayload::OneOfext::None,
+                                message_type: firefly_protos::MESSAGE_TYPE_PINNED,
+                            },
+                        ),
+                        message_type: firefly_protos::MESSAGE_TYPE_PINNED,
+                    }
+                }
+            };
+
+            if let Ok(payload) = serialize_proto(&inner) {
+                if let Ok(encrypted) = group.encrypt(payload.to_vec()).await {
+                    let _ = group.save().await;
+                    let current_epoch = group.epoch().await as u32;
+                    let group_msg = firefly::GroupMessage {
+                        id: 0,
+                        groupId: group_id,
+                        message: encrypted.into(),
+                        epoch: current_epoch,
+                    };
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    let req_id = rand::random::<u32>();
+                    let client_msg = firefly::ClientMessage {
+                        message: firefly::mod_ClientMessage::OneOfmessage::request(firefly::Request {
+                            id: req_id,
+                            payload: firefly::mod_Request::OneOfpayload::uploadGroupMessage(group_msg),
+                        }),
+                    };
+                    pending_requests.lock().unwrap().insert(req_id, tx);
+                    if let Ok(ser) = serialize_proto(&client_msg) {
+                        if sender.send(ser).await.is_ok() {
+                            if let Ok(bytes) = rx.await {
+                                if let Ok(response) = deserialize_proto::<firefly::Response<'_>>(&bytes) {
+                                    if let firefly::mod_Response::OneOfbody::groupMessageUploaded(uploaded) = response.body {
+                                        let _ = group_message_store
+                                            .update_message_type(
+                                                group_id,
+                                                pinned.id,
+                                                pinned.message_type & !firefly_protos::MESSAGE_TYPE_PINNED,
+                                            )
+                                            .await;
+                                        let _ = group_message_store
+                                            .add(
+                                                uploaded.id,
+                                                group_id,
+                                                inner.channelId,
+                                                uploaded.epoch,
+                                                &my_uname,
+                                                &payload,
+                                                firefly_protos::MESSAGE_TYPE_PINNED,
+                                            )
+                                            .await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     Ok(())
 }
@@ -3322,7 +3559,7 @@ async fn on_server_message(
     key_stores: &Arc<FfiKeyStores>,
     callbacks: &Arc<dyn FireflyWsClientCallback>,
     key_value_store: &KeyValueStore,
-    firefly_mls_client: &FfiMlsClient,
+    firefly_mls_client: &Arc<FfiMlsClient>,
     group_info_store: &GroupInfoStore,
     group_message_store: &GroupMessagesStore,
     sender: Sender<Bytes>,
@@ -3465,22 +3702,41 @@ async fn on_server_message(
         firefly::mod_ServerMessage::OneOfmessage::groupReAddRequests(requests) => {
             for request in requests.requests {
                 log::info!(
-                    "received re-add request for group {} user {}",
+                    "received re-add request for group {} user {} address {}",
                     request.group_id,
-                    request.username
+                    request.username,
+                    request.address_id
                 );
-                if let Err(err) = re_add_member_internal(
-                    request.group_id,
-                    request.username.into(),
-                    0,
-                    firefly_mls_client,
-                    group_info_store,
-                    group_message_store,
-                )
-                .await
-                {
-                    log::error!("failed to re-add member: {:?}", err);
-                }
+                let req_owned = firefly::GroupReAddRequest {
+                    group_id: request.group_id,
+                    username: request.username.to_string().into(),
+                    address_id: request.address_id,
+                };
+                let mls = firefly_mls_client.clone();
+                let gis = group_info_store.clone();
+                let gms = group_message_store.clone();
+                let pr = pending_requests.clone();
+                let snd = sender.clone();
+                let cb = callbacks.clone();
+                let base_url = firefly_base_url.to_string();
+                tokio::spawn(async move {
+                    if let Err(err) = re_add_member_internal(
+                        &req_owned,
+                        0,
+                        &mls,
+                        &gis,
+                        &gms,
+                        &pr,
+                        &snd,
+                        &cb,
+                        &base_url,
+                        address_id,
+                    )
+                    .await
+                    {
+                        log::error!("failed to re-add member: {:?}", err);
+                    }
+                });
             }
         }
         firefly::mod_ServerMessage::OneOfmessage::groupJoinRequests(requests) => {
@@ -3490,18 +3746,31 @@ async fn on_server_message(
                     request.group_id,
                     request.username
                 );
-                if let Err(err) = re_add_member_internal(
-                    request.group_id,
-                    request.username.into(),
-                    0,
-                    firefly_mls_client,
-                    group_info_store,
-                    group_message_store,
-                )
-                .await
-                {
-                    log::error!("failed to process join request: {:?}", err);
-                }
+                let group_id = request.group_id;
+                let username = request.username.to_string();
+                let mls = firefly_mls_client.clone();
+                let gis = group_info_store.clone();
+                let gms = group_message_store.clone();
+                let pr = pending_requests.clone();
+                let snd = sender.clone();
+                let cb = callbacks.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = add_member_internal(
+                        group_id,
+                        username,
+                        0,
+                        &mls,
+                        &gis,
+                        &gms,
+                        &pr,
+                        &snd,
+                        &cb,
+                    )
+                    .await
+                    {
+                        log::error!("failed to process join request: {:?}", err);
+                    }
+                });
             }
         }
         firefly::mod_ServerMessage::OneOfmessage::callSignal(signal) => {
