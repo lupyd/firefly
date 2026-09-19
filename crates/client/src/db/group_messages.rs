@@ -27,6 +27,23 @@ pub struct GroupMessagesStore {
     pin_writes: Arc<tokio::sync::Mutex<()>>,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct GroupMessageSearchResult {
+    pub message: GroupMessage,
+    pub text: String,
+    pub snippet: String,
+    pub score: f64,
+}
+
+pub fn extract_group_message_text(message: &[u8]) -> String {
+    if let Ok(inner) = firefly_protos::deserialize_proto::<firefly_protos::firefly::GroupMessageInner>(message) {
+        if let firefly_protos::firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(p) = inner.message {
+            return p.text.to_string();
+        }
+    }
+    String::from_utf8_lossy(message).to_string()
+}
+
 impl GroupMessagesStore {
     pub async fn new(pool: SqlitePool) -> anyhow::Result<Self> {
         pool.execute(
@@ -39,21 +56,82 @@ impl GroupMessagesStore {
             channel_id INTEGER NOT NULL,
             epoch INTEGER NOT NULL DEFAULT 0,
             message_type INTEGER NOT NULL DEFAULT 0,
+            text TEXT NOT NULL DEFAULT '',
 
             PRIMARY KEY (group_id, id)
         );
-
-        CREATE INDEX IF NOT EXISTS group_messages_type_idx ON group_messages (group_id, message_type);
         "#,
         )
         .await?;
 
-        // Migration for existing tables without message_type column
+        // Migration for existing tables without message_type or text columns
         let _ = pool
             .execute(
                 "ALTER TABLE group_messages ADD COLUMN message_type INTEGER NOT NULL DEFAULT 0",
             )
             .await;
+        let _ = pool
+            .execute(
+                "ALTER TABLE group_messages ADD COLUMN text TEXT NOT NULL DEFAULT ''",
+            )
+            .await;
+
+        // Backfill text column for any existing rows that lack extracted text before FTS triggers exist
+        let unmigrated_rows = sqlx::query("SELECT rowid, message FROM group_messages WHERE text = '' AND length(message) > 0")
+            .fetch_all(&pool)
+            .await?;
+        let had_unmigrated = !unmigrated_rows.is_empty();
+        for row in unmigrated_rows {
+            let rowid: i64 = row.try_get("rowid")?;
+            let msg_bytes: Vec<u8> = row.try_get("message")?;
+            let text = extract_group_message_text(&msg_bytes);
+            if !text.is_empty() {
+                sqlx::query("UPDATE group_messages SET text = ? WHERE rowid = ?")
+                    .bind(text)
+                    .bind(rowid)
+                    .execute(&pool)
+                    .await?;
+            }
+        }
+
+        pool.execute(
+            r#"
+        CREATE INDEX IF NOT EXISTS group_messages_type_idx ON group_messages (group_id, message_type);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS group_messages_fts USING fts5(
+            text,
+            content='group_messages',
+            content_rowid='rowid'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS group_messages_ai AFTER INSERT ON group_messages BEGIN
+          INSERT INTO group_messages_fts(rowid, text) VALUES (new.rowid, new.text);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS group_messages_ad AFTER DELETE ON group_messages BEGIN
+          INSERT INTO group_messages_fts(group_messages_fts, rowid, text) VALUES('delete', old.rowid, old.text);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS group_messages_au AFTER UPDATE ON group_messages BEGIN
+          INSERT INTO group_messages_fts(group_messages_fts, rowid, text) VALUES('delete', old.rowid, old.text);
+          INSERT INTO group_messages_fts(rowid, text) VALUES (new.rowid, new.text);
+        END;
+        "#,
+        )
+        .await?;
+
+        // Rebuild FTS index if migration backfilled rows, or if FTS is out of sync with existing records
+        let count_fts: i64 = sqlx::query_scalar("SELECT count(*) FROM group_messages_fts")
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(0);
+        let count_msgs: i64 = sqlx::query_scalar("SELECT count(*) FROM group_messages WHERE text != ''")
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(0);
+        if had_unmigrated || (count_fts == 0 && count_msgs > 0) {
+            let _ = pool.execute("INSERT INTO group_messages_fts(group_messages_fts) VALUES('rebuild')").await;
+        }
 
         Ok(Self {
             pool,
@@ -76,6 +154,19 @@ impl GroupMessagesStore {
         }
     }
 
+    pub async fn can_see_channel(&self, group_id: u64, channel_id: u32) -> anyhow::Result<bool> {
+        let Some(access) = &self.read_access else {
+            return Ok(true);
+        };
+        let client = access
+            .client
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("MLS client not initialized"))?;
+        let info = access.groups.get(group_id).await?;
+        let group = client.load_group(group_id, info.identifier).await?;
+        group.can_see_message(channel_id).await
+    }
+
     async fn visible_messages(
         &self,
         messages: Vec<GroupMessage>,
@@ -88,10 +179,24 @@ impl GroupMessagesStore {
             .get()
             .ok_or_else(|| anyhow::anyhow!("MLS client not initialized"))?;
         let mut visible = Vec::new();
+        let mut channel_perm_cache: std::collections::HashMap<(u64, u32), bool> =
+            std::collections::HashMap::new();
         for message in messages {
-            let info = access.groups.get(message.group_id).await?;
-            let group = client.load_group(message.group_id, info.identifier).await?;
-            if group.can_see_message(message.channel_id).await? {
+            let can_see = match channel_perm_cache.get(&(message.group_id, message.channel_id)) {
+                Some(&allowed) => allowed,
+                None => {
+                    let allowed = match access.groups.get(message.group_id).await {
+                        Ok(info) => match client.load_group(message.group_id, info.identifier).await {
+                            Ok(group) => group.can_see_message(message.channel_id).await.unwrap_or(false),
+                            Err(_) => false,
+                        },
+                        Err(_) => false,
+                    };
+                    channel_perm_cache.insert((message.group_id, message.channel_id), allowed);
+                    allowed
+                }
+            };
+            if can_see {
                 visible.push(message);
             }
         }
@@ -132,16 +237,18 @@ impl GroupMessagesStore {
             by,
             message_type
         );
+        let text = extract_group_message_text(message);
         sqlx::query(
             r#"
-        INSERT INTO group_messages (id, group_id, by, message, channel_id, epoch, message_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO group_messages (id, group_id, by, message, channel_id, epoch, message_type, text)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (group_id, id) DO UPDATE SET
             by = CASE WHEN excluded.by != '' THEN excluded.by ELSE group_messages.by END,
             message = CASE WHEN length(excluded.message) > 0 THEN excluded.message ELSE group_messages.message END,
             channel_id = CASE WHEN excluded.channel_id != 0 THEN excluded.channel_id ELSE group_messages.channel_id END,
             epoch = CASE WHEN excluded.epoch != 0 THEN excluded.epoch ELSE group_messages.epoch END,
-            message_type = CASE WHEN excluded.message_type != 0 THEN excluded.message_type ELSE group_messages.message_type END
+            message_type = CASE WHEN excluded.message_type != 0 THEN excluded.message_type ELSE group_messages.message_type END,
+            text = CASE WHEN excluded.text != '' THEN excluded.text ELSE group_messages.text END
         "#,
         )
         .bind(id as i64)
@@ -151,6 +258,7 @@ impl GroupMessagesStore {
         .bind(channel_id)
         .bind(epoch)
         .bind(message_type as i64)
+        .bind(text)
         .execute(&self.pool)
         .await?;
 
@@ -199,6 +307,107 @@ impl GroupMessagesStore {
     pub async fn get_pinned_messages(&self, group_id: u64) -> anyhow::Result<Vec<GroupMessage>> {
         let _pin_write = self.pin_writes.lock().await;
         self.visible_messages(self.pinned_messages_unfiltered_for_group(group_id).await?).await
+    }
+
+    pub async fn search(
+        &self,
+        query: &str,
+        group_id: Option<u64>,
+        channel_id: Option<u32>,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<GroupMessageSearchResult>> {
+        let fts_query = crate::db::search::sanitize_fts5_query(query);
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut conditions = vec!["group_messages_fts MATCH ?".to_string()];
+        if group_id.is_some() {
+            conditions.push("gm.group_id = ?".to_string());
+        }
+        if channel_id.is_some() {
+            conditions.push("gm.channel_id = ?".to_string());
+        }
+
+        let where_clause = conditions.join(" AND ");
+        let sql = format!(
+            r#"
+        SELECT
+            gm.id, gm.group_id, gm.by, gm.message, gm.channel_id, gm.epoch, gm.message_type, gm.text,
+            snippet(group_messages_fts, 0, '<b>', '</b>', '...', 10) AS match_snippet,
+            fts.rank AS rank_score
+        FROM group_messages_fts fts
+        JOIN group_messages gm ON gm.rowid = fts.rowid
+        WHERE {where_clause}
+        ORDER BY rank_score ASC
+        LIMIT ? OFFSET ?
+        "#
+        );
+
+        let mut q = sqlx::query(&sql).bind(&fts_query);
+        if let Some(gid) = group_id {
+            q = q.bind(gid as i64);
+        }
+        if let Some(cid) = channel_id {
+            q = q.bind(cid as i64);
+        }
+        q = q.bind(limit as i64).bind(offset as i64);
+
+        let rows = q.fetch_all(&self.pool).await?;
+        let mut raw_results = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let message = GroupMessage::from_row(row)?;
+            let text: String = row.try_get("text")?;
+            let snippet: String = row.try_get("match_snippet")?;
+            let score: f64 = row.try_get("rank_score").unwrap_or(0.0);
+            raw_results.push((message, text, snippet, score));
+        }
+
+        if let Some(access) = &self.read_access {
+            let client = access
+                .client
+                .get()
+                .ok_or_else(|| anyhow::anyhow!("MLS client not initialized"))?;
+            let mut filtered = Vec::new();
+            let mut channel_perm_cache: std::collections::HashMap<(u64, u32), bool> =
+                std::collections::HashMap::new();
+            for (message, text, snippet, score) in raw_results {
+                let can_see = match channel_perm_cache.get(&(message.group_id, message.channel_id)) {
+                    Some(&allowed) => allowed,
+                    None => {
+                        let allowed = match access.groups.get(message.group_id).await {
+                            Ok(info) => match client.load_group(message.group_id, info.identifier).await {
+                                Ok(group) => group.can_see_message(message.channel_id).await.unwrap_or(false),
+                                Err(_) => false,
+                            },
+                            Err(_) => false,
+                        };
+                        channel_perm_cache.insert((message.group_id, message.channel_id), allowed);
+                        allowed
+                    }
+                };
+                if can_see {
+                    filtered.push(GroupMessageSearchResult {
+                        message,
+                        text,
+                        snippet,
+                        score,
+                    });
+                }
+            }
+            Ok(filtered)
+        } else {
+            Ok(raw_results
+                .into_iter()
+                .map(|(message, text, snippet, score)| GroupMessageSearchResult {
+                    message,
+                    text,
+                    snippet,
+                    score,
+                })
+                .collect())
+        }
     }
 
     async fn pinned_messages_unfiltered_for_group(&self, group_id: u64) -> anyhow::Result<Vec<GroupMessage>> {
@@ -509,5 +718,79 @@ mod tests {
         // Advance cursor via commit/readd id without full message body
         store.update_cursor(10, 100, 2).await.unwrap();
         assert_eq!(store.get_last_message_of_group(100).await.unwrap().id, 10);
+    }
+
+    #[tokio::test]
+    async fn test_search_group_and_channel_messages() {
+        let pool = setup_test_db().await;
+        let store = GroupMessagesStore::new(pool).await.unwrap();
+
+        // Message 1: group 100, channel 1
+        store
+            .add(
+                1,
+                100,
+                1,
+                1,
+                "alice",
+                b"Welcome everyone to the general channel of group 100!",
+                0,
+            )
+            .await
+            .unwrap();
+
+        // Message 2: group 100, channel 2
+        store
+            .add(
+                2,
+                100,
+                2,
+                1,
+                "bob",
+                b"Design discussion: new architecture proposal for database.",
+                0,
+            )
+            .await
+            .unwrap();
+
+        // Message 3: group 200, channel 1
+        store
+            .add(
+                3,
+                200,
+                1,
+                1,
+                "charlie",
+                b"General channel in group 200: database migration is done.",
+                0,
+            )
+            .await
+            .unwrap();
+
+        // Search across all groups and channels
+        let res_all = store.search("database", None, None, 10, 0).await.unwrap();
+        assert_eq!(res_all.len(), 2);
+
+        // Search scoped to group 100 (all channels)
+        let res_grp100 = store.search("database", Some(100), None, 10, 0).await.unwrap();
+        assert_eq!(res_grp100.len(), 1);
+        assert_eq!(res_grp100[0].message.id, 2);
+        assert_eq!(res_grp100[0].message.group_id, 100);
+        assert!(res_grp100[0].snippet.contains("<b>database</b>"));
+
+        // Search scoped to channel 1 within group 100
+        let res_grp100_ch1 = store.search("general", Some(100), Some(1), 10, 0).await.unwrap();
+        assert_eq!(res_grp100_ch1.len(), 1);
+        assert_eq!(res_grp100_ch1[0].message.id, 1);
+
+        // Search scoped to channel 2 within group 100 (should not match channel 1)
+        let res_grp100_ch2 = store.search("general", Some(100), Some(2), 10, 0).await.unwrap();
+        assert_eq!(res_grp100_ch2.len(), 0);
+
+        // Search with triggers: delete group 200 and ensure search results update
+        store.delete_by_group_id(200).await.unwrap();
+        let res_after_del = store.search("database", None, None, 10, 0).await.unwrap();
+        assert_eq!(res_after_del.len(), 1);
+        assert_eq!(res_after_del[0].message.group_id, 100);
     }
 }

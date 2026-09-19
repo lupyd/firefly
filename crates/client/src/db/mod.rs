@@ -11,6 +11,7 @@ pub mod group_messages;
 pub mod group_stores;
 pub mod keyvalue;
 pub mod messages;
+pub mod search;
 pub mod stores;
 
 pub async fn setup_pool(url: &str, max_connections: u32) -> Result<sqlx::SqlitePool, sqlx::Error> {

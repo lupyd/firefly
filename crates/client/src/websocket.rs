@@ -30,7 +30,8 @@ use crate::{
         group_messages::GroupMessagesStore,
         group_stores::{GroupInfo, GroupInfoStore, GroupKeyPackageStore, SelfGroupKeyPackageStore},
         keyvalue::{KEY_FCM_TOKEN, KEY_LAST_RECEIVED_MESSAGE_ID, KeyValueStore},
-        messages::UserMessage,
+        messages::{MessagesStore, UserMessage},
+        search::{SearchEngine, SearchResultItem, SearchScope, SearchSource},
         setup_pool_from_path,
     },
     group::{FfiMlsClient, FfiMlsGroup},
@@ -213,6 +214,7 @@ pub struct FireflyWsClient {
 
     addressId: AtomicU64,
     group_messages_store: GroupMessagesStore,
+    messages_store: MessagesStore,
     firefly_mls_client: Arc<tokio::sync::OnceCell<Arc<FfiMlsClient>>>,
     group_info_store: GroupInfoStore,
     self_group_key_packages_store: SelfGroupKeyPackageStore,
@@ -237,6 +239,7 @@ impl FireflyWsClient {
         let key_value_store = KeyValueStore::new(pool.clone()).await?;
 
         let groups_store = GroupMessagesStore::new(pool.clone()).await?;
+        let messages_store = MessagesStore::new(pool.clone()).await?;
         let self_group_key_packages_store = SelfGroupKeyPackageStore::new(pool.clone()).await?;
         let group_key_packages_store = GroupKeyPackageStore::new(pool.clone()).await?;
 
@@ -261,6 +264,7 @@ impl FireflyWsClient {
             state: Default::default(),
             addressId: Default::default(),
             group_messages_store: groups_store,
+            messages_store,
             self_group_key_packages_store,
             group_key_packages_store,
             fully_initialized: AtomicBool::new(false),
@@ -2064,6 +2068,62 @@ impl FireflyWsClient {
 
     pub fn group_message_store(&self) -> GroupMessagesStore {
         self.group_messages_store.with_read_access(self.firefly_mls_client.clone(), self.group_info_store.clone())
+    }
+
+    pub fn messages_store(&self) -> MessagesStore {
+        self.messages_store.clone()
+    }
+
+    pub async fn search_messages(
+        &self,
+        query: &str,
+        scope: SearchScope,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<SearchResultItem>> {
+        let engine = SearchEngine::with_group_messages_store(
+            self.pool.clone(),
+            self.group_message_store(),
+        );
+        engine.search(query, &scope, limit, offset).await
+    }
+
+    pub async fn search_user_messages(
+        &self,
+        query: &str,
+        other: Option<&str>,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<SearchResultItem>> {
+        self.search_messages(
+            query,
+            SearchScope::User {
+                other: other.map(|s| s.to_string()),
+            },
+            limit,
+            offset,
+        )
+        .await
+    }
+
+    pub async fn search_group_messages(
+        &self,
+        query: &str,
+        group_id: Option<u64>,
+        channel_id: Option<u32>,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<SearchResultItem>> {
+        self.search_messages(
+            query,
+            SearchScope::Group {
+                group_id,
+                channel_id,
+            },
+            limit,
+            offset,
+        )
+        .await
     }
 
     async fn join_group(
@@ -3966,6 +4026,45 @@ impl FfiFireflyWsClient {
 
     pub fn group_message_store(&self) -> GroupMessagesStore {
         self.inner.group_message_store()
+    }
+
+    pub fn messages_store(&self) -> MessagesStore {
+        self.inner.messages_store()
+    }
+
+    pub async fn search_messages(
+        &self,
+        query: String,
+        scope: SearchScope,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<SearchResultItem>> {
+        self.inner.search_messages(&query, scope, limit, offset).await
+    }
+
+    pub async fn search_user_messages(
+        &self,
+        query: String,
+        other: Option<String>,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<SearchResultItem>> {
+        self.inner
+            .search_user_messages(&query, other.as_deref(), limit, offset)
+            .await
+    }
+
+    pub async fn search_group_messages(
+        &self,
+        query: String,
+        group_id: Option<u64>,
+        channel_id: Option<u32>,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<SearchResultItem>> {
+        self.inner
+            .search_group_messages(&query, group_id, channel_id, limit, offset)
+            .await
     }
 
     pub fn group_info_store(&self) -> GroupInfoStore {
