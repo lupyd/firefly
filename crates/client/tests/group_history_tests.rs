@@ -139,10 +139,12 @@ async fn test_history_keys_proto_hidden_sharing() -> anyhow::Result<()> {
         end_msg_id: 50,
         key: vec![42u8; 32].into(),
         nonce: vec![24u8; 12].into(),
+        unencrypted_hash: vec![7u8; 32].into(),
     };
 
     let payload = firefly::GroupHistoryKeysPayload {
         keys: vec![chunk_key],
+        chunks: vec![],
     };
 
     let serialized = serialize_into_vec(&payload)?;

@@ -214,6 +214,7 @@ message Request {
     GetHistoryChunksRequest getHistoryChunks = 19;
     GetPendingHistoryRequests getPendingHistoryRequests = 20;
     CloseHistoryRequest closeHistoryRequest = 21;
+    ApproveHistoryChunkRequest approveHistoryChunk = 22;
   }
 }
 
@@ -469,10 +470,21 @@ message UserMessageInner {
   uint32 message_type = 5;
 }
 
+message GroupPinUpdate {
+  uint64 message_id = 1;
+  bool pinned = 2;
+}
+
+message GroupPinSnapshot {
+  repeated GroupHistoryRecord messages = 1;
+}
+
 message GroupMessageInner {
   uint32 channelId = 1;
   oneof message {
     MessagePayload messagePayload = 2;
+    GroupPinUpdate pinUpdate = 4;
+    GroupPinSnapshot pinSnapshot = 5;
   }
   uint32 message_type = 3;
 }
@@ -618,6 +630,7 @@ message GroupHistoryChunkItem {
   string disapproved_by = 10;
   string disapproved_reason = 11;
   fixed64 created_at = 12;
+  bool verified = 13;
 }
 
 message GroupHistoryChunkKey {
@@ -626,10 +639,12 @@ message GroupHistoryChunkKey {
   fixed64 end_msg_id = 3;
   bytes key = 4;
   bytes nonce = 5;
+  bytes unencrypted_hash = 6;
 }
 
 message GroupHistoryKeysPayload {
   repeated GroupHistoryChunkKey keys = 1;
+  repeated GroupHistoryChunkItem chunks = 2;
 }
 
 message CreateHistoryRequest {
@@ -651,6 +666,7 @@ message ClaimHistoryResponse {
 }
 
 message PublishHistoryChunkRequest {
+  bool reserve_only = 7;
   uint64 group_id = 1;
   fixed64 start_msg_id = 2;
   fixed64 end_msg_id = 3;
@@ -669,6 +685,7 @@ message GetHistoryChunksRequest {
   uint64 group_id = 1;
   fixed64 since_msg_id = 2;
   fixed64 until_msg_id = 3;
+  bool include_unverified = 4;
 }
 
 message GetHistoryChunksResponse {
@@ -695,6 +712,7 @@ enum HistorySignalType {
   HISTORY_SIGNAL_CHUNK_PUBLISHED = 1;
   HISTORY_SIGNAL_CHUNK_DISAPPROVED = 2;
   HISTORY_SIGNAL_REQUEST_FULFILLED = 3;
+  HISTORY_SIGNAL_CHUNK_VERIFIED = 4;
 }
 
 message GroupHistorySignal {
@@ -707,3 +725,21 @@ message GroupHistorySignal {
 
 
 
+
+// Additive, versioned history envelope. Fields 1-4 retain the old record layout.
+message GroupHistoryRecord {
+  fixed64 id = 1;
+  uint64 group_id = 2;
+  bytes message = 3;
+  uint32 epoch = 4;
+  string sender = 5;
+}
+message GroupHistoryRecords {
+  repeated GroupHistoryRecord messages = 1;
+  uint32 format_version = 2;
+}
+message ApproveHistoryChunkRequest {
+  uint64 group_id = 1;
+  uint64 chunk_id = 2;
+  bytes unencrypted_hash = 3;
+}

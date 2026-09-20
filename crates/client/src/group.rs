@@ -261,6 +261,10 @@ impl FfiMlsClient {
     }
 
     pub async fn create_group(&self, group_name: String) -> anyhow::Result<Arc<FfiMlsGroup>> {
+        self.create_group_with_settings(group_name,String::new(),0).await
+    }
+
+    pub async fn create_group_with_settings(&self, group_name:String, description:String, settings:u32)->anyhow::Result<Arc<FfiMlsGroup>> {
         let Some(username) = self.username() else {
             return Err(anyhow::anyhow!("user not authenticated"));
         };
@@ -281,13 +285,13 @@ impl FfiMlsClient {
             role: 1,
         });
 
-        let group = self.client.create_group(ext.inner().clone()).await?;
+        let group = self.client.create_group_with_settings(ext.inner().clone(),description.clone(),settings).await?;
 
         self.group_info_state
             .set(
                 group.group_id(),
                 group_name,
-                String::new(),
+                description,
                 group.group_identifier().await?,
             )
             .await?;

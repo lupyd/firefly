@@ -190,6 +190,7 @@ pub enum HistorySignalType {
     HISTORY_SIGNAL_CHUNK_PUBLISHED = 1,
     HISTORY_SIGNAL_CHUNK_DISAPPROVED = 2,
     HISTORY_SIGNAL_REQUEST_FULFILLED = 3,
+    HISTORY_SIGNAL_CHUNK_VERIFIED = 4,
 }
 
 impl Default for HistorySignalType {
@@ -205,6 +206,7 @@ impl From<i32> for HistorySignalType {
             1 => HistorySignalType::HISTORY_SIGNAL_CHUNK_PUBLISHED,
             2 => HistorySignalType::HISTORY_SIGNAL_CHUNK_DISAPPROVED,
             3 => HistorySignalType::HISTORY_SIGNAL_REQUEST_FULFILLED,
+            4 => HistorySignalType::HISTORY_SIGNAL_CHUNK_VERIFIED,
             _ => Self::default(),
         }
     }
@@ -217,6 +219,7 @@ impl<'a> From<&'a str> for HistorySignalType {
             "HISTORY_SIGNAL_CHUNK_PUBLISHED" => HistorySignalType::HISTORY_SIGNAL_CHUNK_PUBLISHED,
             "HISTORY_SIGNAL_CHUNK_DISAPPROVED" => HistorySignalType::HISTORY_SIGNAL_CHUNK_DISAPPROVED,
             "HISTORY_SIGNAL_REQUEST_FULFILLED" => HistorySignalType::HISTORY_SIGNAL_REQUEST_FULFILLED,
+            "HISTORY_SIGNAL_CHUNK_VERIFIED" => HistorySignalType::HISTORY_SIGNAL_CHUNK_VERIFIED,
             _ => Self::default(),
         }
     }
@@ -1515,6 +1518,7 @@ impl<'a> MessageRead<'a> for Request<'a> {
                 Ok(154) => msg.payload = firefly::mod_Request::OneOfpayload::getHistoryChunks(r.read_message::<firefly::GetHistoryChunksRequest>(bytes)?),
                 Ok(162) => msg.payload = firefly::mod_Request::OneOfpayload::getPendingHistoryRequests(r.read_message::<firefly::GetPendingHistoryRequests>(bytes)?),
                 Ok(170) => msg.payload = firefly::mod_Request::OneOfpayload::closeHistoryRequest(r.read_message::<firefly::CloseHistoryRequest>(bytes)?),
+                Ok(178) => msg.payload = firefly::mod_Request::OneOfpayload::approveHistoryChunk(r.read_message::<firefly::ApproveHistoryChunkRequest>(bytes)?),
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -1548,6 +1552,7 @@ impl<'a> MessageWrite for Request<'a> {
             firefly::mod_Request::OneOfpayload::getHistoryChunks(ref m) => 2 + sizeof_len((m).get_size()),
             firefly::mod_Request::OneOfpayload::getPendingHistoryRequests(ref m) => 2 + sizeof_len((m).get_size()),
             firefly::mod_Request::OneOfpayload::closeHistoryRequest(ref m) => 2 + sizeof_len((m).get_size()),
+            firefly::mod_Request::OneOfpayload::approveHistoryChunk(ref m) => 2 + sizeof_len((m).get_size()),
             firefly::mod_Request::OneOfpayload::None => 0,
     }    }
 
@@ -1573,6 +1578,7 @@ impl<'a> MessageWrite for Request<'a> {
             firefly::mod_Request::OneOfpayload::getHistoryChunks(ref m) => { w.write_with_tag(154, |w| w.write_message(m))? },
             firefly::mod_Request::OneOfpayload::getPendingHistoryRequests(ref m) => { w.write_with_tag(162, |w| w.write_message(m))? },
             firefly::mod_Request::OneOfpayload::closeHistoryRequest(ref m) => { w.write_with_tag(170, |w| w.write_message(m))? },
+            firefly::mod_Request::OneOfpayload::approveHistoryChunk(ref m) => { w.write_with_tag(178, |w| w.write_message(m))? },
             firefly::mod_Request::OneOfpayload::None => {},
     }        Ok(())
     }
@@ -1604,6 +1610,7 @@ pub enum OneOfpayload<'a> {
     getHistoryChunks(firefly::GetHistoryChunksRequest),
     getPendingHistoryRequests(firefly::GetPendingHistoryRequests),
     closeHistoryRequest(firefly::CloseHistoryRequest),
+    approveHistoryChunk(firefly::ApproveHistoryChunkRequest<'a>),
     None,
 }
 
@@ -2962,6 +2969,74 @@ impl<'a> Default for OneOfmessage<'a> {
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Default, PartialEq, Clone)]
+pub struct GroupPinUpdate {
+    pub message_id: u64,
+    pub pinned: bool,
+}
+
+impl<'a> MessageRead<'a> for GroupPinUpdate {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.message_id = r.read_uint64(bytes)?,
+                Ok(16) => msg.pinned = r.read_bool(bytes)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl MessageWrite for GroupPinUpdate {
+    fn get_size(&self) -> usize {
+        0
+        + if self.message_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.message_id) as u64) }
+        + if self.pinned == false { 0 } else { 1 + sizeof_varint(*(&self.pinned) as u64) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.message_id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.message_id))?; }
+        if self.pinned != false { w.write_with_tag(16, |w| w.write_bool(*&self.pinned))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct GroupPinSnapshot<'a> {
+    pub messages: Vec<firefly::GroupHistoryRecord<'a>>,
+}
+
+impl<'a> MessageRead<'a> for GroupPinSnapshot<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(10) => msg.messages.push(r.read_message::<firefly::GroupHistoryRecord>(bytes)?),
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for GroupPinSnapshot<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + self.messages.iter().map(|s| 1 + sizeof_len((s).get_size())).sum::<usize>()
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        for s in &self.messages { w.write_with_tag(10, |w| w.write_message(s))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
 pub struct GroupMessageInner<'a> {
     pub channelId: u32,
     pub message_type: u32,
@@ -2976,6 +3051,8 @@ impl<'a> MessageRead<'a> for GroupMessageInner<'a> {
                 Ok(8) => msg.channelId = r.read_uint32(bytes)?,
                 Ok(24) => msg.message_type = r.read_uint32(bytes)?,
                 Ok(18) => msg.message = firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(r.read_message::<firefly::MessagePayload>(bytes)?),
+                Ok(34) => msg.message = firefly::mod_GroupMessageInner::OneOfmessage::pinUpdate(r.read_message::<firefly::GroupPinUpdate>(bytes)?),
+                Ok(42) => msg.message = firefly::mod_GroupMessageInner::OneOfmessage::pinSnapshot(r.read_message::<firefly::GroupPinSnapshot>(bytes)?),
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -2991,6 +3068,8 @@ impl<'a> MessageWrite for GroupMessageInner<'a> {
         + if self.message_type == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.message_type) as u64) }
         + match self.message {
             firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(ref m) => 1 + sizeof_len((m).get_size()),
+            firefly::mod_GroupMessageInner::OneOfmessage::pinUpdate(ref m) => 1 + sizeof_len((m).get_size()),
+            firefly::mod_GroupMessageInner::OneOfmessage::pinSnapshot(ref m) => 1 + sizeof_len((m).get_size()),
             firefly::mod_GroupMessageInner::OneOfmessage::None => 0,
     }    }
 
@@ -2998,6 +3077,8 @@ impl<'a> MessageWrite for GroupMessageInner<'a> {
         if self.channelId != 0u32 { w.write_with_tag(8, |w| w.write_uint32(*&self.channelId))?; }
         if self.message_type != 0u32 { w.write_with_tag(24, |w| w.write_uint32(*&self.message_type))?; }
         match self.message {            firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(ref m) => { w.write_with_tag(18, |w| w.write_message(m))? },
+            firefly::mod_GroupMessageInner::OneOfmessage::pinUpdate(ref m) => { w.write_with_tag(34, |w| w.write_message(m))? },
+            firefly::mod_GroupMessageInner::OneOfmessage::pinSnapshot(ref m) => { w.write_with_tag(42, |w| w.write_message(m))? },
             firefly::mod_GroupMessageInner::OneOfmessage::None => {},
     }        Ok(())
     }
@@ -3010,6 +3091,8 @@ use super::*;
 #[derive(Debug, PartialEq, Clone)]
 pub enum OneOfmessage<'a> {
     messagePayload(firefly::MessagePayload<'a>),
+    pinUpdate(firefly::GroupPinUpdate),
+    pinSnapshot(firefly::GroupPinSnapshot<'a>),
     None,
 }
 
@@ -3778,6 +3861,7 @@ pub struct GroupHistoryChunkItem<'a> {
     pub disapproved_by: Cow<'a, str>,
     pub disapproved_reason: Cow<'a, str>,
     pub created_at: u64,
+    pub verified: bool,
 }
 
 impl<'a> MessageRead<'a> for GroupHistoryChunkItem<'a> {
@@ -3797,6 +3881,7 @@ impl<'a> MessageRead<'a> for GroupHistoryChunkItem<'a> {
                 Ok(82) => msg.disapproved_by = r.read_string(bytes).map(Cow::Borrowed)?,
                 Ok(90) => msg.disapproved_reason = r.read_string(bytes).map(Cow::Borrowed)?,
                 Ok(97) => msg.created_at = r.read_fixed64(bytes)?,
+                Ok(104) => msg.verified = r.read_bool(bytes)?,
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -3820,6 +3905,7 @@ impl<'a> MessageWrite for GroupHistoryChunkItem<'a> {
         + if self.disapproved_by == "" { 0 } else { 1 + sizeof_len((&self.disapproved_by).len()) }
         + if self.disapproved_reason == "" { 0 } else { 1 + sizeof_len((&self.disapproved_reason).len()) }
         + if self.created_at == 0u64 { 0 } else { 1 + 8 }
+        + if self.verified == false { 0 } else { 1 + sizeof_varint(*(&self.verified) as u64) }
     }
 
     fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
@@ -3835,6 +3921,7 @@ impl<'a> MessageWrite for GroupHistoryChunkItem<'a> {
         if self.disapproved_by != "" { w.write_with_tag(82, |w| w.write_string(&**&self.disapproved_by))?; }
         if self.disapproved_reason != "" { w.write_with_tag(90, |w| w.write_string(&**&self.disapproved_reason))?; }
         if self.created_at != 0u64 { w.write_with_tag(97, |w| w.write_fixed64(*&self.created_at))?; }
+        if self.verified != false { w.write_with_tag(104, |w| w.write_bool(*&self.verified))?; }
         Ok(())
     }
 }
@@ -3847,6 +3934,7 @@ pub struct GroupHistoryChunkKey<'a> {
     pub end_msg_id: u64,
     pub key: Cow<'a, [u8]>,
     pub nonce: Cow<'a, [u8]>,
+    pub unencrypted_hash: Cow<'a, [u8]>,
 }
 
 impl<'a> MessageRead<'a> for GroupHistoryChunkKey<'a> {
@@ -3859,6 +3947,7 @@ impl<'a> MessageRead<'a> for GroupHistoryChunkKey<'a> {
                 Ok(25) => msg.end_msg_id = r.read_fixed64(bytes)?,
                 Ok(34) => msg.key = r.read_bytes(bytes).map(Cow::Borrowed)?,
                 Ok(42) => msg.nonce = r.read_bytes(bytes).map(Cow::Borrowed)?,
+                Ok(50) => msg.unencrypted_hash = r.read_bytes(bytes).map(Cow::Borrowed)?,
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -3875,6 +3964,7 @@ impl<'a> MessageWrite for GroupHistoryChunkKey<'a> {
         + if self.end_msg_id == 0u64 { 0 } else { 1 + 8 }
         + if self.key == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.key).len()) }
         + if self.nonce == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.nonce).len()) }
+        + if self.unencrypted_hash == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.unencrypted_hash).len()) }
     }
 
     fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
@@ -3883,6 +3973,7 @@ impl<'a> MessageWrite for GroupHistoryChunkKey<'a> {
         if self.end_msg_id != 0u64 { w.write_with_tag(25, |w| w.write_fixed64(*&self.end_msg_id))?; }
         if self.key != Cow::Borrowed(b"") { w.write_with_tag(34, |w| w.write_bytes(&**&self.key))?; }
         if self.nonce != Cow::Borrowed(b"") { w.write_with_tag(42, |w| w.write_bytes(&**&self.nonce))?; }
+        if self.unencrypted_hash != Cow::Borrowed(b"") { w.write_with_tag(50, |w| w.write_bytes(&**&self.unencrypted_hash))?; }
         Ok(())
     }
 }
@@ -3891,6 +3982,7 @@ impl<'a> MessageWrite for GroupHistoryChunkKey<'a> {
 #[derive(Debug, Default, PartialEq, Clone)]
 pub struct GroupHistoryKeysPayload<'a> {
     pub keys: Vec<firefly::GroupHistoryChunkKey<'a>>,
+    pub chunks: Vec<firefly::GroupHistoryChunkItem<'a>>,
 }
 
 impl<'a> MessageRead<'a> for GroupHistoryKeysPayload<'a> {
@@ -3899,6 +3991,7 @@ impl<'a> MessageRead<'a> for GroupHistoryKeysPayload<'a> {
         while !r.is_eof() {
             match r.next_tag(bytes) {
                 Ok(10) => msg.keys.push(r.read_message::<firefly::GroupHistoryChunkKey>(bytes)?),
+                Ok(18) => msg.chunks.push(r.read_message::<firefly::GroupHistoryChunkItem>(bytes)?),
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -3911,10 +4004,12 @@ impl<'a> MessageWrite for GroupHistoryKeysPayload<'a> {
     fn get_size(&self) -> usize {
         0
         + self.keys.iter().map(|s| 1 + sizeof_len((s).get_size())).sum::<usize>()
+        + self.chunks.iter().map(|s| 1 + sizeof_len((s).get_size())).sum::<usize>()
     }
 
     fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
         for s in &self.keys { w.write_with_tag(10, |w| w.write_message(s))?; }
+        for s in &self.chunks { w.write_with_tag(18, |w| w.write_message(s))?; }
         Ok(())
     }
 }
@@ -4042,6 +4137,7 @@ impl<'a> MessageWrite for ClaimHistoryResponse<'a> {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Default, PartialEq, Clone)]
 pub struct PublishHistoryChunkRequest<'a> {
+    pub reserve_only: bool,
     pub group_id: u64,
     pub start_msg_id: u64,
     pub end_msg_id: u64,
@@ -4055,6 +4151,7 @@ impl<'a> MessageRead<'a> for PublishHistoryChunkRequest<'a> {
         let mut msg = Self::default();
         while !r.is_eof() {
             match r.next_tag(bytes) {
+                Ok(56) => msg.reserve_only = r.read_bool(bytes)?,
                 Ok(8) => msg.group_id = r.read_uint64(bytes)?,
                 Ok(17) => msg.start_msg_id = r.read_fixed64(bytes)?,
                 Ok(25) => msg.end_msg_id = r.read_fixed64(bytes)?,
@@ -4072,6 +4169,7 @@ impl<'a> MessageRead<'a> for PublishHistoryChunkRequest<'a> {
 impl<'a> MessageWrite for PublishHistoryChunkRequest<'a> {
     fn get_size(&self) -> usize {
         0
+        + if self.reserve_only == false { 0 } else { 1 + sizeof_varint(*(&self.reserve_only) as u64) }
         + if self.group_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.group_id) as u64) }
         + if self.start_msg_id == 0u64 { 0 } else { 1 + 8 }
         + if self.end_msg_id == 0u64 { 0 } else { 1 + 8 }
@@ -4081,6 +4179,7 @@ impl<'a> MessageWrite for PublishHistoryChunkRequest<'a> {
     }
 
     fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.reserve_only != false { w.write_with_tag(56, |w| w.write_bool(*&self.reserve_only))?; }
         if self.group_id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.group_id))?; }
         if self.start_msg_id != 0u64 { w.write_with_tag(17, |w| w.write_fixed64(*&self.start_msg_id))?; }
         if self.end_msg_id != 0u64 { w.write_with_tag(25, |w| w.write_fixed64(*&self.end_msg_id))?; }
@@ -4137,6 +4236,7 @@ pub struct GetHistoryChunksRequest {
     pub group_id: u64,
     pub since_msg_id: u64,
     pub until_msg_id: u64,
+    pub include_unverified: bool,
 }
 
 impl<'a> MessageRead<'a> for GetHistoryChunksRequest {
@@ -4147,6 +4247,7 @@ impl<'a> MessageRead<'a> for GetHistoryChunksRequest {
                 Ok(8) => msg.group_id = r.read_uint64(bytes)?,
                 Ok(17) => msg.since_msg_id = r.read_fixed64(bytes)?,
                 Ok(25) => msg.until_msg_id = r.read_fixed64(bytes)?,
+                Ok(32) => msg.include_unverified = r.read_bool(bytes)?,
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -4161,12 +4262,14 @@ impl MessageWrite for GetHistoryChunksRequest {
         + if self.group_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.group_id) as u64) }
         + if self.since_msg_id == 0u64 { 0 } else { 1 + 8 }
         + if self.until_msg_id == 0u64 { 0 } else { 1 + 8 }
+        + if self.include_unverified == false { 0 } else { 1 + sizeof_varint(*(&self.include_unverified) as u64) }
     }
 
     fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
         if self.group_id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.group_id))?; }
         if self.since_msg_id != 0u64 { w.write_with_tag(17, |w| w.write_fixed64(*&self.since_msg_id))?; }
         if self.until_msg_id != 0u64 { w.write_with_tag(25, |w| w.write_fixed64(*&self.until_msg_id))?; }
+        if self.include_unverified != false { w.write_with_tag(32, |w| w.write_bool(*&self.include_unverified))?; }
         Ok(())
     }
 }
@@ -4360,6 +4463,130 @@ impl<'a> MessageWrite for GroupHistorySignal<'a> {
         if self.request_id != 0u64 { w.write_with_tag(25, |w| w.write_fixed64(*&self.request_id))?; }
         if self.chunk_id != 0u64 { w.write_with_tag(32, |w| w.write_uint64(*&self.chunk_id))?; }
         if self.username != "" { w.write_with_tag(42, |w| w.write_string(&**&self.username))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct GroupHistoryRecord<'a> {
+    pub id: u64,
+    pub group_id: u64,
+    pub message: Cow<'a, [u8]>,
+    pub epoch: u32,
+    pub sender: Cow<'a, str>,
+}
+
+impl<'a> MessageRead<'a> for GroupHistoryRecord<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(9) => msg.id = r.read_fixed64(bytes)?,
+                Ok(16) => msg.group_id = r.read_uint64(bytes)?,
+                Ok(26) => msg.message = r.read_bytes(bytes).map(Cow::Borrowed)?,
+                Ok(32) => msg.epoch = r.read_uint32(bytes)?,
+                Ok(42) => msg.sender = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for GroupHistoryRecord<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.id == 0u64 { 0 } else { 1 + 8 }
+        + if self.group_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.group_id) as u64) }
+        + if self.message == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.message).len()) }
+        + if self.epoch == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.epoch) as u64) }
+        + if self.sender == "" { 0 } else { 1 + sizeof_len((&self.sender).len()) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.id != 0u64 { w.write_with_tag(9, |w| w.write_fixed64(*&self.id))?; }
+        if self.group_id != 0u64 { w.write_with_tag(16, |w| w.write_uint64(*&self.group_id))?; }
+        if self.message != Cow::Borrowed(b"") { w.write_with_tag(26, |w| w.write_bytes(&**&self.message))?; }
+        if self.epoch != 0u32 { w.write_with_tag(32, |w| w.write_uint32(*&self.epoch))?; }
+        if self.sender != "" { w.write_with_tag(42, |w| w.write_string(&**&self.sender))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct GroupHistoryRecords<'a> {
+    pub messages: Vec<firefly::GroupHistoryRecord<'a>>,
+    pub format_version: u32,
+}
+
+impl<'a> MessageRead<'a> for GroupHistoryRecords<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(10) => msg.messages.push(r.read_message::<firefly::GroupHistoryRecord>(bytes)?),
+                Ok(16) => msg.format_version = r.read_uint32(bytes)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for GroupHistoryRecords<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + self.messages.iter().map(|s| 1 + sizeof_len((s).get_size())).sum::<usize>()
+        + if self.format_version == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.format_version) as u64) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        for s in &self.messages { w.write_with_tag(10, |w| w.write_message(s))?; }
+        if self.format_version != 0u32 { w.write_with_tag(16, |w| w.write_uint32(*&self.format_version))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct ApproveHistoryChunkRequest<'a> {
+    pub group_id: u64,
+    pub chunk_id: u64,
+    pub unencrypted_hash: Cow<'a, [u8]>,
+}
+
+impl<'a> MessageRead<'a> for ApproveHistoryChunkRequest<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.group_id = r.read_uint64(bytes)?,
+                Ok(16) => msg.chunk_id = r.read_uint64(bytes)?,
+                Ok(26) => msg.unencrypted_hash = r.read_bytes(bytes).map(Cow::Borrowed)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for ApproveHistoryChunkRequest<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.group_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.group_id) as u64) }
+        + if self.chunk_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.chunk_id) as u64) }
+        + if self.unencrypted_hash == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.unencrypted_hash).len()) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.group_id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.group_id))?; }
+        if self.chunk_id != 0u64 { w.write_with_tag(16, |w| w.write_uint64(*&self.chunk_id))?; }
+        if self.unencrypted_hash != Cow::Borrowed(b"") { w.write_with_tag(26, |w| w.write_bytes(&**&self.unencrypted_hash))?; }
         Ok(())
     }
 }

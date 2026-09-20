@@ -191,6 +191,15 @@ impl FireflyMlsClient {
         &self,
         extension: protos::firefly::FireflyGroupExtension<'_>,
     ) -> anyhow::Result<FireflyMlsGroup> {
+        self.create_group_with_settings(extension, String::new(), 0).await
+    }
+
+    pub async fn create_group_with_settings(
+        &self,
+        extension: protos::firefly::FireflyGroupExtension<'_>,
+        description: String,
+        settings: u32,
+    ) -> anyhow::Result<FireflyMlsGroup> {
         let group_name = extension.name.clone();
         let mut extensions = ExtensionList::new();
         extensions.set(
@@ -209,6 +218,8 @@ impl FireflyMlsClient {
 
         let body = firefly::Group {
             name: group_name,
+            description: description.into(),
+            settings,
             state: group_info_message.into(),
             ..Default::default()
         };

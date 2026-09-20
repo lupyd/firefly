@@ -243,6 +243,7 @@ export enum HistorySignalType {
   HISTORY_SIGNAL_CHUNK_PUBLISHED = 1,
   HISTORY_SIGNAL_CHUNK_DISAPPROVED = 2,
   HISTORY_SIGNAL_REQUEST_FULFILLED = 3,
+  HISTORY_SIGNAL_CHUNK_VERIFIED = 4,
   UNRECOGNIZED = -1,
 }
 
@@ -260,6 +261,9 @@ export function historySignalTypeFromJSON(object: any): HistorySignalType {
     case 3:
     case "HISTORY_SIGNAL_REQUEST_FULFILLED":
       return HistorySignalType.HISTORY_SIGNAL_REQUEST_FULFILLED;
+    case 4:
+    case "HISTORY_SIGNAL_CHUNK_VERIFIED":
+      return HistorySignalType.HISTORY_SIGNAL_CHUNK_VERIFIED;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -277,6 +281,8 @@ export function historySignalTypeToJSON(object: HistorySignalType): string {
       return "HISTORY_SIGNAL_CHUNK_DISAPPROVED";
     case HistorySignalType.HISTORY_SIGNAL_REQUEST_FULFILLED:
       return "HISTORY_SIGNAL_REQUEST_FULFILLED";
+    case HistorySignalType.HISTORY_SIGNAL_CHUNK_VERIFIED:
+      return "HISTORY_SIGNAL_CHUNK_VERIFIED";
     case HistorySignalType.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
@@ -496,6 +502,7 @@ export interface Request {
   getHistoryChunks?: GetHistoryChunksRequest | undefined;
   getPendingHistoryRequests?: GetPendingHistoryRequests | undefined;
   closeHistoryRequest?: CloseHistoryRequest | undefined;
+  approveHistoryChunk?: ApproveHistoryChunkRequest | undefined;
 }
 
 export interface Response {
@@ -705,9 +712,20 @@ export interface UserMessageInner {
   messageType: number;
 }
 
+export interface GroupPinUpdate {
+  messageId: bigint;
+  pinned: boolean;
+}
+
+export interface GroupPinSnapshot {
+  messages: GroupHistoryRecord[];
+}
+
 export interface GroupMessageInner {
   channelId: number;
   messagePayload?: MessagePayload | undefined;
+  pinUpdate?: GroupPinUpdate | undefined;
+  pinSnapshot?: GroupPinSnapshot | undefined;
   messageType: number;
 }
 
@@ -853,6 +871,7 @@ export interface GroupHistoryChunkItem {
   disapprovedBy: string;
   disapprovedReason: string;
   createdAt: bigint;
+  verified: boolean;
 }
 
 export interface GroupHistoryChunkKey {
@@ -861,10 +880,12 @@ export interface GroupHistoryChunkKey {
   endMsgId: bigint;
   key: Uint8Array;
   nonce: Uint8Array;
+  unencryptedHash: Uint8Array;
 }
 
 export interface GroupHistoryKeysPayload {
   keys: GroupHistoryChunkKey[];
+  chunks: GroupHistoryChunkItem[];
 }
 
 export interface CreateHistoryRequest {
@@ -886,6 +907,7 @@ export interface ClaimHistoryResponse {
 }
 
 export interface PublishHistoryChunkRequest {
+  reserveOnly: boolean;
   groupId: bigint;
   startMsgId: bigint;
   endMsgId: bigint;
@@ -904,6 +926,7 @@ export interface GetHistoryChunksRequest {
   groupId: bigint;
   sinceMsgId: bigint;
   untilMsgId: bigint;
+  includeUnverified: boolean;
 }
 
 export interface GetHistoryChunksResponse {
@@ -932,6 +955,26 @@ export interface GroupHistorySignal {
   requestId: bigint;
   chunkId: bigint;
   username: string;
+}
+
+/** Additive, versioned history envelope. Fields 1-4 retain the old record layout. */
+export interface GroupHistoryRecord {
+  id: bigint;
+  groupId: bigint;
+  message: Uint8Array;
+  epoch: number;
+  sender: string;
+}
+
+export interface GroupHistoryRecords {
+  messages: GroupHistoryRecord[];
+  formatVersion: number;
+}
+
+export interface ApproveHistoryChunkRequest {
+  groupId: bigint;
+  chunkId: bigint;
+  unencryptedHash: Uint8Array;
 }
 
 function createBaseUserMessage(): UserMessage {
@@ -4305,6 +4348,7 @@ function createBaseRequest(): Request {
     getHistoryChunks: undefined,
     getPendingHistoryRequests: undefined,
     closeHistoryRequest: undefined,
+    approveHistoryChunk: undefined,
   };
 }
 
@@ -4372,6 +4416,9 @@ export const Request: MessageFns<Request> = {
     }
     if (message.closeHistoryRequest !== undefined) {
       CloseHistoryRequest.encode(message.closeHistoryRequest, writer.uint32(170).fork()).join();
+    }
+    if (message.approveHistoryChunk !== undefined) {
+      ApproveHistoryChunkRequest.encode(message.approveHistoryChunk, writer.uint32(178).fork()).join();
     }
     return writer;
   },
@@ -4557,6 +4604,14 @@ export const Request: MessageFns<Request> = {
             message.closeHistoryRequest = CloseHistoryRequest.decode(reader, reader.uint32());
             continue;
           }
+          case 22: {
+            if (tag !== 178) {
+              break;
+            }
+
+            message.approveHistoryChunk = ApproveHistoryChunkRequest.decode(reader, reader.uint32());
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -4615,6 +4670,9 @@ export const Request: MessageFns<Request> = {
         : undefined,
       closeHistoryRequest: isSet(object.closeHistoryRequest)
         ? CloseHistoryRequest.fromJSON(object.closeHistoryRequest)
+        : undefined,
+      approveHistoryChunk: isSet(object.approveHistoryChunk)
+        ? ApproveHistoryChunkRequest.fromJSON(object.approveHistoryChunk)
         : undefined,
     };
   },
@@ -4683,6 +4741,9 @@ export const Request: MessageFns<Request> = {
     }
     if (message.closeHistoryRequest !== undefined) {
       obj.closeHistoryRequest = CloseHistoryRequest.toJSON(message.closeHistoryRequest);
+    }
+    if (message.approveHistoryChunk !== undefined) {
+      obj.approveHistoryChunk = ApproveHistoryChunkRequest.toJSON(message.approveHistoryChunk);
     }
     return obj;
   },
@@ -4754,6 +4815,9 @@ export const Request: MessageFns<Request> = {
         : undefined;
     message.closeHistoryRequest = (object.closeHistoryRequest !== undefined && object.closeHistoryRequest !== null)
       ? CloseHistoryRequest.fromPartial(object.closeHistoryRequest)
+      : undefined;
+    message.approveHistoryChunk = (object.approveHistoryChunk !== undefined && object.approveHistoryChunk !== null)
+      ? ApproveHistoryChunkRequest.fromPartial(object.approveHistoryChunk)
       : undefined;
     return message;
   },
@@ -8505,8 +8569,171 @@ export const UserMessageInner: MessageFns<UserMessageInner> = {
   },
 };
 
+function createBaseGroupPinUpdate(): GroupPinUpdate {
+  return { messageId: 0n, pinned: false };
+}
+
+export const GroupPinUpdate: MessageFns<GroupPinUpdate> = {
+  encode(message: GroupPinUpdate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.messageId !== 0n) {
+      if (BigInt.asUintN(64, message.messageId) !== message.messageId) {
+        throw new globalThis.Error("value provided for field message.messageId of type uint64 too large");
+      }
+      writer.uint32(8).uint64(message.messageId);
+    }
+    if (message.pinned !== false) {
+      writer.uint32(16).bool(message.pinned);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GroupPinUpdate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseGroupPinUpdate();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 8) {
+              break;
+            }
+
+            message.messageId = reader.uint64() as bigint;
+            continue;
+          }
+          case 2: {
+            if (tag !== 16) {
+              break;
+            }
+
+            message.pinned = reader.bool();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): GroupPinUpdate {
+    return {
+      messageId: isSet(object.messageId)
+        ? BigInt(object.messageId)
+        : isSet(object.message_id)
+        ? BigInt(object.message_id)
+        : 0n,
+      pinned: isSet(object.pinned) ? globalThis.Boolean(object.pinned) : false,
+    };
+  },
+
+  toJSON(message: GroupPinUpdate): unknown {
+    const obj: any = {};
+    if (message.messageId !== 0n) {
+      obj.messageId = message.messageId.toString();
+    }
+    if (message.pinned !== false) {
+      obj.pinned = message.pinned;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GroupPinUpdate>, I>>(base?: I): GroupPinUpdate {
+    return GroupPinUpdate.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GroupPinUpdate>, I>>(object: I): GroupPinUpdate {
+    const message = createBaseGroupPinUpdate();
+    message.messageId = (object.messageId !== undefined && object.messageId !== null) ? BigInt(object.messageId) : 0n;
+    message.pinned = object.pinned ?? false;
+    return message;
+  },
+};
+
+function createBaseGroupPinSnapshot(): GroupPinSnapshot {
+  return { messages: [] };
+}
+
+export const GroupPinSnapshot: MessageFns<GroupPinSnapshot> = {
+  encode(message: GroupPinSnapshot, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.messages) {
+      GroupHistoryRecord.encode(v!, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GroupPinSnapshot {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseGroupPinSnapshot();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.messages.push(GroupHistoryRecord.decode(reader, reader.uint32()));
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): GroupPinSnapshot {
+    return {
+      messages: globalThis.Array.isArray(object?.messages)
+        ? object.messages.map((e: any) => GroupHistoryRecord.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: GroupPinSnapshot): unknown {
+    const obj: any = {};
+    if (message.messages?.length) {
+      obj.messages = message.messages.map((e) => GroupHistoryRecord.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GroupPinSnapshot>, I>>(base?: I): GroupPinSnapshot {
+    return GroupPinSnapshot.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GroupPinSnapshot>, I>>(object: I): GroupPinSnapshot {
+    const message = createBaseGroupPinSnapshot();
+    message.messages = object.messages?.map((e) => GroupHistoryRecord.fromPartial(e)) || [];
+    return message;
+  },
+};
+
 function createBaseGroupMessageInner(): GroupMessageInner {
-  return { channelId: 0, messagePayload: undefined, messageType: 0 };
+  return { channelId: 0, messagePayload: undefined, pinUpdate: undefined, pinSnapshot: undefined, messageType: 0 };
 }
 
 export const GroupMessageInner: MessageFns<GroupMessageInner> = {
@@ -8516,6 +8743,12 @@ export const GroupMessageInner: MessageFns<GroupMessageInner> = {
     }
     if (message.messagePayload !== undefined) {
       MessagePayload.encode(message.messagePayload, writer.uint32(18).fork()).join();
+    }
+    if (message.pinUpdate !== undefined) {
+      GroupPinUpdate.encode(message.pinUpdate, writer.uint32(34).fork()).join();
+    }
+    if (message.pinSnapshot !== undefined) {
+      GroupPinSnapshot.encode(message.pinSnapshot, writer.uint32(42).fork()).join();
     }
     if (message.messageType !== 0) {
       writer.uint32(24).uint32(message.messageType);
@@ -8552,6 +8785,22 @@ export const GroupMessageInner: MessageFns<GroupMessageInner> = {
             message.messagePayload = MessagePayload.decode(reader, reader.uint32());
             continue;
           }
+          case 4: {
+            if (tag !== 34) {
+              break;
+            }
+
+            message.pinUpdate = GroupPinUpdate.decode(reader, reader.uint32());
+            continue;
+          }
+          case 5: {
+            if (tag !== 42) {
+              break;
+            }
+
+            message.pinSnapshot = GroupPinSnapshot.decode(reader, reader.uint32());
+            continue;
+          }
           case 3: {
             if (tag !== 24) {
               break;
@@ -8576,6 +8825,8 @@ export const GroupMessageInner: MessageFns<GroupMessageInner> = {
     return {
       channelId: isSet(object.channelId) ? globalThis.Number(object.channelId) : 0,
       messagePayload: isSet(object.messagePayload) ? MessagePayload.fromJSON(object.messagePayload) : undefined,
+      pinUpdate: isSet(object.pinUpdate) ? GroupPinUpdate.fromJSON(object.pinUpdate) : undefined,
+      pinSnapshot: isSet(object.pinSnapshot) ? GroupPinSnapshot.fromJSON(object.pinSnapshot) : undefined,
       messageType: isSet(object.messageType)
         ? globalThis.Number(object.messageType)
         : isSet(object.message_type)
@@ -8592,6 +8843,12 @@ export const GroupMessageInner: MessageFns<GroupMessageInner> = {
     if (message.messagePayload !== undefined) {
       obj.messagePayload = MessagePayload.toJSON(message.messagePayload);
     }
+    if (message.pinUpdate !== undefined) {
+      obj.pinUpdate = GroupPinUpdate.toJSON(message.pinUpdate);
+    }
+    if (message.pinSnapshot !== undefined) {
+      obj.pinSnapshot = GroupPinSnapshot.toJSON(message.pinSnapshot);
+    }
     if (message.messageType !== 0) {
       obj.messageType = Math.round(message.messageType);
     }
@@ -8606,6 +8863,12 @@ export const GroupMessageInner: MessageFns<GroupMessageInner> = {
     message.channelId = object.channelId ?? 0;
     message.messagePayload = (object.messagePayload !== undefined && object.messagePayload !== null)
       ? MessagePayload.fromPartial(object.messagePayload)
+      : undefined;
+    message.pinUpdate = (object.pinUpdate !== undefined && object.pinUpdate !== null)
+      ? GroupPinUpdate.fromPartial(object.pinUpdate)
+      : undefined;
+    message.pinSnapshot = (object.pinSnapshot !== undefined && object.pinSnapshot !== null)
+      ? GroupPinSnapshot.fromPartial(object.pinSnapshot)
       : undefined;
     message.messageType = object.messageType ?? 0;
     return message;
@@ -10764,6 +11027,7 @@ function createBaseGroupHistoryChunkItem(): GroupHistoryChunkItem {
     disapprovedBy: "",
     disapprovedReason: "",
     createdAt: 0n,
+    verified: false,
   };
 }
 
@@ -10819,6 +11083,9 @@ export const GroupHistoryChunkItem: MessageFns<GroupHistoryChunkItem> = {
         throw new globalThis.Error("value provided for field message.createdAt of type fixed64 too large");
       }
       writer.uint32(97).fixed64(message.createdAt);
+    }
+    if (message.verified !== false) {
+      writer.uint32(104).bool(message.verified);
     }
     return writer;
   },
@@ -10932,6 +11199,14 @@ export const GroupHistoryChunkItem: MessageFns<GroupHistoryChunkItem> = {
             message.createdAt = reader.fixed64() as bigint;
             continue;
           }
+          case 13: {
+            if (tag !== 104) {
+              break;
+            }
+
+            message.verified = reader.bool();
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -10994,6 +11269,7 @@ export const GroupHistoryChunkItem: MessageFns<GroupHistoryChunkItem> = {
         : isSet(object.created_at)
         ? BigInt(object.created_at)
         : 0n,
+      verified: isSet(object.verified) ? globalThis.Boolean(object.verified) : false,
     };
   },
 
@@ -11035,6 +11311,9 @@ export const GroupHistoryChunkItem: MessageFns<GroupHistoryChunkItem> = {
     if (message.createdAt !== 0n) {
       obj.createdAt = message.createdAt.toString();
     }
+    if (message.verified !== false) {
+      obj.verified = message.verified;
+    }
     return obj;
   },
 
@@ -11057,12 +11336,20 @@ export const GroupHistoryChunkItem: MessageFns<GroupHistoryChunkItem> = {
     message.disapprovedBy = object.disapprovedBy ?? "";
     message.disapprovedReason = object.disapprovedReason ?? "";
     message.createdAt = (object.createdAt !== undefined && object.createdAt !== null) ? BigInt(object.createdAt) : 0n;
+    message.verified = object.verified ?? false;
     return message;
   },
 };
 
 function createBaseGroupHistoryChunkKey(): GroupHistoryChunkKey {
-  return { groupId: 0n, startMsgId: 0n, endMsgId: 0n, key: new Uint8Array(0), nonce: new Uint8Array(0) };
+  return {
+    groupId: 0n,
+    startMsgId: 0n,
+    endMsgId: 0n,
+    key: new Uint8Array(0),
+    nonce: new Uint8Array(0),
+    unencryptedHash: new Uint8Array(0),
+  };
 }
 
 export const GroupHistoryChunkKey: MessageFns<GroupHistoryChunkKey> = {
@@ -11090,6 +11377,9 @@ export const GroupHistoryChunkKey: MessageFns<GroupHistoryChunkKey> = {
     }
     if (message.nonce.length !== 0) {
       writer.uint32(42).bytes(message.nonce);
+    }
+    if (message.unencryptedHash.length !== 0) {
+      writer.uint32(50).bytes(message.unencryptedHash);
     }
     return writer;
   },
@@ -11147,6 +11437,14 @@ export const GroupHistoryChunkKey: MessageFns<GroupHistoryChunkKey> = {
             message.nonce = reader.bytes();
             continue;
           }
+          case 6: {
+            if (tag !== 50) {
+              break;
+            }
+
+            message.unencryptedHash = reader.bytes();
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -11174,6 +11472,11 @@ export const GroupHistoryChunkKey: MessageFns<GroupHistoryChunkKey> = {
         : 0n,
       key: isSet(object.key) ? bytesFromBase64(object.key) : new Uint8Array(0),
       nonce: isSet(object.nonce) ? bytesFromBase64(object.nonce) : new Uint8Array(0),
+      unencryptedHash: isSet(object.unencryptedHash)
+        ? bytesFromBase64(object.unencryptedHash)
+        : isSet(object.unencrypted_hash)
+        ? bytesFromBase64(object.unencrypted_hash)
+        : new Uint8Array(0),
     };
   },
 
@@ -11194,6 +11497,9 @@ export const GroupHistoryChunkKey: MessageFns<GroupHistoryChunkKey> = {
     if (message.nonce.length !== 0) {
       obj.nonce = base64FromBytes(message.nonce);
     }
+    if (message.unencryptedHash.length !== 0) {
+      obj.unencryptedHash = base64FromBytes(message.unencryptedHash);
+    }
     return obj;
   },
 
@@ -11209,18 +11515,22 @@ export const GroupHistoryChunkKey: MessageFns<GroupHistoryChunkKey> = {
     message.endMsgId = (object.endMsgId !== undefined && object.endMsgId !== null) ? BigInt(object.endMsgId) : 0n;
     message.key = object.key ?? new Uint8Array(0);
     message.nonce = object.nonce ?? new Uint8Array(0);
+    message.unencryptedHash = object.unencryptedHash ?? new Uint8Array(0);
     return message;
   },
 };
 
 function createBaseGroupHistoryKeysPayload(): GroupHistoryKeysPayload {
-  return { keys: [] };
+  return { keys: [], chunks: [] };
 }
 
 export const GroupHistoryKeysPayload: MessageFns<GroupHistoryKeysPayload> = {
   encode(message: GroupHistoryKeysPayload, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     for (const v of message.keys) {
       GroupHistoryChunkKey.encode(v!, writer.uint32(10).fork()).join();
+    }
+    for (const v of message.chunks) {
+      GroupHistoryChunkItem.encode(v!, writer.uint32(18).fork()).join();
     }
     return writer;
   },
@@ -11246,6 +11556,14 @@ export const GroupHistoryKeysPayload: MessageFns<GroupHistoryKeysPayload> = {
             message.keys.push(GroupHistoryChunkKey.decode(reader, reader.uint32()));
             continue;
           }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.chunks.push(GroupHistoryChunkItem.decode(reader, reader.uint32()));
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -11261,6 +11579,9 @@ export const GroupHistoryKeysPayload: MessageFns<GroupHistoryKeysPayload> = {
   fromJSON(object: any): GroupHistoryKeysPayload {
     return {
       keys: globalThis.Array.isArray(object?.keys) ? object.keys.map((e: any) => GroupHistoryChunkKey.fromJSON(e)) : [],
+      chunks: globalThis.Array.isArray(object?.chunks)
+        ? object.chunks.map((e: any) => GroupHistoryChunkItem.fromJSON(e))
+        : [],
     };
   },
 
@@ -11268,6 +11589,9 @@ export const GroupHistoryKeysPayload: MessageFns<GroupHistoryKeysPayload> = {
     const obj: any = {};
     if (message.keys?.length) {
       obj.keys = message.keys.map((e) => GroupHistoryChunkKey.toJSON(e));
+    }
+    if (message.chunks?.length) {
+      obj.chunks = message.chunks.map((e) => GroupHistoryChunkItem.toJSON(e));
     }
     return obj;
   },
@@ -11278,6 +11602,7 @@ export const GroupHistoryKeysPayload: MessageFns<GroupHistoryKeysPayload> = {
   fromPartial<I extends Exact<DeepPartial<GroupHistoryKeysPayload>, I>>(object: I): GroupHistoryKeysPayload {
     const message = createBaseGroupHistoryKeysPayload();
     message.keys = object.keys?.map((e) => GroupHistoryChunkKey.fromPartial(e)) || [];
+    message.chunks = object.chunks?.map((e) => GroupHistoryChunkItem.fromPartial(e)) || [];
     return message;
   },
 };
@@ -11631,11 +11956,22 @@ export const ClaimHistoryResponse: MessageFns<ClaimHistoryResponse> = {
 };
 
 function createBasePublishHistoryChunkRequest(): PublishHistoryChunkRequest {
-  return { groupId: 0n, startMsgId: 0n, endMsgId: 0n, msgCount: 0, unencryptedHash: new Uint8Array(0), chunkUrl: "" };
+  return {
+    reserveOnly: false,
+    groupId: 0n,
+    startMsgId: 0n,
+    endMsgId: 0n,
+    msgCount: 0,
+    unencryptedHash: new Uint8Array(0),
+    chunkUrl: "",
+  };
 }
 
 export const PublishHistoryChunkRequest: MessageFns<PublishHistoryChunkRequest> = {
   encode(message: PublishHistoryChunkRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.reserveOnly !== false) {
+      writer.uint32(56).bool(message.reserveOnly);
+    }
     if (message.groupId !== 0n) {
       if (BigInt.asUintN(64, message.groupId) !== message.groupId) {
         throw new globalThis.Error("value provided for field message.groupId of type uint64 too large");
@@ -11679,6 +12015,14 @@ export const PublishHistoryChunkRequest: MessageFns<PublishHistoryChunkRequest> 
       while (reader.pos < end) {
         const tag = reader.uint32();
         switch (tag >>> 3) {
+          case 7: {
+            if (tag !== 56) {
+              break;
+            }
+
+            message.reserveOnly = reader.bool();
+            continue;
+          }
           case 1: {
             if (tag !== 8) {
               break;
@@ -11741,6 +12085,11 @@ export const PublishHistoryChunkRequest: MessageFns<PublishHistoryChunkRequest> 
 
   fromJSON(object: any): PublishHistoryChunkRequest {
     return {
+      reserveOnly: isSet(object.reserveOnly)
+        ? globalThis.Boolean(object.reserveOnly)
+        : isSet(object.reserve_only)
+        ? globalThis.Boolean(object.reserve_only)
+        : false,
       groupId: isSet(object.groupId) ? BigInt(object.groupId) : isSet(object.group_id) ? BigInt(object.group_id) : 0n,
       startMsgId: isSet(object.startMsgId)
         ? BigInt(object.startMsgId)
@@ -11772,6 +12121,9 @@ export const PublishHistoryChunkRequest: MessageFns<PublishHistoryChunkRequest> 
 
   toJSON(message: PublishHistoryChunkRequest): unknown {
     const obj: any = {};
+    if (message.reserveOnly !== false) {
+      obj.reserveOnly = message.reserveOnly;
+    }
     if (message.groupId !== 0n) {
       obj.groupId = message.groupId.toString();
     }
@@ -11798,6 +12150,7 @@ export const PublishHistoryChunkRequest: MessageFns<PublishHistoryChunkRequest> 
   },
   fromPartial<I extends Exact<DeepPartial<PublishHistoryChunkRequest>, I>>(object: I): PublishHistoryChunkRequest {
     const message = createBasePublishHistoryChunkRequest();
+    message.reserveOnly = object.reserveOnly ?? false;
     message.groupId = (object.groupId !== undefined && object.groupId !== null) ? BigInt(object.groupId) : 0n;
     message.startMsgId = (object.startMsgId !== undefined && object.startMsgId !== null)
       ? BigInt(object.startMsgId)
@@ -11920,7 +12273,7 @@ export const DisapproveHistoryChunkRequest: MessageFns<DisapproveHistoryChunkReq
 };
 
 function createBaseGetHistoryChunksRequest(): GetHistoryChunksRequest {
-  return { groupId: 0n, sinceMsgId: 0n, untilMsgId: 0n };
+  return { groupId: 0n, sinceMsgId: 0n, untilMsgId: 0n, includeUnverified: false };
 }
 
 export const GetHistoryChunksRequest: MessageFns<GetHistoryChunksRequest> = {
@@ -11942,6 +12295,9 @@ export const GetHistoryChunksRequest: MessageFns<GetHistoryChunksRequest> = {
         throw new globalThis.Error("value provided for field message.untilMsgId of type fixed64 too large");
       }
       writer.uint32(25).fixed64(message.untilMsgId);
+    }
+    if (message.includeUnverified !== false) {
+      writer.uint32(32).bool(message.includeUnverified);
     }
     return writer;
   },
@@ -11983,6 +12339,14 @@ export const GetHistoryChunksRequest: MessageFns<GetHistoryChunksRequest> = {
             message.untilMsgId = reader.fixed64() as bigint;
             continue;
           }
+          case 4: {
+            if (tag !== 32) {
+              break;
+            }
+
+            message.includeUnverified = reader.bool();
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -12008,6 +12372,11 @@ export const GetHistoryChunksRequest: MessageFns<GetHistoryChunksRequest> = {
         : isSet(object.until_msg_id)
         ? BigInt(object.until_msg_id)
         : 0n,
+      includeUnverified: isSet(object.includeUnverified)
+        ? globalThis.Boolean(object.includeUnverified)
+        : isSet(object.include_unverified)
+        ? globalThis.Boolean(object.include_unverified)
+        : false,
     };
   },
 
@@ -12021,6 +12390,9 @@ export const GetHistoryChunksRequest: MessageFns<GetHistoryChunksRequest> = {
     }
     if (message.untilMsgId !== 0n) {
       obj.untilMsgId = message.untilMsgId.toString();
+    }
+    if (message.includeUnverified !== false) {
+      obj.includeUnverified = message.includeUnverified;
     }
     return obj;
   },
@@ -12037,6 +12409,7 @@ export const GetHistoryChunksRequest: MessageFns<GetHistoryChunksRequest> = {
     message.untilMsgId = (object.untilMsgId !== undefined && object.untilMsgId !== null)
       ? BigInt(object.untilMsgId)
       : 0n;
+    message.includeUnverified = object.includeUnverified ?? false;
     return message;
   },
 };
@@ -12564,6 +12937,347 @@ export const GroupHistorySignal: MessageFns<GroupHistorySignal> = {
     message.requestId = (object.requestId !== undefined && object.requestId !== null) ? BigInt(object.requestId) : 0n;
     message.chunkId = (object.chunkId !== undefined && object.chunkId !== null) ? BigInt(object.chunkId) : 0n;
     message.username = object.username ?? "";
+    return message;
+  },
+};
+
+function createBaseGroupHistoryRecord(): GroupHistoryRecord {
+  return { id: 0n, groupId: 0n, message: new Uint8Array(0), epoch: 0, sender: "" };
+}
+
+export const GroupHistoryRecord: MessageFns<GroupHistoryRecord> = {
+  encode(message: GroupHistoryRecord, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.id !== 0n) {
+      if (BigInt.asUintN(64, message.id) !== message.id) {
+        throw new globalThis.Error("value provided for field message.id of type fixed64 too large");
+      }
+      writer.uint32(9).fixed64(message.id);
+    }
+    if (message.groupId !== 0n) {
+      if (BigInt.asUintN(64, message.groupId) !== message.groupId) {
+        throw new globalThis.Error("value provided for field message.groupId of type uint64 too large");
+      }
+      writer.uint32(16).uint64(message.groupId);
+    }
+    if (message.message.length !== 0) {
+      writer.uint32(26).bytes(message.message);
+    }
+    if (message.epoch !== 0) {
+      writer.uint32(32).uint32(message.epoch);
+    }
+    if (message.sender !== "") {
+      writer.uint32(42).string(message.sender);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GroupHistoryRecord {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseGroupHistoryRecord();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 9) {
+              break;
+            }
+
+            message.id = reader.fixed64() as bigint;
+            continue;
+          }
+          case 2: {
+            if (tag !== 16) {
+              break;
+            }
+
+            message.groupId = reader.uint64() as bigint;
+            continue;
+          }
+          case 3: {
+            if (tag !== 26) {
+              break;
+            }
+
+            message.message = reader.bytes();
+            continue;
+          }
+          case 4: {
+            if (tag !== 32) {
+              break;
+            }
+
+            message.epoch = reader.uint32();
+            continue;
+          }
+          case 5: {
+            if (tag !== 42) {
+              break;
+            }
+
+            message.sender = reader.string();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): GroupHistoryRecord {
+    return {
+      id: isSet(object.id) ? BigInt(object.id) : 0n,
+      groupId: isSet(object.groupId) ? BigInt(object.groupId) : isSet(object.group_id) ? BigInt(object.group_id) : 0n,
+      message: isSet(object.message) ? bytesFromBase64(object.message) : new Uint8Array(0),
+      epoch: isSet(object.epoch) ? globalThis.Number(object.epoch) : 0,
+      sender: isSet(object.sender) ? globalThis.String(object.sender) : "",
+    };
+  },
+
+  toJSON(message: GroupHistoryRecord): unknown {
+    const obj: any = {};
+    if (message.id !== 0n) {
+      obj.id = message.id.toString();
+    }
+    if (message.groupId !== 0n) {
+      obj.groupId = message.groupId.toString();
+    }
+    if (message.message.length !== 0) {
+      obj.message = base64FromBytes(message.message);
+    }
+    if (message.epoch !== 0) {
+      obj.epoch = Math.round(message.epoch);
+    }
+    if (message.sender !== "") {
+      obj.sender = message.sender;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GroupHistoryRecord>, I>>(base?: I): GroupHistoryRecord {
+    return GroupHistoryRecord.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GroupHistoryRecord>, I>>(object: I): GroupHistoryRecord {
+    const message = createBaseGroupHistoryRecord();
+    message.id = (object.id !== undefined && object.id !== null) ? BigInt(object.id) : 0n;
+    message.groupId = (object.groupId !== undefined && object.groupId !== null) ? BigInt(object.groupId) : 0n;
+    message.message = object.message ?? new Uint8Array(0);
+    message.epoch = object.epoch ?? 0;
+    message.sender = object.sender ?? "";
+    return message;
+  },
+};
+
+function createBaseGroupHistoryRecords(): GroupHistoryRecords {
+  return { messages: [], formatVersion: 0 };
+}
+
+export const GroupHistoryRecords: MessageFns<GroupHistoryRecords> = {
+  encode(message: GroupHistoryRecords, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.messages) {
+      GroupHistoryRecord.encode(v!, writer.uint32(10).fork()).join();
+    }
+    if (message.formatVersion !== 0) {
+      writer.uint32(16).uint32(message.formatVersion);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GroupHistoryRecords {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseGroupHistoryRecords();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.messages.push(GroupHistoryRecord.decode(reader, reader.uint32()));
+            continue;
+          }
+          case 2: {
+            if (tag !== 16) {
+              break;
+            }
+
+            message.formatVersion = reader.uint32();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): GroupHistoryRecords {
+    return {
+      messages: globalThis.Array.isArray(object?.messages)
+        ? object.messages.map((e: any) => GroupHistoryRecord.fromJSON(e))
+        : [],
+      formatVersion: isSet(object.formatVersion)
+        ? globalThis.Number(object.formatVersion)
+        : isSet(object.format_version)
+        ? globalThis.Number(object.format_version)
+        : 0,
+    };
+  },
+
+  toJSON(message: GroupHistoryRecords): unknown {
+    const obj: any = {};
+    if (message.messages?.length) {
+      obj.messages = message.messages.map((e) => GroupHistoryRecord.toJSON(e));
+    }
+    if (message.formatVersion !== 0) {
+      obj.formatVersion = Math.round(message.formatVersion);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GroupHistoryRecords>, I>>(base?: I): GroupHistoryRecords {
+    return GroupHistoryRecords.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GroupHistoryRecords>, I>>(object: I): GroupHistoryRecords {
+    const message = createBaseGroupHistoryRecords();
+    message.messages = object.messages?.map((e) => GroupHistoryRecord.fromPartial(e)) || [];
+    message.formatVersion = object.formatVersion ?? 0;
+    return message;
+  },
+};
+
+function createBaseApproveHistoryChunkRequest(): ApproveHistoryChunkRequest {
+  return { groupId: 0n, chunkId: 0n, unencryptedHash: new Uint8Array(0) };
+}
+
+export const ApproveHistoryChunkRequest: MessageFns<ApproveHistoryChunkRequest> = {
+  encode(message: ApproveHistoryChunkRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.groupId !== 0n) {
+      if (BigInt.asUintN(64, message.groupId) !== message.groupId) {
+        throw new globalThis.Error("value provided for field message.groupId of type uint64 too large");
+      }
+      writer.uint32(8).uint64(message.groupId);
+    }
+    if (message.chunkId !== 0n) {
+      if (BigInt.asUintN(64, message.chunkId) !== message.chunkId) {
+        throw new globalThis.Error("value provided for field message.chunkId of type uint64 too large");
+      }
+      writer.uint32(16).uint64(message.chunkId);
+    }
+    if (message.unencryptedHash.length !== 0) {
+      writer.uint32(26).bytes(message.unencryptedHash);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ApproveHistoryChunkRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseApproveHistoryChunkRequest();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 8) {
+              break;
+            }
+
+            message.groupId = reader.uint64() as bigint;
+            continue;
+          }
+          case 2: {
+            if (tag !== 16) {
+              break;
+            }
+
+            message.chunkId = reader.uint64() as bigint;
+            continue;
+          }
+          case 3: {
+            if (tag !== 26) {
+              break;
+            }
+
+            message.unencryptedHash = reader.bytes();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): ApproveHistoryChunkRequest {
+    return {
+      groupId: isSet(object.groupId) ? BigInt(object.groupId) : isSet(object.group_id) ? BigInt(object.group_id) : 0n,
+      chunkId: isSet(object.chunkId) ? BigInt(object.chunkId) : isSet(object.chunk_id) ? BigInt(object.chunk_id) : 0n,
+      unencryptedHash: isSet(object.unencryptedHash)
+        ? bytesFromBase64(object.unencryptedHash)
+        : isSet(object.unencrypted_hash)
+        ? bytesFromBase64(object.unencrypted_hash)
+        : new Uint8Array(0),
+    };
+  },
+
+  toJSON(message: ApproveHistoryChunkRequest): unknown {
+    const obj: any = {};
+    if (message.groupId !== 0n) {
+      obj.groupId = message.groupId.toString();
+    }
+    if (message.chunkId !== 0n) {
+      obj.chunkId = message.chunkId.toString();
+    }
+    if (message.unencryptedHash.length !== 0) {
+      obj.unencryptedHash = base64FromBytes(message.unencryptedHash);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ApproveHistoryChunkRequest>, I>>(base?: I): ApproveHistoryChunkRequest {
+    return ApproveHistoryChunkRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ApproveHistoryChunkRequest>, I>>(object: I): ApproveHistoryChunkRequest {
+    const message = createBaseApproveHistoryChunkRequest();
+    message.groupId = (object.groupId !== undefined && object.groupId !== null) ? BigInt(object.groupId) : 0n;
+    message.chunkId = (object.chunkId !== undefined && object.chunkId !== null) ? BigInt(object.chunkId) : 0n;
+    message.unencryptedHash = object.unencryptedHash ?? new Uint8Array(0);
     return message;
   },
 };

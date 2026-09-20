@@ -48,6 +48,8 @@ pub trait FireflyWsClientCallback: Send + Sync {
 
     async fn on_group_message(&self, group_message: GroupMessage);
 
+    async fn on_group_message_updated(&self, message: GroupMessage) { self.on_group_message(message).await; }
+
     async fn on_group_joined(&self, _group_id: u64) {}
 
     async fn on_call_signal(&self, _signal: CallSignal) {}

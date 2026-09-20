@@ -141,3 +141,32 @@ fn undefined_roles_fail_closed_and_default_roster_members_need_no_extension_entr
         SEE | ADD | PIN
     );
 }
+
+#[test]
+fn shared_pin_control_requires_see_and_pin_for_both_actions() {
+    for pinned in [false,true] {
+        let message=serialize_proto(&GroupMessageInner { channelId:0,message_type:firefly_protos::MESSAGE_TYPE_HIDDEN,message:mod_GroupMessageInner::OneOfmessage::pinUpdate(GroupPinUpdate{message_id:10,pinned}) }).unwrap();
+        for mask in 0..128 { assert_eq!(FireflyMlsRules::check_message_sender(&extension(mask),"member",&message).is_ok(),mask&(SEE|PIN)==SEE|PIN,"mask={mask},pinned={pinned}"); }
+    }
+}
+#[test]
+fn shared_pin_control_cannot_be_visible_or_target_zero() {
+    for (id,flags) in [(0,2),(1,0),(1,3)] {
+        let message=serialize_proto(&GroupMessageInner {channelId:0,message_type:flags,message:mod_GroupMessageInner::OneOfmessage::pinUpdate(GroupPinUpdate{message_id:id,pinned:true})}).unwrap();
+        assert!(FireflyMlsRules::check_message_sender(&extension(127),"member",&message).is_err());
+    }
+}
+
+#[test]
+fn hidden_pin_snapshots_require_pin_rights_in_every_target_channel() {
+    let original=payload(0,0,0);
+    let record=GroupHistoryRecord{id:10,group_id:42,sender:"alice".into(),message:original.into(),epoch:1};
+    let make=|flags, records:Vec<GroupHistoryRecord>|serialize_proto(&GroupMessageInner{channelId:0,message_type:flags,message:mod_GroupMessageInner::OneOfmessage::pinSnapshot(GroupPinSnapshot{messages:records})}).unwrap();
+    let snapshot=make(2,vec![record.clone()]);
+    assert!(FireflyMlsRules::check_message_sender(&extension(SEE|PIN),"adder",&snapshot).is_ok());
+    assert!(FireflyMlsRules::check_message_sender(&extension(SEE|ADD),"adder",&snapshot).is_err());
+    assert!(FireflyMlsRules::check_message_sender(&extension(127),"adder",&make(0,vec![record.clone()])).is_err());
+    assert!(FireflyMlsRules::check_message_sender(&extension(127),"adder",&make(2,vec![record.clone();101])).is_err());
+    let foreign_channel=GroupHistoryRecord{message:payload(99,0,0).into(),..record};
+    assert!(FireflyMlsRules::check_message_sender(&extension(127),"adder",&make(2,vec![foreign_channel])).is_err());
+}

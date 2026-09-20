@@ -76,8 +76,8 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     )
     .await?;
 
-    // Fast path: If history_chunks_v2 is already applied, return immediately without any table scans.
-    let already_applied: Option<i64> = sqlx::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 2")
+    // Fast path: If shared_pins_v4 is already applied, return immediately without any table scans.
+    let already_applied: Option<i64> = sqlx::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 4")
         .fetch_optional(&mut *conn)
         .await?;
     if already_applied.is_some() {
@@ -328,6 +328,32 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
             .await;
     }
 
+
+    pool.execute(r#"
+        CREATE TABLE IF NOT EXISTS group_history_keys_v3 (
+            group_id INTEGER NOT NULL, start_msg_id INTEGER NOT NULL, end_msg_id INTEGER NOT NULL,
+            hash BLOB NOT NULL, key BLOB NOT NULL, nonce BLOB NOT NULL,
+            PRIMARY KEY (group_id, start_msg_id, end_msg_id, hash)
+        );
+        CREATE TABLE IF NOT EXISTS group_history_imports (
+            group_id INTEGER NOT NULL, message_id INTEGER NOT NULL, chunk_id INTEGER NOT NULL,
+            PRIMARY KEY (group_id, message_id)
+        );
+        CREATE TABLE IF NOT EXISTS group_history_imported_chunks (
+            group_id INTEGER NOT NULL, chunk_id INTEGER NOT NULL, hash BLOB NOT NULL,
+            PRIMARY KEY (group_id, chunk_id)
+        );
+        CREATE INDEX IF NOT EXISTS group_messages_channel_history ON group_messages(group_id, channel_id, id);
+        INSERT OR IGNORE INTO _schema_migrations(version, name, applied_at) VALUES (3, 'verified_history_v3', 0);
+    "#).await?;
+    pool.execute(r#"
+        CREATE TABLE IF NOT EXISTS group_pin_updates (
+            group_id INTEGER NOT NULL, message_id INTEGER NOT NULL, channel_id INTEGER NOT NULL,
+            event_id INTEGER NOT NULL, pinned INTEGER NOT NULL,
+            PRIMARY KEY(group_id, message_id, channel_id)
+        );
+        INSERT OR IGNORE INTO _schema_migrations(version,name,applied_at) VALUES(4,'shared_pins_v4',0);
+    "#).await?;
     Ok(())
 }
 

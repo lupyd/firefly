@@ -104,6 +104,20 @@ impl FireflyMlsRules {
         username: &str,
         data: &[u8],
     ) -> Result<(), MessagePermissionDenied> {
+        if let Ok(inner) = deserialize_proto::<firefly_protos::firefly::GroupMessageInner>(data) {
+            if let firefly_protos::firefly::mod_GroupMessageInner::OneOfmessage::pinSnapshot(snapshot) = inner.message {
+                let denied=||MessagePermissionDenied {permission:UserPermission::PinMessage,channel_id:inner.channelId};
+                if inner.message_type!=firefly_protos::MESSAGE_TYPE_HIDDEN || snapshot.messages.is_empty() || snapshot.messages.len()>100 || data.len()>4*1024*1024 {return Err(denied());}
+                for record in snapshot.messages {
+                    let record_inner=deserialize_proto::<firefly_protos::firefly::GroupMessageInner>(&record.message).map_err(|_|denied())?;
+                    let (channel,flags)=Self::message_metadata(&record.message);
+                    if flags & firefly_protos::MESSAGE_TYPE_HIDDEN!=0 || !matches!(record_inner.message,firefly_protos::firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(_)) {return Err(denied());}
+                    Self::require_message_permission(extension,username,channel,UserPermission::SeeMessage)?;
+                    Self::require_message_permission(extension,username,channel,UserPermission::PinMessage)?;
+                }
+                return Ok(());
+            }
+        }
         let (channel_id, message_type) = Self::message_metadata(data);
         Self::require_message_permission(
             extension,
@@ -111,6 +125,15 @@ impl FireflyMlsRules {
             channel_id,
             UserPermission::SeeMessage,
         )?;
+        if let Ok(inner) = deserialize_proto::<firefly_protos::firefly::GroupMessageInner>(data) {
+            if let firefly_protos::firefly::mod_GroupMessageInner::OneOfmessage::pinUpdate(update) = inner.message {
+                // Both pin and unpin are authenticated control events, never chat.
+                if update.message_id == 0 || inner.message_type != firefly_protos::MESSAGE_TYPE_HIDDEN {
+                    return Err(MessagePermissionDenied { permission: UserPermission::PinMessage, channel_id });
+                }
+                return Self::require_message_permission(extension, username, channel_id, UserPermission::PinMessage);
+            }
+        }
         Self::require_message_permission(
             extension,
             username,

@@ -55,6 +55,16 @@ export declare enum MeetingSignalType {
 }
 export declare function meetingSignalTypeFromJSON(object: any): MeetingSignalType;
 export declare function meetingSignalTypeToJSON(object: MeetingSignalType): string;
+export declare enum HistorySignalType {
+    HISTORY_SIGNAL_REQUEST_CREATED = 0,
+    HISTORY_SIGNAL_CHUNK_PUBLISHED = 1,
+    HISTORY_SIGNAL_CHUNK_DISAPPROVED = 2,
+    HISTORY_SIGNAL_REQUEST_FULFILLED = 3,
+    HISTORY_SIGNAL_CHUNK_VERIFIED = 4,
+    UNRECOGNIZED = -1
+}
+export declare function historySignalTypeFromJSON(object: any): HistorySignalType;
+export declare function historySignalTypeToJSON(object: HistorySignalType): string;
 export interface UserMessage {
     id: bigint;
     toId: bigint;
@@ -229,6 +239,14 @@ export interface Request {
     leaveMeeting?: LeaveMeetingRequest | undefined;
     endMeeting?: EndMeetingRequest | undefined;
     getActiveSession?: GetActiveSessionRequest | undefined;
+    createHistoryRequest?: CreateHistoryRequest | undefined;
+    claimHistoryRequest?: ClaimHistoryRequest | undefined;
+    publishHistoryChunk?: PublishHistoryChunkRequest | undefined;
+    disapproveHistoryChunk?: DisapproveHistoryChunkRequest | undefined;
+    getHistoryChunks?: GetHistoryChunksRequest | undefined;
+    getPendingHistoryRequests?: GetPendingHistoryRequests | undefined;
+    closeHistoryRequest?: CloseHistoryRequest | undefined;
+    approveHistoryChunk?: ApproveHistoryChunkRequest | undefined;
 }
 export interface Response {
     id: number;
@@ -243,6 +261,10 @@ export interface Response {
     createMeetingResponse?: CreateMeetingResponse | undefined;
     joinMeetingResponse?: JoinMeetingResponse | undefined;
     getActiveSessionResponse?: GetActiveSessionResponse | undefined;
+    getHistoryChunksResponse?: GetHistoryChunksResponse | undefined;
+    getPendingHistoryRequestsResponse?: GetPendingHistoryRequestsResponse | undefined;
+    historySuccess?: HistoryOperationSuccess | undefined;
+    claimHistoryResponse?: ClaimHistoryResponse | undefined;
 }
 export interface ServerMessage {
     userMessage?: UserMessage | undefined;
@@ -259,6 +281,7 @@ export interface ServerMessage {
     groupJoinRequests?: GroupJoinRequests | undefined;
     callSignal?: CallSignal | undefined;
     groupMeetingSignal?: GroupMeetingSignal | undefined;
+    groupHistorySignal?: GroupHistorySignal | undefined;
 }
 export interface ClientMessage {
     userMessage?: UserMessage | undefined;
@@ -385,8 +408,7 @@ export interface MessagePayload {
     editedOf?: bigint | undefined;
     replyingTo?: bigint | undefined;
     deleted?: bigint | undefined;
-    /** Optional for compatibility with callers predating pinned messages; defaults to zero. */
-    messageType?: number;
+    messageType: number;
 }
 export interface CallMessage {
     message: Buffer;
@@ -405,14 +427,21 @@ export interface UserMessageInner {
     messagePayload?: MessagePayload | undefined;
     selfMessage?: SelfUserMessage | undefined;
     nonce: number;
-    /** Optional for compatibility with callers predating pinned messages; defaults to zero. */
-    messageType?: number;
+    messageType: number;
+}
+export interface GroupPinUpdate {
+    messageId: bigint;
+    pinned: boolean;
+}
+export interface GroupPinSnapshot {
+    messages: GroupHistoryRecord[];
 }
 export interface GroupMessageInner {
     channelId: number;
     messagePayload?: MessagePayload | undefined;
-    /** Optional for compatibility with callers predating pinned messages; defaults to zero. */
-    messageType?: number;
+    pinUpdate?: GroupPinUpdate | undefined;
+    pinSnapshot?: GroupPinSnapshot | undefined;
+    messageType: number;
 }
 export interface RequestGroupReAdds {
     groupIds: bigint[];
@@ -506,6 +535,120 @@ export interface GroupMeetingSignal {
     username: string;
     cfMeetingId: string;
 }
+export interface GroupHistoryRequestItem {
+    id: bigint;
+    groupId: bigint;
+    requesterAddress: bigint;
+    requesterUsername: string;
+    startMsgId: bigint;
+    endMsgId: bigint;
+    /** 0=pending, 1=in_progress, 2=fulfilled, 3=closed */
+    status: number;
+    claimedBy: bigint;
+    createdAt: bigint;
+}
+export interface GroupHistoryChunkItem {
+    id: bigint;
+    groupId: bigint;
+    startMsgId: bigint;
+    endMsgId: bigint;
+    msgCount: number;
+    unencryptedHash: Buffer;
+    chunkUrl: string;
+    uploadedBy: string;
+    /** 0=valid, 1=disapproved */
+    status: number;
+    disapprovedBy: string;
+    disapprovedReason: string;
+    createdAt: bigint;
+    verified: boolean;
+}
+export interface GroupHistoryChunkKey {
+    groupId: bigint;
+    startMsgId: bigint;
+    endMsgId: bigint;
+    key: Buffer;
+    nonce: Buffer;
+    unencryptedHash: Buffer;
+}
+export interface GroupHistoryKeysPayload {
+    keys: GroupHistoryChunkKey[];
+    chunks: GroupHistoryChunkItem[];
+}
+export interface CreateHistoryRequest {
+    groupId: bigint;
+    startMsgId: bigint;
+    endMsgId: bigint;
+}
+export interface ClaimHistoryRequest {
+    groupId: bigint;
+    requestId: bigint;
+    startMsgId: bigint;
+    endMsgId: bigint;
+}
+export interface ClaimHistoryResponse {
+    granted: boolean;
+    message: string;
+}
+export interface PublishHistoryChunkRequest {
+    reserveOnly: boolean;
+    groupId: bigint;
+    startMsgId: bigint;
+    endMsgId: bigint;
+    msgCount: number;
+    unencryptedHash: Buffer;
+    chunkUrl: string;
+}
+export interface DisapproveHistoryChunkRequest {
+    groupId: bigint;
+    chunkId: bigint;
+    reason: string;
+}
+export interface GetHistoryChunksRequest {
+    groupId: bigint;
+    sinceMsgId: bigint;
+    untilMsgId: bigint;
+    includeUnverified: boolean;
+}
+export interface GetHistoryChunksResponse {
+    chunks: GroupHistoryChunkItem[];
+}
+export interface GetPendingHistoryRequests {
+    groupIds: bigint[];
+}
+export interface GetPendingHistoryRequestsResponse {
+    requests: GroupHistoryRequestItem[];
+}
+export interface CloseHistoryRequest {
+    groupId: bigint;
+    requestId: bigint;
+}
+export interface HistoryOperationSuccess {
+}
+export interface GroupHistorySignal {
+    groupId: bigint;
+    type: HistorySignalType;
+    requestId: bigint;
+    chunkId: bigint;
+    username: string;
+}
+/** Additive, versioned history envelope. Fields 1-4 retain the old record layout. */
+export interface GroupHistoryRecord {
+    id: bigint;
+    groupId: bigint;
+    message: Buffer;
+    epoch: number;
+    sender: string;
+}
+export interface GroupHistoryRecords {
+    messages: GroupHistoryRecord[];
+    formatVersion: number;
+}
+export interface ApproveHistoryChunkRequest {
+    groupId: bigint;
+    chunkId: bigint;
+    unencryptedHash: Buffer;
+}
 export declare const UserMessage: MessageFns<UserMessage>;
 export declare const Group: MessageFns<Group>;
 export declare const GroupDetails: MessageFns<GroupDetails>;
@@ -565,6 +708,8 @@ export declare const MessagePayload: MessageFns<MessagePayload>;
 export declare const CallMessage: MessageFns<CallMessage>;
 export declare const SelfUserMessage: MessageFns<SelfUserMessage>;
 export declare const UserMessageInner: MessageFns<UserMessageInner>;
+export declare const GroupPinUpdate: MessageFns<GroupPinUpdate>;
+export declare const GroupPinSnapshot: MessageFns<GroupPinSnapshot>;
 export declare const GroupMessageInner: MessageFns<GroupMessageInner>;
 export declare const RequestGroupReAdds: MessageFns<RequestGroupReAdds>;
 export declare const RequestGroupSync: MessageFns<RequestGroupSync>;
@@ -585,6 +730,25 @@ export declare const EndMeetingRequest: MessageFns<EndMeetingRequest>;
 export declare const GetActiveSessionRequest: MessageFns<GetActiveSessionRequest>;
 export declare const GetActiveSessionResponse: MessageFns<GetActiveSessionResponse>;
 export declare const GroupMeetingSignal: MessageFns<GroupMeetingSignal>;
+export declare const GroupHistoryRequestItem: MessageFns<GroupHistoryRequestItem>;
+export declare const GroupHistoryChunkItem: MessageFns<GroupHistoryChunkItem>;
+export declare const GroupHistoryChunkKey: MessageFns<GroupHistoryChunkKey>;
+export declare const GroupHistoryKeysPayload: MessageFns<GroupHistoryKeysPayload>;
+export declare const CreateHistoryRequest: MessageFns<CreateHistoryRequest>;
+export declare const ClaimHistoryRequest: MessageFns<ClaimHistoryRequest>;
+export declare const ClaimHistoryResponse: MessageFns<ClaimHistoryResponse>;
+export declare const PublishHistoryChunkRequest: MessageFns<PublishHistoryChunkRequest>;
+export declare const DisapproveHistoryChunkRequest: MessageFns<DisapproveHistoryChunkRequest>;
+export declare const GetHistoryChunksRequest: MessageFns<GetHistoryChunksRequest>;
+export declare const GetHistoryChunksResponse: MessageFns<GetHistoryChunksResponse>;
+export declare const GetPendingHistoryRequests: MessageFns<GetPendingHistoryRequests>;
+export declare const GetPendingHistoryRequestsResponse: MessageFns<GetPendingHistoryRequestsResponse>;
+export declare const CloseHistoryRequest: MessageFns<CloseHistoryRequest>;
+export declare const HistoryOperationSuccess: MessageFns<HistoryOperationSuccess>;
+export declare const GroupHistorySignal: MessageFns<GroupHistorySignal>;
+export declare const GroupHistoryRecord: MessageFns<GroupHistoryRecord>;
+export declare const GroupHistoryRecords: MessageFns<GroupHistoryRecords>;
+export declare const ApproveHistoryChunkRequest: MessageFns<ApproveHistoryChunkRequest>;
 type Builtin = Date | Function | Uint8Array | string | number | boolean | bigint | undefined;
 export type DeepPartial<T> = T extends bigint ? string | number | bigint : T extends Builtin ? T : T extends globalThis.Array<infer U> ? globalThis.Array<DeepPartial<U>> : T extends ReadonlyArray<infer U> ? ReadonlyArray<DeepPartial<U>> : T extends {} ? {
     [K in keyof T]?: DeepPartial<T[K]>;

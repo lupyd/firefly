@@ -139,6 +139,16 @@ impl GroupMessagesStore {
         message_type: u32,
     ) -> anyhow::Result<()> {
         let _pin_write = self.pin_writes.lock().await;
+        if let Ok(inner) = firefly_protos::deserialize_proto::<firefly_protos::firefly::GroupMessageInner>(message) {
+            if let firefly_protos::firefly::mod_GroupMessageInner::OneOfmessage::pinUpdate(update) = inner.message {
+                anyhow::ensure!(message_type == firefly_protos::MESSAGE_TYPE_HIDDEN && update.message_id > 0 && update.message_id < id && inner.channelId == channel_id, "Invalid shared pin event");
+                let mut tx = self.pool.begin().await?;
+                sqlx::query("INSERT INTO group_pin_updates(group_id,message_id,channel_id,event_id,pinned) VALUES(?,?,?,?,?) ON CONFLICT(group_id,message_id,channel_id) DO UPDATE SET event_id=excluded.event_id,pinned=excluded.pinned WHERE excluded.event_id>group_pin_updates.event_id")
+                    .bind(group_id as i64).bind(update.message_id as i64).bind(channel_id as i64).bind(id as i64).bind(update.pinned).execute(&mut *tx).await?;
+                Self::apply_pin_state(&mut tx, group_id, update.message_id).await?;
+                tx.commit().await?;
+            }
+        }
         let pinned = message_type & firefly_protos::MESSAGE_TYPE_PINNED != 0;
         let mut duplicates = Vec::new();
         let mut newest = id;
@@ -183,6 +193,15 @@ impl GroupMessagesStore {
         .execute(&self.pool)
         .await?;
 
+        {
+            let mut tx = self.pool.begin().await?;
+            Self::apply_pin_state(&mut tx, group_id, id).await?;
+            tx.commit().await?;
+        }
+
+        // A subsequently authenticated live receipt is independent evidence.
+        sqlx::query("DELETE FROM group_history_imports WHERE group_id=? AND message_id=?").bind(group_id as i64).bind(id as i64).execute(&self.pool).await?;
+
         // All insertion paths, including background re-adds and replayed/older
         // ciphertext, converge on the same highest-id pinned copy.
         for existing in duplicates.into_iter().filter(|m| m.id != newest) {
@@ -225,6 +244,61 @@ impl GroupMessagesStore {
         .await
     }
 
+
+    async fn apply_pin_state(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, group: u64, message: u64) -> anyhow::Result<()> {
+        sqlx::query("UPDATE group_messages SET message_type=(message_type & ~1) | (SELECT pinned FROM group_pin_updates p WHERE p.group_id=group_messages.group_id AND p.message_id=group_messages.id AND p.channel_id=group_messages.channel_id) WHERE group_id=? AND id=? AND (message_type & 2)=0 AND EXISTS(SELECT 1 FROM group_pin_updates p WHERE p.group_id=group_messages.group_id AND p.message_id=group_messages.id AND p.channel_id=group_messages.channel_id)")
+            .bind(group as i64).bind(message as i64).execute(&mut **tx).await?;
+        Ok(())
+    }
+
+    pub async fn get_message(&self, group: u64, id: u64) -> anyhow::Result<Option<GroupMessage>> {
+        let row=sqlx::query("SELECT id,by,message,channel_id,group_id,epoch,message_type FROM group_messages WHERE group_id=? AND id=?")
+            .bind(group as i64).bind(id as i64).fetch_optional(&self.pool).await?;
+        let Some(row)=row else {return Ok(None)};
+        Ok(self.visible_messages(vec![GroupMessage::from_row(&row)?]).await?.pop())
+    }
+
+    pub async fn get_channel_page(&self, group_id: u64, channel_id: u32, before: u64, limit: u32) -> anyhow::Result<Vec<GroupMessage>> {
+        anyhow::ensure!(limit > 0 && limit <= 101, "Invalid page size");
+        if !self.can_see_channel(group_id, channel_id).await? { return Ok(vec![]); }
+        let rows = sqlx::query("SELECT id,by,message,channel_id,group_id,epoch,message_type FROM group_messages WHERE group_id=? AND channel_id=? AND id<? AND (message_type & ?) = 0 ORDER BY id DESC LIMIT ?")
+            .bind(group_id as i64).bind(channel_id as i64).bind(before as i64).bind(firefly_protos::MESSAGE_TYPE_HIDDEN as i64).bind(limit as i64).fetch_all(&self.pool).await?;
+        self.visible_messages(rows.iter().map(GroupMessage::from_row).collect::<Result<Vec<_>,_>>()?).await
+    }
+    pub async fn authenticated_history_range(&self, group: u64, start: u64, end: u64, limit: u32) -> anyhow::Result<Vec<GroupMessage>> {
+        let rows = sqlx::query("SELECT m.id,m.by,m.message,m.channel_id,m.group_id,m.epoch,m.message_type FROM group_messages m WHERE m.group_id=? AND m.id>=? AND m.id<=? AND m.by!='' AND (m.message_type & ?) = 0 AND NOT EXISTS (SELECT 1 FROM group_history_imports h WHERE h.group_id=m.group_id AND h.message_id=m.id) ORDER BY m.id LIMIT ?")
+            .bind(group as i64).bind(start as i64).bind(end as i64).bind(firefly_protos::MESSAGE_TYPE_HIDDEN as i64).bind(limit as i64).fetch_all(&self.pool).await?;
+        rows.iter().map(GroupMessage::from_row).collect::<Result<Vec<_>,_>>().map_err(Into::into)
+    }
+    /// Only independently received messages may substantiate a peer vote.
+    pub async fn authenticated_history_ids(&self, group: u64, ids: &[u64]) -> anyhow::Result<Vec<GroupMessage>> {
+        anyhow::ensure!(!ids.is_empty() && ids.len() <= crate::history::DEFAULT_CHUNK_SIZE, "Invalid history evidence count");
+        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new("SELECT m.id,m.by,m.message,m.channel_id,m.group_id,m.epoch,m.message_type FROM group_messages m WHERE m.group_id=");
+        query.push_bind(group as i64).push(" AND m.by!='' AND NOT EXISTS (SELECT 1 FROM group_history_imports h WHERE h.group_id=m.group_id AND h.message_id=m.id) AND m.id IN (");
+        let mut values = query.separated(",");
+        for id in ids { values.push_bind(*id as i64); }
+        values.push_unseparated(") ORDER BY m.id");
+        let rows = query.build().fetch_all(&self.pool).await?;
+        rows.iter().map(GroupMessage::from_row).collect::<Result<Vec<_>,_>>().map_err(Into::into)
+    }
+    pub async fn import_verified_history(&self, group: u64, chunk: u64, hash: &[u8], records: &[GroupMessage]) -> anyhow::Result<usize> {
+        let _lock = self.pin_writes.lock().await;
+        let mut tx = self.pool.begin().await?;
+        let mut imported = 0;
+        for r in records {
+            anyhow::ensure!(r.group_id == group, "Foreign history record");
+            let changed = sqlx::query("INSERT INTO group_messages(id,group_id,by,message,channel_id,epoch,message_type,text) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(group_id,id) DO UPDATE SET by=excluded.by,message=excluded.message,channel_id=excluded.channel_id,epoch=excluded.epoch,message_type=excluded.message_type,text=excluded.text WHERE EXISTS(SELECT 1 FROM group_history_imports h WHERE h.group_id=group_messages.group_id AND h.message_id=group_messages.id AND h.chunk_id<>0) AND ?<>0")
+                .bind(r.id as i64).bind(group as i64).bind(&r.by).bind(&r.message).bind(r.channel_id as i64).bind(r.epoch as i64).bind(r.message_type as i64).bind(extract_group_message_text(&r.message)).bind(chunk as i64).execute(&mut *tx).await?.rows_affected();
+            if changed > 0 {
+                sqlx::query("INSERT INTO group_history_imports(group_id,message_id,chunk_id) VALUES(?,?,?) ON CONFLICT(group_id,message_id) DO UPDATE SET chunk_id=excluded.chunk_id").bind(group as i64).bind(r.id as i64).bind(chunk as i64).execute(&mut *tx).await?;
+                imported += 1;
+            }
+        }
+        for record in records { Self::apply_pin_state(&mut tx, group, record.id).await?; }
+        sqlx::query("INSERT OR IGNORE INTO group_history_imported_chunks(group_id,chunk_id,hash) VALUES(?,?,?)").bind(group as i64).bind(chunk as i64).bind(hash).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(imported)
+    }
     pub async fn get_range(
         &self,
         group_id: u64,

@@ -22,6 +22,26 @@ impl HistoryKeysStore {
         Ok(Self { pool })
     }
 
+
+    pub async fn save_verified_key(&self, group: u64, start: u64, end: u64, hash: &[u8], key: &[u8], nonce: &[u8]) -> anyhow::Result<()> {
+        anyhow::ensure!(group > 0 && start > 0 && end >= start && end <= i64::MAX as u64 && hash.len() == 32 && key.len() == 32 && nonce.len() == 12, "Invalid history key");
+        sqlx::query("INSERT OR IGNORE INTO group_history_keys_v3(group_id,start_msg_id,end_msg_id,hash,key,nonce) VALUES(?,?,?,?,?,?)")
+            .bind(group as i64).bind(start as i64).bind(end as i64).bind(hash).bind(key).bind(nonce).execute(&self.pool).await?;
+        Ok(())
+    }
+    pub async fn verified_material(&self, group: u64, start: u64, end: u64, hash: &[u8]) -> anyhow::Result<Option<(Vec<u8>,Vec<u8>)>> {
+        let row=sqlx::query("SELECT key,nonce FROM group_history_keys_v3 WHERE group_id=? AND start_msg_id=? AND end_msg_id=? AND hash=?")
+            .bind(group as i64).bind(start as i64).bind(end as i64).bind(hash).fetch_optional(&self.pool).await?;
+        row.map(|r| Ok((r.try_get(0)?,r.try_get(1)?))).transpose()
+    }
+    pub async fn verified_key(&self, group: u64, start: u64, end: u64, hash: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(sqlx::query_scalar("SELECT key FROM group_history_keys_v3 WHERE group_id=? AND start_msg_id=? AND end_msg_id=? AND hash=?")
+            .bind(group as i64).bind(start as i64).bind(end as i64).bind(hash).fetch_optional(&self.pool).await?)
+    }
+    pub async fn is_imported(&self, group: u64, chunk: u64, hash: &[u8]) -> anyhow::Result<bool> {
+        Ok(sqlx::query_scalar::<_,i64>("SELECT 1 FROM group_history_imported_chunks WHERE group_id=? AND chunk_id=? AND hash=?")
+            .bind(group as i64).bind(chunk as i64).bind(hash).fetch_optional(&self.pool).await?.is_some())
+    }
     pub async fn save_chunk_key(
         &self,
         group_id: u64,

@@ -1,16 +1,18 @@
-use std::io::{Read, Write};
+use std::io::Read;
 use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
-use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
 use crate::db::group_messages::GroupMessage;
 use crate::utils::{deserialize_proto, serialize_proto};
 
-pub const DEFAULT_CHUNK_SIZE: usize = 100;
+pub const DEFAULT_CHUNK_SIZE: usize = 1000;
+pub const MAX_CHUNK_PLAINTEXT: usize = 32 * 1024 * 1024;
+pub const MAX_CHUNK_BYTES: usize = MAX_CHUNK_PLAINTEXT + 65536;
+
 
 #[derive(Clone, Debug)]
 pub struct PackedChunk {
@@ -23,21 +25,33 @@ pub struct PackedChunk {
     pub blob: Vec<u8>,
 }
 
+fn check_plaintext_budget(messages: &[GroupMessage]) -> anyhow::Result<()> {
+    let size=messages.iter().try_fold(0usize, |size,m|size.checked_add(m.message.len())?.checked_add(m.by.len())?.checked_add(64));
+    anyhow::ensure!(size.is_some_and(|n|n<=MAX_CHUNK_PLAINTEXT), "History plaintext too large");
+    Ok(())
+}
+
 pub fn compute_unencrypted_hash(messages: &[GroupMessage]) -> anyhow::Result<Vec<u8>> {
+    check_plaintext_budget(messages)?;
     let pb_messages: Vec<_> = messages
         .iter()
-        .map(|m| firefly_protos::firefly::GroupMessage {
+        .map(|m| firefly_protos::firefly::GroupHistoryRecord {
             id: m.id,
-            groupId: m.group_id,
+            group_id: m.group_id,
+            sender: std::borrow::Cow::Borrowed(&m.by),
             message: std::borrow::Cow::Borrowed(&m.message),
-            epoch: m.epoch,
+            // Plaintext history needs no MLS epoch. Receipt-time local epochs
+            // can differ across peers and must not affect content consensus.
+            epoch: 0,
         })
         .collect();
 
-    let group_messages = firefly_protos::firefly::GroupMessages {
+    let group_messages = firefly_protos::firefly::GroupHistoryRecords {
+        format_version: 1,
         messages: pb_messages,
     };
     let unencrypted_bytes = serialize_proto(&group_messages)?;
+    anyhow::ensure!(unencrypted_bytes.len() <= MAX_CHUNK_PLAINTEXT, "History plaintext too large");
 
     let mut hasher = Sha256::new();
     hasher.update(&unencrypted_bytes);
@@ -45,37 +59,41 @@ pub fn compute_unencrypted_hash(messages: &[GroupMessage]) -> anyhow::Result<Vec
 }
 
 pub fn pack_messages_into_chunk(messages: &[GroupMessage]) -> anyhow::Result<PackedChunk> {
-    if messages.is_empty() {
+    if messages.is_empty() || messages.len() > DEFAULT_CHUNK_SIZE {
         return Err(anyhow::anyhow!("Cannot pack empty messages into a chunk"));
     }
 
+    check_plaintext_budget(messages)?;
     let start_msg_id = messages.first().unwrap().id;
     let end_msg_id = messages.last().unwrap().id;
     let msg_count = messages.len() as u32;
 
     let pb_messages: Vec<_> = messages
         .iter()
-        .map(|m| firefly_protos::firefly::GroupMessage {
+        .map(|m| firefly_protos::firefly::GroupHistoryRecord {
             id: m.id,
-            groupId: m.group_id,
+            group_id: m.group_id,
+            sender: std::borrow::Cow::Borrowed(&m.by),
             message: std::borrow::Cow::Borrowed(&m.message),
-            epoch: m.epoch,
+            // Plaintext history needs no MLS epoch. Receipt-time local epochs
+            // can differ across peers and must not affect content consensus.
+            epoch: 0,
         })
         .collect();
 
-    let group_messages = firefly_protos::firefly::GroupMessages {
+    let group_messages = firefly_protos::firefly::GroupHistoryRecords {
+        format_version: 1,
         messages: pb_messages,
     };
     let unencrypted_bytes = serialize_proto(&group_messages)?;
+    anyhow::ensure!(unencrypted_bytes.len() <= MAX_CHUNK_PLAINTEXT, "History plaintext too large");
 
     let mut hasher = Sha256::new();
     hasher.update(&unencrypted_bytes);
     let unencrypted_hash = hasher.finalize().to_vec();
 
     // 1. Compress
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(&unencrypted_bytes)?;
-    let compressed_bytes = encoder.finish()?;
+    let compressed_bytes = zstd::stream::encode_all(unencrypted_bytes.as_ref(), 3)?;
 
     // 2. Symmetric key generation (AES-256-GCM)
     let mut key = vec![0u8; 32];
@@ -112,7 +130,7 @@ pub fn decrypt_and_unpack_chunk(
     key: &[u8],
     expected_hash: &[u8],
 ) -> anyhow::Result<Vec<GroupMessage>> {
-    if blob.len() < 12 {
+    if blob.len() < 12 || blob.len() > MAX_CHUNK_BYTES {
         return Err(anyhow::anyhow!("Blob too small to contain 12-byte nonce"));
     }
 
@@ -124,9 +142,12 @@ pub fn decrypt_and_unpack_chunk(
         .decrypt(nonce, ciphertext)
         .map_err(|e| anyhow::anyhow!("Decryption failed: {e}"))?;
 
-    let mut decoder = GzDecoder::new(&compressed_bytes[..]);
+    let mut decoder = zstd::stream::read::Decoder::new(&compressed_bytes[..])?;
+    // Cap both the decoder window and expanded plaintext, independently.
+    decoder.window_log_max(25)?;
     let mut unencrypted_bytes = Vec::new();
-    decoder.read_to_end(&mut unencrypted_bytes)?;
+    decoder.take((MAX_CHUNK_PLAINTEXT + 1) as u64).read_to_end(&mut unencrypted_bytes)?;
+    anyhow::ensure!(unencrypted_bytes.len() <= MAX_CHUNK_PLAINTEXT, "History expansion limit exceeded");
 
     let mut hasher = Sha256::new();
     hasher.update(&unencrypted_bytes);
@@ -141,7 +162,9 @@ pub fn decrypt_and_unpack_chunk(
     }
 
     let pb_messages =
-        deserialize_proto::<firefly_protos::firefly::GroupMessages>(&unencrypted_bytes)?;
+        deserialize_proto::<firefly_protos::firefly::GroupHistoryRecords>(&unencrypted_bytes)?;
+    anyhow::ensure!(pb_messages.format_version == 1, "Unsupported history format");
+    anyhow::ensure!(!pb_messages.messages.is_empty() && pb_messages.messages.len() <= DEFAULT_CHUNK_SIZE, "Invalid history count");
 
     let mut result = Vec::with_capacity(pb_messages.messages.len());
     for m in pb_messages.messages {
@@ -163,8 +186,8 @@ pub fn decrypt_and_unpack_chunk(
 
         result.push(GroupMessage {
             id: m.id,
-            group_id: m.groupId,
-            by: String::new(),
+            group_id: m.group_id,
+            by: m.sender.into_owned(),
             message: m.message.to_vec(),
             channel_id,
             epoch: m.epoch,
@@ -173,6 +196,35 @@ pub fn decrypt_and_unpack_chunk(
     }
 
     Ok(result)
+}
+
+
+/// Validate the entire chunk before any database writes. Hash integrity alone
+/// does not bind publisher-controlled records to the requested group or range.
+pub fn validate_chunk_records(records: &[GroupMessage], group_id: u64, start: u64, end: u64, count: u32) -> anyhow::Result<()> {
+    anyhow::ensure!(group_id > 0 && group_id <= i64::MAX as u64 && start > 0 && end >= start && end <= i64::MAX as u64, "Invalid history range");
+    anyhow::ensure!(records.len() == count as usize && count > 0 && count as usize <= DEFAULT_CHUNK_SIZE, "History count mismatch");
+    anyhow::ensure!(records.first().map(|r| r.id) == Some(start) && records.last().map(|r| r.id) == Some(end), "History boundary mismatch");
+    let mut previous = 0;
+    for record in records {
+        anyhow::ensure!(record.group_id == group_id && record.id > previous && record.id >= start && record.id <= end, "Foreign, duplicate or unordered history record");
+        anyhow::ensure!(!record.by.is_empty() && record.by.len() <= 256, "Missing history sender");
+        let inner = deserialize_proto::<firefly_protos::firefly::GroupMessageInner>(&record.message)?;
+        anyhow::ensure!(inner.channelId == record.channel_id && record.message_type & firefly_protos::MESSAGE_TYPE_HIDDEN == 0, "Invalid history channel/type");
+        previous = record.id;
+    }
+    Ok(())
+}
+
+/// Download only from the configured CDN, with no credentials or key in URL.
+pub fn history_chunk_url(base: &str, value: &str, group_id: u64) -> anyhow::Result<reqwest::Url> {
+    let base = reqwest::Url::parse(base)?;
+    let url = base.join(value)?;
+    let prefix = format!("{}/group_chunks/{}/", base.path().trim_end_matches('/'), group_id);
+    let id = url.path().strip_prefix(&prefix).unwrap_or_default();
+    let dev_http = base.scheme() == "http" && (base.host_str() == Some("localhost") || base.host_str().and_then(|h| h.parse::<std::net::IpAddr>().ok()).is_some_and(|ip| ip.is_loopback() || matches!(ip, std::net::IpAddr::V4(v) if v.is_private())));
+    anyhow::ensure!(url.origin() == base.origin() && (url.scheme() == "https" || dev_http) && url.username().is_empty() && url.password().is_none() && url.query().is_none() && url.fragment().is_none() && id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()), "Untrusted history URL");
+    Ok(url)
 }
 
 #[cfg(test)]
@@ -260,3 +312,20 @@ mod tests {
         assert!(result.is_err(), "corrupted ciphertext must fail decryption");
     }
 }
+
+/// Credential-free, bounded fetch shared by runtime and security tests.
+pub async fn download_history_blob(base: &str, group_id: u64, url_or_path: &str) -> anyhow::Result<Vec<u8>> {
+        let url = history_chunk_url(base, url_or_path, group_id)?;
+        // Encrypted chunks are public opaque blobs. Never send an account bearer
+        // token or decryption key to the CDN, including on redirects.
+        let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(30)).build()?;
+        let mut response = client.get(url).send().await?;
+        anyhow::ensure!(response.status().is_success(), "History download failed: {}", response.status());
+        anyhow::ensure!(response.content_length().unwrap_or(0) <= MAX_CHUNK_BYTES as u64, "History blob too large");
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            anyhow::ensure!(bytes.len() + chunk.len() <= MAX_CHUNK_BYTES, "History blob exceeds limit");
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    }
