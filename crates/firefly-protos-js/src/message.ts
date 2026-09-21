@@ -703,11 +703,17 @@ export interface SelfUserMessage {
   inner: Uint8Array;
 }
 
+export interface Reaction {
+  reactingTo: bigint;
+  reaction: number;
+}
+
 export interface UserMessageInner {
   plainText?: Uint8Array | undefined;
   callMessage?: CallMessage | undefined;
   messagePayload?: MessagePayload | undefined;
   selfMessage?: SelfUserMessage | undefined;
+  reaction?: Reaction | undefined;
   nonce: number;
   messageType: number;
 }
@@ -726,6 +732,8 @@ export interface GroupMessageInner {
   messagePayload?: MessagePayload | undefined;
   pinUpdate?: GroupPinUpdate | undefined;
   pinSnapshot?: GroupPinSnapshot | undefined;
+  syncBundle?: GroupSyncBundle | undefined;
+  reaction?: Reaction | undefined;
   messageType: number;
 }
 
@@ -975,6 +983,31 @@ export interface ApproveHistoryChunkRequest {
   groupId: bigint;
   chunkId: bigint;
   unencryptedHash: Uint8Array;
+}
+
+/** Secrets travel ONLY in an authenticated MLS hidden message, never in HTTP URLs. */
+export interface GroupSnapshotSecret {
+  /** 1=pins, 2=recent messages */
+  kind: number;
+  snapshotId: string;
+  key: Uint8Array;
+  plaintextHash: Uint8Array;
+  ciphertextHash: Uint8Array;
+  messageCount: number;
+  startId: bigint;
+  endId: bigint;
+}
+
+export interface GroupSyncBundle {
+  formatVersion: number;
+  groupId: bigint;
+  pinned: GroupSnapshotSecret | undefined;
+  recent: GroupSnapshotSecret | undefined;
+  keys: GroupHistoryChunkKey[];
+  chunks: GroupHistoryChunkItem[];
+  bundleId: string;
+  page: number;
+  lastPage: boolean;
 }
 
 function createBaseUserMessage(): UserMessage {
@@ -8403,12 +8436,107 @@ export const SelfUserMessage: MessageFns<SelfUserMessage> = {
   },
 };
 
+function createBaseReaction(): Reaction {
+  return { reactingTo: 0n, reaction: 0 };
+}
+
+export const Reaction: MessageFns<Reaction> = {
+  encode(message: Reaction, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.reactingTo !== 0n) {
+      if (BigInt.asUintN(64, message.reactingTo) !== message.reactingTo) {
+        throw new globalThis.Error("value provided for field message.reactingTo of type uint64 too large");
+      }
+      writer.uint32(8).uint64(message.reactingTo);
+    }
+    if (message.reaction !== 0) {
+      writer.uint32(16).uint32(message.reaction);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): Reaction {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseReaction();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 8) {
+              break;
+            }
+
+            message.reactingTo = reader.uint64() as bigint;
+            continue;
+          }
+          case 2: {
+            if (tag !== 16) {
+              break;
+            }
+
+            message.reaction = reader.uint32();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): Reaction {
+    return {
+      reactingTo: isSet(object.reactingTo)
+        ? BigInt(object.reactingTo)
+        : isSet(object.reacting_to)
+        ? BigInt(object.reacting_to)
+        : 0n,
+      reaction: isSet(object.reaction) ? globalThis.Number(object.reaction) : 0,
+    };
+  },
+
+  toJSON(message: Reaction): unknown {
+    const obj: any = {};
+    if (message.reactingTo !== 0n) {
+      obj.reactingTo = message.reactingTo.toString();
+    }
+    if (message.reaction !== 0) {
+      obj.reaction = Math.round(message.reaction);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<Reaction>, I>>(base?: I): Reaction {
+    return Reaction.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<Reaction>, I>>(object: I): Reaction {
+    const message = createBaseReaction();
+    message.reactingTo = (object.reactingTo !== undefined && object.reactingTo !== null)
+      ? BigInt(object.reactingTo)
+      : 0n;
+    message.reaction = object.reaction ?? 0;
+    return message;
+  },
+};
+
 function createBaseUserMessageInner(): UserMessageInner {
   return {
     plainText: undefined,
     callMessage: undefined,
     messagePayload: undefined,
     selfMessage: undefined,
+    reaction: undefined,
     nonce: 0,
     messageType: 0,
   };
@@ -8427,6 +8555,9 @@ export const UserMessageInner: MessageFns<UserMessageInner> = {
     }
     if (message.selfMessage !== undefined) {
       SelfUserMessage.encode(message.selfMessage, writer.uint32(34).fork()).join();
+    }
+    if (message.reaction !== undefined) {
+      Reaction.encode(message.reaction, writer.uint32(50).fork()).join();
     }
     if (message.nonce !== 0) {
       writer.uint32(85).fixed32(message.nonce);
@@ -8482,6 +8613,14 @@ export const UserMessageInner: MessageFns<UserMessageInner> = {
             message.selfMessage = SelfUserMessage.decode(reader, reader.uint32());
             continue;
           }
+          case 6: {
+            if (tag !== 50) {
+              break;
+            }
+
+            message.reaction = Reaction.decode(reader, reader.uint32());
+            continue;
+          }
           case 10: {
             if (tag !== 85) {
               break;
@@ -8516,6 +8655,7 @@ export const UserMessageInner: MessageFns<UserMessageInner> = {
       callMessage: isSet(object.callMessage) ? CallMessage.fromJSON(object.callMessage) : undefined,
       messagePayload: isSet(object.messagePayload) ? MessagePayload.fromJSON(object.messagePayload) : undefined,
       selfMessage: isSet(object.selfMessage) ? SelfUserMessage.fromJSON(object.selfMessage) : undefined,
+      reaction: isSet(object.reaction) ? Reaction.fromJSON(object.reaction) : undefined,
       nonce: isSet(object.nonce) ? globalThis.Number(object.nonce) : 0,
       messageType: isSet(object.messageType)
         ? globalThis.Number(object.messageType)
@@ -8538,6 +8678,9 @@ export const UserMessageInner: MessageFns<UserMessageInner> = {
     }
     if (message.selfMessage !== undefined) {
       obj.selfMessage = SelfUserMessage.toJSON(message.selfMessage);
+    }
+    if (message.reaction !== undefined) {
+      obj.reaction = Reaction.toJSON(message.reaction);
     }
     if (message.nonce !== 0) {
       obj.nonce = Math.round(message.nonce);
@@ -8562,6 +8705,9 @@ export const UserMessageInner: MessageFns<UserMessageInner> = {
       : undefined;
     message.selfMessage = (object.selfMessage !== undefined && object.selfMessage !== null)
       ? SelfUserMessage.fromPartial(object.selfMessage)
+      : undefined;
+    message.reaction = (object.reaction !== undefined && object.reaction !== null)
+      ? Reaction.fromPartial(object.reaction)
       : undefined;
     message.nonce = object.nonce ?? 0;
     message.messageType = object.messageType ?? 0;
@@ -8733,7 +8879,15 @@ export const GroupPinSnapshot: MessageFns<GroupPinSnapshot> = {
 };
 
 function createBaseGroupMessageInner(): GroupMessageInner {
-  return { channelId: 0, messagePayload: undefined, pinUpdate: undefined, pinSnapshot: undefined, messageType: 0 };
+  return {
+    channelId: 0,
+    messagePayload: undefined,
+    pinUpdate: undefined,
+    pinSnapshot: undefined,
+    syncBundle: undefined,
+    reaction: undefined,
+    messageType: 0,
+  };
 }
 
 export const GroupMessageInner: MessageFns<GroupMessageInner> = {
@@ -8749,6 +8903,12 @@ export const GroupMessageInner: MessageFns<GroupMessageInner> = {
     }
     if (message.pinSnapshot !== undefined) {
       GroupPinSnapshot.encode(message.pinSnapshot, writer.uint32(42).fork()).join();
+    }
+    if (message.syncBundle !== undefined) {
+      GroupSyncBundle.encode(message.syncBundle, writer.uint32(50).fork()).join();
+    }
+    if (message.reaction !== undefined) {
+      Reaction.encode(message.reaction, writer.uint32(58).fork()).join();
     }
     if (message.messageType !== 0) {
       writer.uint32(24).uint32(message.messageType);
@@ -8801,6 +8961,22 @@ export const GroupMessageInner: MessageFns<GroupMessageInner> = {
             message.pinSnapshot = GroupPinSnapshot.decode(reader, reader.uint32());
             continue;
           }
+          case 6: {
+            if (tag !== 50) {
+              break;
+            }
+
+            message.syncBundle = GroupSyncBundle.decode(reader, reader.uint32());
+            continue;
+          }
+          case 7: {
+            if (tag !== 58) {
+              break;
+            }
+
+            message.reaction = Reaction.decode(reader, reader.uint32());
+            continue;
+          }
           case 3: {
             if (tag !== 24) {
               break;
@@ -8827,6 +9003,8 @@ export const GroupMessageInner: MessageFns<GroupMessageInner> = {
       messagePayload: isSet(object.messagePayload) ? MessagePayload.fromJSON(object.messagePayload) : undefined,
       pinUpdate: isSet(object.pinUpdate) ? GroupPinUpdate.fromJSON(object.pinUpdate) : undefined,
       pinSnapshot: isSet(object.pinSnapshot) ? GroupPinSnapshot.fromJSON(object.pinSnapshot) : undefined,
+      syncBundle: isSet(object.syncBundle) ? GroupSyncBundle.fromJSON(object.syncBundle) : undefined,
+      reaction: isSet(object.reaction) ? Reaction.fromJSON(object.reaction) : undefined,
       messageType: isSet(object.messageType)
         ? globalThis.Number(object.messageType)
         : isSet(object.message_type)
@@ -8849,6 +9027,12 @@ export const GroupMessageInner: MessageFns<GroupMessageInner> = {
     if (message.pinSnapshot !== undefined) {
       obj.pinSnapshot = GroupPinSnapshot.toJSON(message.pinSnapshot);
     }
+    if (message.syncBundle !== undefined) {
+      obj.syncBundle = GroupSyncBundle.toJSON(message.syncBundle);
+    }
+    if (message.reaction !== undefined) {
+      obj.reaction = Reaction.toJSON(message.reaction);
+    }
     if (message.messageType !== 0) {
       obj.messageType = Math.round(message.messageType);
     }
@@ -8869,6 +9053,12 @@ export const GroupMessageInner: MessageFns<GroupMessageInner> = {
       : undefined;
     message.pinSnapshot = (object.pinSnapshot !== undefined && object.pinSnapshot !== null)
       ? GroupPinSnapshot.fromPartial(object.pinSnapshot)
+      : undefined;
+    message.syncBundle = (object.syncBundle !== undefined && object.syncBundle !== null)
+      ? GroupSyncBundle.fromPartial(object.syncBundle)
+      : undefined;
+    message.reaction = (object.reaction !== undefined && object.reaction !== null)
+      ? Reaction.fromPartial(object.reaction)
       : undefined;
     message.messageType = object.messageType ?? 0;
     return message;
@@ -13278,6 +13468,446 @@ export const ApproveHistoryChunkRequest: MessageFns<ApproveHistoryChunkRequest> 
     message.groupId = (object.groupId !== undefined && object.groupId !== null) ? BigInt(object.groupId) : 0n;
     message.chunkId = (object.chunkId !== undefined && object.chunkId !== null) ? BigInt(object.chunkId) : 0n;
     message.unencryptedHash = object.unencryptedHash ?? new Uint8Array(0);
+    return message;
+  },
+};
+
+function createBaseGroupSnapshotSecret(): GroupSnapshotSecret {
+  return {
+    kind: 0,
+    snapshotId: "",
+    key: new Uint8Array(0),
+    plaintextHash: new Uint8Array(0),
+    ciphertextHash: new Uint8Array(0),
+    messageCount: 0,
+    startId: 0n,
+    endId: 0n,
+  };
+}
+
+export const GroupSnapshotSecret: MessageFns<GroupSnapshotSecret> = {
+  encode(message: GroupSnapshotSecret, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.kind !== 0) {
+      writer.uint32(8).uint32(message.kind);
+    }
+    if (message.snapshotId !== "") {
+      writer.uint32(18).string(message.snapshotId);
+    }
+    if (message.key.length !== 0) {
+      writer.uint32(26).bytes(message.key);
+    }
+    if (message.plaintextHash.length !== 0) {
+      writer.uint32(34).bytes(message.plaintextHash);
+    }
+    if (message.ciphertextHash.length !== 0) {
+      writer.uint32(42).bytes(message.ciphertextHash);
+    }
+    if (message.messageCount !== 0) {
+      writer.uint32(48).uint32(message.messageCount);
+    }
+    if (message.startId !== 0n) {
+      if (BigInt.asUintN(64, message.startId) !== message.startId) {
+        throw new globalThis.Error("value provided for field message.startId of type uint64 too large");
+      }
+      writer.uint32(56).uint64(message.startId);
+    }
+    if (message.endId !== 0n) {
+      if (BigInt.asUintN(64, message.endId) !== message.endId) {
+        throw new globalThis.Error("value provided for field message.endId of type uint64 too large");
+      }
+      writer.uint32(64).uint64(message.endId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GroupSnapshotSecret {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseGroupSnapshotSecret();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 8) {
+              break;
+            }
+
+            message.kind = reader.uint32();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.snapshotId = reader.string();
+            continue;
+          }
+          case 3: {
+            if (tag !== 26) {
+              break;
+            }
+
+            message.key = reader.bytes();
+            continue;
+          }
+          case 4: {
+            if (tag !== 34) {
+              break;
+            }
+
+            message.plaintextHash = reader.bytes();
+            continue;
+          }
+          case 5: {
+            if (tag !== 42) {
+              break;
+            }
+
+            message.ciphertextHash = reader.bytes();
+            continue;
+          }
+          case 6: {
+            if (tag !== 48) {
+              break;
+            }
+
+            message.messageCount = reader.uint32();
+            continue;
+          }
+          case 7: {
+            if (tag !== 56) {
+              break;
+            }
+
+            message.startId = reader.uint64() as bigint;
+            continue;
+          }
+          case 8: {
+            if (tag !== 64) {
+              break;
+            }
+
+            message.endId = reader.uint64() as bigint;
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): GroupSnapshotSecret {
+    return {
+      kind: isSet(object.kind) ? globalThis.Number(object.kind) : 0,
+      snapshotId: isSet(object.snapshotId)
+        ? globalThis.String(object.snapshotId)
+        : isSet(object.snapshot_id)
+        ? globalThis.String(object.snapshot_id)
+        : "",
+      key: isSet(object.key) ? bytesFromBase64(object.key) : new Uint8Array(0),
+      plaintextHash: isSet(object.plaintextHash)
+        ? bytesFromBase64(object.plaintextHash)
+        : isSet(object.plaintext_hash)
+        ? bytesFromBase64(object.plaintext_hash)
+        : new Uint8Array(0),
+      ciphertextHash: isSet(object.ciphertextHash)
+        ? bytesFromBase64(object.ciphertextHash)
+        : isSet(object.ciphertext_hash)
+        ? bytesFromBase64(object.ciphertext_hash)
+        : new Uint8Array(0),
+      messageCount: isSet(object.messageCount)
+        ? globalThis.Number(object.messageCount)
+        : isSet(object.message_count)
+        ? globalThis.Number(object.message_count)
+        : 0,
+      startId: isSet(object.startId) ? BigInt(object.startId) : isSet(object.start_id) ? BigInt(object.start_id) : 0n,
+      endId: isSet(object.endId) ? BigInt(object.endId) : isSet(object.end_id) ? BigInt(object.end_id) : 0n,
+    };
+  },
+
+  toJSON(message: GroupSnapshotSecret): unknown {
+    const obj: any = {};
+    if (message.kind !== 0) {
+      obj.kind = Math.round(message.kind);
+    }
+    if (message.snapshotId !== "") {
+      obj.snapshotId = message.snapshotId;
+    }
+    if (message.key.length !== 0) {
+      obj.key = base64FromBytes(message.key);
+    }
+    if (message.plaintextHash.length !== 0) {
+      obj.plaintextHash = base64FromBytes(message.plaintextHash);
+    }
+    if (message.ciphertextHash.length !== 0) {
+      obj.ciphertextHash = base64FromBytes(message.ciphertextHash);
+    }
+    if (message.messageCount !== 0) {
+      obj.messageCount = Math.round(message.messageCount);
+    }
+    if (message.startId !== 0n) {
+      obj.startId = message.startId.toString();
+    }
+    if (message.endId !== 0n) {
+      obj.endId = message.endId.toString();
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GroupSnapshotSecret>, I>>(base?: I): GroupSnapshotSecret {
+    return GroupSnapshotSecret.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GroupSnapshotSecret>, I>>(object: I): GroupSnapshotSecret {
+    const message = createBaseGroupSnapshotSecret();
+    message.kind = object.kind ?? 0;
+    message.snapshotId = object.snapshotId ?? "";
+    message.key = object.key ?? new Uint8Array(0);
+    message.plaintextHash = object.plaintextHash ?? new Uint8Array(0);
+    message.ciphertextHash = object.ciphertextHash ?? new Uint8Array(0);
+    message.messageCount = object.messageCount ?? 0;
+    message.startId = (object.startId !== undefined && object.startId !== null) ? BigInt(object.startId) : 0n;
+    message.endId = (object.endId !== undefined && object.endId !== null) ? BigInt(object.endId) : 0n;
+    return message;
+  },
+};
+
+function createBaseGroupSyncBundle(): GroupSyncBundle {
+  return {
+    formatVersion: 0,
+    groupId: 0n,
+    pinned: undefined,
+    recent: undefined,
+    keys: [],
+    chunks: [],
+    bundleId: "",
+    page: 0,
+    lastPage: false,
+  };
+}
+
+export const GroupSyncBundle: MessageFns<GroupSyncBundle> = {
+  encode(message: GroupSyncBundle, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.formatVersion !== 0) {
+      writer.uint32(8).uint32(message.formatVersion);
+    }
+    if (message.groupId !== 0n) {
+      if (BigInt.asUintN(64, message.groupId) !== message.groupId) {
+        throw new globalThis.Error("value provided for field message.groupId of type uint64 too large");
+      }
+      writer.uint32(16).uint64(message.groupId);
+    }
+    if (message.pinned !== undefined) {
+      GroupSnapshotSecret.encode(message.pinned, writer.uint32(26).fork()).join();
+    }
+    if (message.recent !== undefined) {
+      GroupSnapshotSecret.encode(message.recent, writer.uint32(34).fork()).join();
+    }
+    for (const v of message.keys) {
+      GroupHistoryChunkKey.encode(v!, writer.uint32(42).fork()).join();
+    }
+    for (const v of message.chunks) {
+      GroupHistoryChunkItem.encode(v!, writer.uint32(50).fork()).join();
+    }
+    if (message.bundleId !== "") {
+      writer.uint32(58).string(message.bundleId);
+    }
+    if (message.page !== 0) {
+      writer.uint32(64).uint32(message.page);
+    }
+    if (message.lastPage !== false) {
+      writer.uint32(72).bool(message.lastPage);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GroupSyncBundle {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseGroupSyncBundle();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 8) {
+              break;
+            }
+
+            message.formatVersion = reader.uint32();
+            continue;
+          }
+          case 2: {
+            if (tag !== 16) {
+              break;
+            }
+
+            message.groupId = reader.uint64() as bigint;
+            continue;
+          }
+          case 3: {
+            if (tag !== 26) {
+              break;
+            }
+
+            message.pinned = GroupSnapshotSecret.decode(reader, reader.uint32());
+            continue;
+          }
+          case 4: {
+            if (tag !== 34) {
+              break;
+            }
+
+            message.recent = GroupSnapshotSecret.decode(reader, reader.uint32());
+            continue;
+          }
+          case 5: {
+            if (tag !== 42) {
+              break;
+            }
+
+            message.keys.push(GroupHistoryChunkKey.decode(reader, reader.uint32()));
+            continue;
+          }
+          case 6: {
+            if (tag !== 50) {
+              break;
+            }
+
+            message.chunks.push(GroupHistoryChunkItem.decode(reader, reader.uint32()));
+            continue;
+          }
+          case 7: {
+            if (tag !== 58) {
+              break;
+            }
+
+            message.bundleId = reader.string();
+            continue;
+          }
+          case 8: {
+            if (tag !== 64) {
+              break;
+            }
+
+            message.page = reader.uint32();
+            continue;
+          }
+          case 9: {
+            if (tag !== 72) {
+              break;
+            }
+
+            message.lastPage = reader.bool();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): GroupSyncBundle {
+    return {
+      formatVersion: isSet(object.formatVersion)
+        ? globalThis.Number(object.formatVersion)
+        : isSet(object.format_version)
+        ? globalThis.Number(object.format_version)
+        : 0,
+      groupId: isSet(object.groupId) ? BigInt(object.groupId) : isSet(object.group_id) ? BigInt(object.group_id) : 0n,
+      pinned: isSet(object.pinned) ? GroupSnapshotSecret.fromJSON(object.pinned) : undefined,
+      recent: isSet(object.recent) ? GroupSnapshotSecret.fromJSON(object.recent) : undefined,
+      keys: globalThis.Array.isArray(object?.keys) ? object.keys.map((e: any) => GroupHistoryChunkKey.fromJSON(e)) : [],
+      chunks: globalThis.Array.isArray(object?.chunks)
+        ? object.chunks.map((e: any) => GroupHistoryChunkItem.fromJSON(e))
+        : [],
+      bundleId: isSet(object.bundleId)
+        ? globalThis.String(object.bundleId)
+        : isSet(object.bundle_id)
+        ? globalThis.String(object.bundle_id)
+        : "",
+      page: isSet(object.page) ? globalThis.Number(object.page) : 0,
+      lastPage: isSet(object.lastPage)
+        ? globalThis.Boolean(object.lastPage)
+        : isSet(object.last_page)
+        ? globalThis.Boolean(object.last_page)
+        : false,
+    };
+  },
+
+  toJSON(message: GroupSyncBundle): unknown {
+    const obj: any = {};
+    if (message.formatVersion !== 0) {
+      obj.formatVersion = Math.round(message.formatVersion);
+    }
+    if (message.groupId !== 0n) {
+      obj.groupId = message.groupId.toString();
+    }
+    if (message.pinned !== undefined) {
+      obj.pinned = GroupSnapshotSecret.toJSON(message.pinned);
+    }
+    if (message.recent !== undefined) {
+      obj.recent = GroupSnapshotSecret.toJSON(message.recent);
+    }
+    if (message.keys?.length) {
+      obj.keys = message.keys.map((e) => GroupHistoryChunkKey.toJSON(e));
+    }
+    if (message.chunks?.length) {
+      obj.chunks = message.chunks.map((e) => GroupHistoryChunkItem.toJSON(e));
+    }
+    if (message.bundleId !== "") {
+      obj.bundleId = message.bundleId;
+    }
+    if (message.page !== 0) {
+      obj.page = Math.round(message.page);
+    }
+    if (message.lastPage !== false) {
+      obj.lastPage = message.lastPage;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GroupSyncBundle>, I>>(base?: I): GroupSyncBundle {
+    return GroupSyncBundle.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GroupSyncBundle>, I>>(object: I): GroupSyncBundle {
+    const message = createBaseGroupSyncBundle();
+    message.formatVersion = object.formatVersion ?? 0;
+    message.groupId = (object.groupId !== undefined && object.groupId !== null) ? BigInt(object.groupId) : 0n;
+    message.pinned = (object.pinned !== undefined && object.pinned !== null)
+      ? GroupSnapshotSecret.fromPartial(object.pinned)
+      : undefined;
+    message.recent = (object.recent !== undefined && object.recent !== null)
+      ? GroupSnapshotSecret.fromPartial(object.recent)
+      : undefined;
+    message.keys = object.keys?.map((e) => GroupHistoryChunkKey.fromPartial(e)) || [];
+    message.chunks = object.chunks?.map((e) => GroupHistoryChunkItem.fromPartial(e)) || [];
+    message.bundleId = object.bundleId ?? "";
+    message.page = object.page ?? 0;
+    message.lastPage = object.lastPage ?? false;
     return message;
   },
 };

@@ -458,12 +458,19 @@ message SelfUserMessage {
   bytes inner = 2; // UserMessageInner encrypted
 }
 
+
+message Reaction {
+  uint64 reacting_to = 1;
+  uint32 reaction = 2;
+}
+
 message UserMessageInner {
   oneof message {
     bytes plainText = 1;
     CallMessage callMessage = 2;
     MessagePayload messagePayload = 3;
     SelfUserMessage selfMessage = 4;
+    Reaction reaction = 6;
   }
 
   fixed32 nonce = 10;
@@ -485,6 +492,8 @@ message GroupMessageInner {
     MessagePayload messagePayload = 2;
     GroupPinUpdate pinUpdate = 4;
     GroupPinSnapshot pinSnapshot = 5;
+    GroupSyncBundle syncBundle = 6;
+    Reaction reaction = 7;
   }
   uint32 message_type = 3;
 }
@@ -742,4 +751,27 @@ message ApproveHistoryChunkRequest {
   uint64 group_id = 1;
   uint64 chunk_id = 2;
   bytes unencrypted_hash = 3;
+}
+
+// Secrets travel ONLY in an authenticated MLS hidden message, never in HTTP URLs.
+message GroupSnapshotSecret {
+  uint32 kind = 1; // 1=pins, 2=recent messages
+  string snapshot_id = 2;
+  bytes key = 3;
+  bytes plaintext_hash = 4;
+  bytes ciphertext_hash = 5;
+  uint32 message_count = 6;
+  uint64 start_id = 7;
+  uint64 end_id = 8;
+}
+message GroupSyncBundle {
+  uint32 format_version = 1;
+  uint64 group_id = 2;
+  GroupSnapshotSecret pinned = 3;
+  GroupSnapshotSecret recent = 4;
+  repeated GroupHistoryChunkKey keys = 5;
+  repeated GroupHistoryChunkItem chunks = 6;
+  string bundle_id = 7;
+  uint32 page = 8;
+  bool last_page = 9;
 }

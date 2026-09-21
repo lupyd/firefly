@@ -421,11 +421,16 @@ export interface SelfUserMessage {
     /** UserMessageInner encrypted */
     inner: Buffer;
 }
+export interface Reaction {
+    reactingTo: bigint;
+    reaction: number;
+}
 export interface UserMessageInner {
     plainText?: Buffer | undefined;
     callMessage?: CallMessage | undefined;
     messagePayload?: MessagePayload | undefined;
     selfMessage?: SelfUserMessage | undefined;
+    reaction?: Reaction | undefined;
     nonce: number;
     messageType: number;
 }
@@ -441,6 +446,8 @@ export interface GroupMessageInner {
     messagePayload?: MessagePayload | undefined;
     pinUpdate?: GroupPinUpdate | undefined;
     pinSnapshot?: GroupPinSnapshot | undefined;
+    syncBundle?: GroupSyncBundle | undefined;
+    reaction?: Reaction | undefined;
     messageType: number;
 }
 export interface RequestGroupReAdds {
@@ -649,6 +656,29 @@ export interface ApproveHistoryChunkRequest {
     chunkId: bigint;
     unencryptedHash: Buffer;
 }
+/** Secrets travel ONLY in an authenticated MLS hidden message, never in HTTP URLs. */
+export interface GroupSnapshotSecret {
+    /** 1=pins, 2=recent messages */
+    kind: number;
+    snapshotId: string;
+    key: Buffer;
+    plaintextHash: Buffer;
+    ciphertextHash: Buffer;
+    messageCount: number;
+    startId: bigint;
+    endId: bigint;
+}
+export interface GroupSyncBundle {
+    formatVersion: number;
+    groupId: bigint;
+    pinned: GroupSnapshotSecret | undefined;
+    recent: GroupSnapshotSecret | undefined;
+    keys: GroupHistoryChunkKey[];
+    chunks: GroupHistoryChunkItem[];
+    bundleId: string;
+    page: number;
+    lastPage: boolean;
+}
 export declare const UserMessage: MessageFns<UserMessage>;
 export declare const Group: MessageFns<Group>;
 export declare const GroupDetails: MessageFns<GroupDetails>;
@@ -707,6 +737,7 @@ export declare const EncryptedFiles: MessageFns<EncryptedFiles>;
 export declare const MessagePayload: MessageFns<MessagePayload>;
 export declare const CallMessage: MessageFns<CallMessage>;
 export declare const SelfUserMessage: MessageFns<SelfUserMessage>;
+export declare const Reaction: MessageFns<Reaction>;
 export declare const UserMessageInner: MessageFns<UserMessageInner>;
 export declare const GroupPinUpdate: MessageFns<GroupPinUpdate>;
 export declare const GroupPinSnapshot: MessageFns<GroupPinSnapshot>;
@@ -749,6 +780,8 @@ export declare const GroupHistorySignal: MessageFns<GroupHistorySignal>;
 export declare const GroupHistoryRecord: MessageFns<GroupHistoryRecord>;
 export declare const GroupHistoryRecords: MessageFns<GroupHistoryRecords>;
 export declare const ApproveHistoryChunkRequest: MessageFns<ApproveHistoryChunkRequest>;
+export declare const GroupSnapshotSecret: MessageFns<GroupSnapshotSecret>;
+export declare const GroupSyncBundle: MessageFns<GroupSyncBundle>;
 type Builtin = Date | Function | Uint8Array | string | number | boolean | bigint | undefined;
 export type DeepPartial<T> = T extends bigint ? string | number | bigint : T extends Builtin ? T : T extends globalThis.Array<infer U> ? globalThis.Array<DeepPartial<U>> : T extends ReadonlyArray<infer U> ? ReadonlyArray<DeepPartial<U>> : T extends {} ? {
     [K in keyof T]?: DeepPartial<T[K]>;
