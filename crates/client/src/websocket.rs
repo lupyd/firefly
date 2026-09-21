@@ -1,3 +1,7 @@
+use crate::callbacks::{CallSignal, GroupMeetingSignal, ReadUserMessagesUpto};
+use crate::storage::GroupMessage;
+#[path = "group_snapshots.rs"]
+mod group_snapshots;
 use std::{
     collections::HashMap,
     sync::{
@@ -54,6 +58,34 @@ use crate::{
 
 // Trait removed, imported from callbacks module
 
+struct InternalSignalCallback {
+    inner: Arc<dyn FireflyWsClientCallback>,
+    signal_tx: tokio::sync::mpsc::Sender<crate::callbacks::GroupHistorySignal>,
+}
+
+#[async_trait::async_trait]
+impl FireflyWsClientCallback for InternalSignalCallback {
+    fn name(&self) -> &str { self.inner.name() }
+    async fn get_access_token(&self) -> Option<String> { self.inner.get_access_token().await }
+    async fn on_message(&self, message: UserMessage) { self.inner.on_message(message).await; }
+    async fn on_group_message(&self, group_message: GroupMessage) { self.inner.on_group_message(group_message).await; }
+    async fn on_group_message_updated(&self, message: GroupMessage) { self.inner.on_group_message_updated(message).await; }
+    async fn on_group_joined(&self, group_id: u64) { self.inner.on_group_joined(group_id).await; }
+    async fn on_call_signal(&self, signal: CallSignal) { self.inner.on_call_signal(signal).await; }
+    async fn on_group_meeting_signal(&self, signal: GroupMeetingSignal) { self.inner.on_group_meeting_signal(signal).await; }
+    async fn on_read_user_messages_upto(&self, read: ReadUserMessagesUpto) { self.inner.on_read_user_messages_upto(read).await; }
+    async fn on_group_history_signal(&self, signal: crate::callbacks::GroupHistorySignal) {
+        let _ = self.signal_tx.send(signal.clone()).await;
+        self.inner.on_group_history_signal(signal).await;
+    }
+    async fn on_group_updated(&self, group_id: u64) {
+        self.inner.on_group_updated(group_id).await;
+    }
+    async fn on_unauthenticated(&self) {
+        self.inner.on_unauthenticated().await;
+    }
+}
+
 pub struct Connection {
     sender_task: tokio::task::JoinHandle<()>,
     receiver_task: tokio::task::JoinHandle<()>,
@@ -75,7 +107,12 @@ impl Connection {
         address_id: u64,
         device_id: u8,
         firefly_base_url: String,
+        signal_tx: tokio::sync::mpsc::Sender<crate::callbacks::GroupHistorySignal>,
     ) -> Self {
+        let callbacks: Arc<dyn FireflyWsClientCallback> = Arc::new(InternalSignalCallback {
+            inner: callbacks,
+            signal_tx,
+        });
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<Bytes>(100);
         let (mut ws_sender, mut ws_receiver) = stream.split();
         let sender2 = sender.clone();
@@ -220,6 +257,7 @@ pub struct FireflyWsClient {
     firefly_base_ws_url: String,
     cdn_base_url: std::sync::RwLock<Option<String>>,
     history_work: tokio::sync::Mutex<()>,
+    snapshot_work: tokio::sync::Mutex<()>,
     key_stores: Arc<FfiKeyStores>,
 
     key_value_store: KeyValueStore,
@@ -299,6 +337,7 @@ impl FireflyWsClient {
             favourite_messages_store,
             history_keys_store,
             history_work: tokio::sync::Mutex::new(()),
+            snapshot_work: tokio::sync::Mutex::new(()),
             self_group_key_packages_store,
             group_key_packages_store,
             fully_initialized: AtomicBool::new(false),
@@ -437,6 +476,12 @@ impl FireflyWsClient {
             Ok(v) => v,
             Err(err) => {
                 let err_str = format!("{:?}", err);
+                if let tokio_tungstenite::tungstenite::error::Error::Http(ref resp) = err {
+                    if resp.status() == 401 || resp.status() == 403 {
+                        log::warn!("Connection rejected by server with HTTP status {}, invoking on_unauthenticated", resp.status());
+                        self.callbacks.on_unauthenticated().await;
+                    }
+                }
                 let mut last_err = self.last_connection_error.lock().unwrap();
                 if last_err.as_ref() != Some(&err_str) {
                     log::error!("connection request failed {:?}", err);
@@ -472,6 +517,7 @@ impl FireflyWsClient {
 
         let (on_connection_closed_tx, on_connection_closed_rx) = oneshot::channel::<()>();
 
+        let mut signal_rx = None;
         let firefly_mls_client = self
             .firefly_mls_client
             .get()
@@ -479,6 +525,8 @@ impl FireflyWsClient {
 
         {
             let mut g = self.connection.write().await;
+            let (signal_tx, signal_rx_new) = tokio::sync::mpsc::channel(100);
+            signal_rx = Some(signal_rx_new);
             *g = Some(Connection::new(
                 callbacks,
                 key_stores,
@@ -499,6 +547,7 @@ impl FireflyWsClient {
                     .map(|i| i.device_id)
                     .unwrap_or(0) as u8,
                 self.firefly_base_url.clone(),
+                signal_tx,
             ));
         }
 
@@ -523,7 +572,20 @@ impl FireflyWsClient {
                 .await;
         }
 
-        on_connection_closed_rx.await?;
+        if let Some(mut rx) = signal_rx {
+            tokio::select! {
+                _ = on_connection_closed_rx => {},
+                _ = async {
+                    while let Some(signal) = rx.recv().await {
+                        if let Err(e) = self.handle_group_history_signal(signal).await {
+                            log::error!("auto handle_group_history_signal error: {:?}", e);
+                        }
+                    }
+                } => {},
+            }
+        } else {
+            on_connection_closed_rx.await?;
+        }
         Ok(())
     }
 
@@ -1524,6 +1586,31 @@ impl FireflyWsClient {
         Ok(())
     }
 
+    pub async fn replenish_key_packages(&self, count: usize) -> anyhow::Result<()> {
+        if count == 0 {
+            return Ok(());
+        }
+        let Some(token) = self.callbacks.get_access_token().await else {
+            return Ok(());
+        };
+        let address_id = self.addressId.load(std::sync::atomic::Ordering::Relaxed);
+        let device_id = self.get_device_id().await as u8;
+        let firefly_mls_client = self
+            .firefly_mls_client
+            .get()
+            .context("firefly_mls_client is not initialized")?;
+
+        replenish_key_packages_standalone(
+            &self.firefly_base_url,
+            &token,
+            address_id,
+            device_id,
+            count,
+            firefly_mls_client,
+            &self.self_group_key_packages_store,
+        ).await
+    }
+
     async fn ensure_mls_client_initialized(&self) -> anyhow::Result<Arc<FfiMlsClient>> {
         let address_id = self.addressId.load(std::sync::atomic::Ordering::Relaxed);
         let address_id = if address_id == 0 {
@@ -1772,7 +1859,31 @@ impl FireflyWsClient {
             .load_group(groupId, group_info.identifier.clone())
             .await?;
 
+        let is_owner = group.is_owner().await.unwrap_or(false);
+        if !is_owner {
+            // Non-owners wait 1.5s to let the group owner prioritize handling the re-add
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        }
+
+        let claim_res = HTTP_CLIENT
+            .post(format!(
+                "{}/group/reAdd/claim?groupId={}&address={}&myAddress={}",
+                self.firefly_base_url, groupId, request.address_id, addressId,
+            ))
+            .bearer_auth(token)
+            .send()
+            .await?;
+
+        if claim_res.status() == reqwest::StatusCode::CONFLICT {
+            log::info!(
+                "[re_add_member] Contention lost: request for {} (address {}) in group {} already claimed by another member",
+                request.username, request.address_id, groupId
+            );
+            return Ok(());
+        }
+
         log::info!("[re_add_member] Calling group.re_add_member for user {} (address {}) in group {}", request.username, request.address_id, groupId);
+        self.key_value_store.set(&format!("snapshot-join-pending:{groupId}"),&format!("{:016x}",rand::random::<u64>())).await?;
         let res = group
             .re_add_member(request.username.to_string(), request.address_id)
             .await;
@@ -1806,7 +1917,6 @@ impl FireflyWsClient {
             .update_cursor(id, groupId, group.epoch().await as u32)
             .await?;
 
-        if let Err(err)=self.share_history_manifest(groupId).await { log::warn!("Join history sharing deferred: {}",err); }
         if let Err(err) = self.re_encrypt_and_send_pinned_messages(groupId).await {
             log::warn!("Failed to re-encrypt pinned messages after re_add_member: {:?}", err);
         }
@@ -1862,6 +1972,10 @@ impl FireflyWsClient {
                     log::error!("failed to join group via invite: {:?}: {:?}", invite, err);
                 }
             };
+        }
+        let joined_count = invites.invites.len();
+        if joined_count > 0 {
+            let _ = self.replenish_key_packages(joined_count).await;
         }
 
         {
@@ -2018,27 +2132,15 @@ impl FireflyWsClient {
         Ok(uploaded_group_message.id)
     }
 
-    pub async fn set_group_message_pin(&self, group_id: u64, message_id: u64, pinned: bool) -> anyhow::Result<()> {
-        let target=self.group_message_store().get_message(group_id,message_id).await?.context("Pin target not visible")?;
-        self.upload_group_message(group_id, firefly::GroupMessageInner {
-            channelId:target.channel_id, message_type:firefly_protos::MESSAGE_TYPE_HIDDEN,
-            message:firefly::mod_GroupMessageInner::OneOfmessage::pinUpdate(firefly::GroupPinUpdate {message_id,pinned}),
-        },0).await?;
-        if let Some(updated)=self.group_message_store().get_message(group_id,message_id).await? { self.callbacks.on_group_message_updated(updated).await; }
-        Ok(())
+    pub async fn set_group_message_pin(&self, group_id:u64, message_id:u64, pinned:bool)->anyhow::Result<()> {
+        let result=self.set_snapshot_pin(group_id,message_id,pinned).await;
+        if result.is_err() {self.callbacks.on_group_history_signal(crate::callbacks::GroupHistorySignal{group_id,signal_type:8,request_id:0,chunk_id:0,username:self.callbacks.name().to_string()}).await;}
+        result
     }
 
+    // Retained FFI name for existing callers; no original messages are resent.
     pub async fn re_encrypt_and_send_pinned_messages(&self, group_id:u64)->anyhow::Result<()> {
-        let mut pinned=self.group_message_store().get_pinned_messages(group_id).await?;
-        pinned.sort_by_key(|m|m.id);
-        for batch in pinned.chunks(100) {
-            let messages=batch.iter().map(|m|firefly::GroupHistoryRecord{id:m.id,group_id,sender:m.by.clone().into(),message:m.message.clone().into(),epoch:m.epoch}).collect();
-            self.upload_group_message(group_id,firefly::GroupMessageInner{
-                channelId:0,message_type:firefly_protos::MESSAGE_TYPE_HIDDEN,
-                message:firefly::mod_GroupMessageInner::OneOfmessage::pinSnapshot(firefly::GroupPinSnapshot{messages}),
-            },0).await?;
-        }
-        Ok(())
+        self.share_join_snapshots(group_id).await
     }
 
     pub async fn encrypt_and_send_group_with_type(
@@ -2048,11 +2150,14 @@ impl FireflyWsClient {
         message_type: u32,
     ) -> anyhow::Result<u64> {
         let mut message = deserialize_proto::<firefly::GroupMessageInner<'_>>(&payload)?;
-        message.message_type |= message_type;
+        let pin=(message.message_type | message_type) & firefly_protos::MESSAGE_TYPE_PINNED != 0;
+        message.message_type=(message.message_type | message_type) & !firefly_protos::MESSAGE_TYPE_PINNED;
         if let firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(ref mut p) = message.message {
-            p.message_type |= message_type;
+            p.message_type=(p.message_type | message_type) & !firefly_protos::MESSAGE_TYPE_PINNED;
         }
-        self.upload_group_message(group_id, message, 0).await
+        let id=self.upload_group_message(group_id, message, 0).await?;
+        if pin {self.set_group_message_pin(group_id,id,true).await?;}
+        Ok(id)
     }
 
     pub async fn encrypt_and_send_group_pinned(
@@ -2659,6 +2764,15 @@ impl FireflyWsClient {
         Ok(records)
     }
 
+    pub async fn get_mls_group(&self, group_id: u64) -> anyhow::Result<Arc<FfiMlsGroup>> {
+        let client = self.ensure_mls_client_initialized().await?;
+        let group_info = self.group_info_store.get(group_id).await?;
+        client
+            .load_group(group_id, group_info.identifier)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
     pub async fn get_group_extension(&self, groupId: u64) -> anyhow::Result<Vec<u8>> {
         let client = self.ensure_mls_client_initialized().await?;
 
@@ -2835,6 +2949,7 @@ impl FireflyWsClient {
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
 
+        self.key_value_store.set(&format!("snapshot-join-pending:{group_id}"),&format!("{:016x}",rand::random::<u64>())).await?;
         let id = group.add_member(username, role_id).await?;
 
         self.group_messages_store
@@ -2845,7 +2960,6 @@ impl FireflyWsClient {
             log::warn!("Failed to re-encrypt pinned messages after add_group_member: {:?}", err);
         }
 
-        if let Err(err)=self.share_history_manifest(group_id).await { log::warn!("Join history sharing deferred: {}",err); }
         Ok(())
     }
 
@@ -3236,6 +3350,35 @@ impl FireflyWsClient {
         Ok(())
     }
 
+    pub async fn handle_group_history_signal(&self, signal: crate::callbacks::GroupHistorySignal) -> anyhow::Result<()> {
+        let name = self.callbacks.name().to_string();
+        CURRENT_CLIENT.scope(name, async {
+            match signal.signal_type {
+                0 => {
+                    for request in self.get_pending_group_history_requests(vec![signal.group_id]).await?.into_iter() {
+                        self.fulfill_group_history(signal.group_id, request.id, request.start_msg_id, request.end_msg_id).await?;
+                    }
+                }
+                1 | 5 => { self.verify_published_chunks(signal.group_id).await?; }
+                2 => {
+                    if signal.chunk_id != 0 {
+                        let _ = self.history_keys_store.record_disapproval(signal.group_id, signal.chunk_id, "Disapproved by peer").await;
+                        let _ = self.group_messages_store.purge_imported_chunk(signal.group_id, signal.chunk_id).await;
+                    }
+                    self.key_value_store.set(&format!("history_export_cursor:{}", signal.group_id), "0").await?;
+                    self.archive_ready_history(signal.group_id).await?;
+                }
+                6 => { self.archive_ready_history(signal.group_id).await?; }
+                8 => { self.resume_snapshots(signal.group_id).await?; }
+                7 => {
+                    self.re_encrypt_and_send_pinned_messages(signal.group_id).await?;
+                }
+                _ => {}
+            }
+            Ok(())
+        }).await
+    }
+
     pub async fn history_enabled(&self, group_id: u64) -> anyhow::Result<bool> {
         #[derive(serde::Deserialize)]
         struct Policy { group_id: u64, is_member: bool, settings: u32 }
@@ -3310,17 +3453,31 @@ impl FireflyWsClient {
             let mut scan=cursor.saturating_add(1);
             let mut messages=Vec::new();
             // Skip unreadable channels without treating them as visible records.
-            for _ in 0..32 {
+            loop {
                 let raw=self.group_messages_store.authenticated_history_range(group_id,scan,i64::MAX as u64,DEFAULT_CHUNK_SIZE as u32).await?;
                 if raw.is_empty() {break;}
                 let end=raw.last().map(|m|m.id).unwrap_or(scan);
                 let exhausted=raw.len()<DEFAULT_CHUNK_SIZE;
                 messages.extend(self.group_message_store().visible_messages(raw).await?);
                 if messages.len()>=DEFAULT_CHUNK_SIZE {messages.truncate(DEFAULT_CHUNK_SIZE);break;}
-                if exhausted {break;} scan=end.saturating_add(1);
+                if exhausted {break;}
+                scan=end.saturating_add(1);
+                tokio::task::yield_now().await;
             }
             if messages.len()<DEFAULT_CHUNK_SIZE {return Ok(());}
             if !self.history_enabled(group_id).await? {return Ok(());}
+            let mls_group = match self.get_mls_group(group_id).await {
+                Ok(g) => g,
+                Err(err) => {
+                    log::warn!("Could not load MLS group for history archive: {:?}", err);
+                    return Ok(());
+                }
+            };
+            if !mls_group.has_full_channel_access().await.unwrap_or(false) {
+                log::info!("Skipping history archive for group {}: member lacks full channel access", group_id);
+                return Ok(());
+            }
+            let is_owner = mls_group.is_owner().await.unwrap_or(false);
             let start=messages[0].id;
             let end=messages[messages.len()-1].id;
             // Reuse a peer's active record instead of continually uploading it.
@@ -3333,7 +3490,20 @@ impl FireflyWsClient {
                 }
                 cursor=chunk.end_msg_id;
             } else {
-                if !self.claim_group_history_request(group_id,0,start,end).await? {return Ok(());}
+                if !is_owner {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                if !self.claim_group_history_request(group_id,0,start,end).await? {
+                    let cb = self.callbacks.clone();
+                    let u = self.callbacks.name().to_string();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        cb.on_group_history_signal(crate::callbacks::GroupHistorySignal {
+                            group_id, signal_type: 6, request_id: 0, chunk_id: 0, username: u,
+                        }).await;
+                    });
+                    return Ok(());
+                }
                 let packed=pack_messages_into_chunk(&messages)?;
                 validate_chunk_records(&messages,group_id,start,end,packed.msg_count)?;
                 let url=self.upload_chunk_blob(group_id,packed.blob,start,end,&packed.unencrypted_hash).await?;
@@ -3434,7 +3604,7 @@ impl FireflyWsClient {
         // Only complete thousand-message batches are archived. Requests also
         // repair missed join-time key delivery without republishing old blobs.
         self.archive_ready_history(group_id).await?;
-        self.share_history_manifest(group_id).await?;
+        self.share_join_snapshots(group_id).await?;
         self.close_group_history_request(group_id,request_id).await?;
         Ok(true)
     }
@@ -3464,6 +3634,17 @@ impl FireflyWsClient {
     }
 
     pub async fn verify_published_chunks(&self, group_id: u64) -> anyhow::Result<()> {
+        let mls_group = match self.get_mls_group(group_id).await {
+            Ok(g) => g,
+            Err(err) => {
+                log::warn!("Could not load MLS group for history verification: {:?}", err);
+                return Ok(());
+            }
+        };
+        if !mls_group.has_full_channel_access().await.unwrap_or(false) {
+            log::info!("Skipping history chunk verification for group {}: member lacks full channel access", group_id);
+            return Ok(());
+        }
         let cursor_key=format!("history_verify_cursor:{group_id}");
         let mut before=self.key_value_store.get(&cursor_key).await.ok().and_then(|s|s.parse::<u64>().ok()).unwrap_or(0);
         for _ in 0..8 {
@@ -3584,6 +3765,17 @@ async fn on_group_message(
     match message {
         crate::group::FireflyMlsReceivedMessage::Message(encrypted_group_message) => {
             let inner = deserialize_proto::<firefly::GroupMessageInner>(&encrypted_group_message.message).ok();
+            // Pin/history features were not released. Legacy per-message pin
+            // controls must not bypass the authoritative 50-record snapshot cap.
+            if inner.as_ref().is_some_and(|i|matches!(&i.message,firefly::mod_GroupMessageInner::OneOfmessage::pinUpdate(_) | firefly::mod_GroupMessageInner::OneOfmessage::pinSnapshot(_))) {
+                group_message_store.update_cursor(msg.id,groupId,epoch).await?;
+                return Ok(());
+            }
+
+            if let Some(firefly::GroupMessageInner{message:firefly::mod_GroupMessageInner::OneOfmessage::syncBundle(bundle),..})=inner.as_ref() {
+                group_snapshots::accept_bundle(key_value_store,history_keys_store,groupId,bundle).await?;
+                callbacks.on_group_history_signal(crate::callbacks::GroupHistorySignal{group_id:groupId,signal_type:8,request_id:0,chunk_id:0,username:encrypted_group_message.sender.clone()}).await;
+            }
             let channelId = inner.as_ref().map(|i| i.channelId).unwrap_or(0);
             let message_type = inner.as_ref().map(|i| {
                 i.message_type
@@ -3659,26 +3851,6 @@ async fn on_group_message(
                     message_type,
                 )
                 .await?;
-            if let Some(firefly::GroupMessageInner{message:firefly::mod_GroupMessageInner::OneOfmessage::pinSnapshot(snapshot),..})=inner.as_ref() {
-                let mut records=Vec::new();
-                for record in &snapshot.messages {
-                    let record_inner=deserialize_proto::<firefly::GroupMessageInner>(&record.message)?;
-                    let flags=record_inner.message_type | match &record_inner.message {firefly::mod_GroupMessageInner::OneOfmessage::messagePayload(p)=>p.message_type,_=>0};
-                    anyhow::ensure!(record.id<msg.id,"Pin snapshot target must predate snapshot");
-                    records.push(crate::db::group_messages::GroupMessage{id:record.id,group_id:record.group_id,by:record.sender.to_string(),message:record.message.to_vec(),channel_id:record_inner.channelId,epoch:record.epoch,message_type:flags|firefly_protos::MESSAGE_TYPE_PINNED});
-                }
-                records.sort_by_key(|m|m.id);
-                if let (Some(first),Some(last))=(records.first(),records.last()) {
-                    validate_chunk_records(&records,groupId,first.id,last.id,records.len() as u32)?;
-                    let hash=compute_unencrypted_hash(&records)?;
-                    group_message_store.import_verified_history(groupId,0,&hash,&records).await?;
-                    for record in records {
-                        if group.can_see_message(record.channel_id).await? {
-                            if let Some(saved)=group_message_store.get_message(groupId,record.id).await? {callbacks.on_group_message_updated(saved).await;}
-                        }
-                    }
-                }
-            }
             let pin_target = inner.as_ref().and_then(|i| match &i.message { firefly::mod_GroupMessageInner::OneOfmessage::pinUpdate(update) => Some(update.message_id), _ => None });
             let message = crate::db::group_messages::GroupMessage {
                 id: msg.id,
@@ -3709,6 +3881,12 @@ async fn on_group_message(
                 callbacks.on_group_message(message).await;
                 callbacks.on_group_history_signal(crate::callbacks::GroupHistorySignal{group_id:groupId,signal_type:6,request_id:0,chunk_id:0,username:callbacks.name().to_string()}).await;
             }
+        }
+        crate::group::FireflyMlsReceivedMessage::Commit => {
+            group_message_store
+                .update_cursor(msg.id, msg.groupId, epoch)
+                .await?;
+            callbacks.on_group_updated(groupId).await;
         }
         _ => {
             group_message_store
@@ -3948,6 +4126,32 @@ async fn re_add_member_internal(
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
+    let is_owner = group.is_owner().await.unwrap_or(false);
+    if !is_owner {
+        // Non-owners wait 1.5s to let the group owner prioritize handling the re-add
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    }
+
+    if let Some(token) = callbacks.get_access_token().await {
+        let claim_res = HTTP_CLIENT
+            .post(format!(
+                "{}/group/reAdd/claim?groupId={}&address={}&myAddress={}",
+                firefly_base_url, group_id, request.address_id, my_address_id,
+            ))
+            .bearer_auth(&token)
+            .send()
+            .await?;
+
+        if claim_res.status() == reqwest::StatusCode::CONFLICT {
+            log::info!(
+                "[re_add_member_internal] Contention lost: request for {} (address {}) in group {} already claimed by another member",
+                request.username, request.address_id, group_id
+            );
+            return Ok(());
+        }
+    }
+
+    group_message_store.mark_snapshot_join_pending(group_id).await?;
     let res = group
         .re_add_member(request.username.to_string(), request.address_id)
         .await;
@@ -4000,6 +4204,7 @@ async fn add_member_internal(
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
+    group_message_store.mark_snapshot_join_pending(group_id).await?;
     let id = group.add_member(username, role_id).await?;
 
     group_message_store
@@ -4007,6 +4212,65 @@ async fn add_member_internal(
         .await?;
 
     callbacks.on_group_history_signal(crate::callbacks::GroupHistorySignal{group_id,signal_type:7,request_id:0,chunk_id:0,username:callbacks.name().to_string()}).await;
+    Ok(())
+}
+
+async fn replenish_key_packages_standalone(
+    firefly_base_url: &str,
+    token: &str,
+    address_id: u64,
+    device_id: u8,
+    count: usize,
+    firefly_mls_client: &FfiMlsClient,
+    self_group_key_packages_store: &SelfGroupKeyPackageStore,
+) -> anyhow::Result<()> {
+    if count == 0 {
+        return Ok(());
+    }
+    let mut key_packages = firefly::GroupKeyPackages::default();
+    for _ in 0..count {
+        let id = (rand::rng().next_u32() % 32000) as i32;
+        let key_package = firefly_mls_client
+            .generate_key_package()
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        self_group_key_packages_store
+            .set(id, &key_package)
+            .await?;
+        key_packages.packages.push(firefly::GroupKeyPackage {
+            id,
+            package: key_package.into(),
+            address: address_id,
+            username: Default::default(),
+        });
+    }
+
+    let body = serialize_proto(&key_packages)?;
+
+    let url = format!(
+        "{}/group/keyPackages?address={}&device_id={}",
+        firefly_base_url, address_id, device_id
+    );
+    let response = HTTP_CLIENT
+        .post(url)
+        .bearer_auth(token)
+        .body(body)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "unexpected status [{}] {}",
+            response.status(),
+            response.text().await?
+        ));
+    }
+
+    log::info!(
+        "replenished {} group key packages for address {}",
+        count,
+        address_id
+    );
     Ok(())
 }
 
@@ -4398,25 +4662,12 @@ impl FfiFireflyWsClient {
     pub async fn request_group_history(&self, group: u64, start: u64, end: u64) -> anyhow::Result<()> { self.inner.request_group_history(group, start, end).await.map(|_| ()) }
     pub async fn import_group_history_page(&self, group: u64, since: u64, until: u64) -> anyhow::Result<HistoryImportPage> { self.inner.import_group_history_page(group,since,until).await }
     pub async fn handle_group_history_signal(&self, signal: crate::callbacks::GroupHistorySignal) -> anyhow::Result<()> {
-        let name=self.inner.callbacks.name().to_string();
-        CURRENT_CLIENT.scope(name, async {
-        match signal.signal_type {
-            0 => {
-                for request in self.inner.get_pending_group_history_requests(vec![signal.group_id]).await?.into_iter() {
-                    self.inner.fulfill_group_history(signal.group_id, request.id, request.start_msg_id, request.end_msg_id).await?;
-                }
-            }
-            1 | 5 => { self.inner.verify_published_chunks(signal.group_id).await?; }
-            2 => { self.inner.key_value_store.set(&format!("history_export_cursor:{}",signal.group_id),"0").await?; self.inner.archive_ready_history(signal.group_id).await?; }
-            6 => { self.inner.archive_ready_history(signal.group_id).await?; }
-            7 => {
-                self.inner.re_encrypt_and_send_pinned_messages(signal.group_id).await?;
-                self.inner.share_history_manifest(signal.group_id).await?;
-            }
-            _ => {}
-        }
-        Ok(())
-        }).await
+        self.inner.handle_group_history_signal(signal).await
+    }
+
+    pub async fn replenish_key_packages(&self, count: usize) -> anyhow::Result<()> {
+        let name = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT.scope(name, self.inner.replenish_key_packages(count)).await
     }
 
     pub async fn create(
@@ -4445,7 +4696,7 @@ impl FfiFireflyWsClient {
     pub async fn initialize_with_retrying(&self) -> anyhow::Result<()> {
         self.inner.initialize_with_retrying().await?;
         for group in self.inner.group_info_store.get_all().await? {
-            for signal_type in [5,6] {
+            for signal_type in [5,6,8] {
                 self.inner.callbacks.on_group_history_signal(crate::callbacks::GroupHistorySignal{group_id:group.id,signal_type,request_id:0,chunk_id:0,username:self.inner.callbacks.name().to_string()}).await;
             }
         }
@@ -5013,6 +5264,37 @@ impl FfiFireflyWsClient {
         CURRENT_CLIENT
             .scope(name, async {
                 self.inner.sync_group_joins_and_readds().await
+            })
+            .await
+    }
+
+    pub fn address_id(&self) -> u64 {
+        self.inner.address_id()
+    }
+
+    pub async fn get_device_id(&self) -> u32 {
+        self.inner.get_device_id().await
+    }
+
+    pub async fn ping_device(
+        &self,
+        call_id: u64,
+        target_username: String,
+    ) -> anyhow::Result<()> {
+        let name = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT
+            .scope(name, async {
+                self.inner
+                    .send_call_signal(
+                        call_id,
+                        target_username,
+                        firefly_protos::firefly::CallSignalType::CALL_DISMISS,
+                        "ping".to_string(),
+                        "".to_string(),
+                        0,
+                        "".to_string(),
+                    )
+                    .await
             })
             .await
     }

@@ -1093,18 +1093,26 @@ async fn test_message_permissions_defaults_revocation_and_cached_history() {
         .is_err()
     );
     while received.try_recv().is_ok() {}
-    alice
+    let hidden_id = alice
         .upload_group_message(group_id, msg("hidden while revoked", false), 0)
         .await
         .unwrap();
+    let recv_hidden = tokio::time::timeout(Duration::from_secs(5), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recv_hidden.id, hidden_id);
+
+    // While SeeMessage is absent (permission 6), history queries fail-closed (hidden from UI)
     assert!(
-        tokio::time::timeout(Duration::from_millis(500), received.recv())
+        history
+            .get(group_id, u64::MAX / 2, 100)
             .await
-            .is_err()
+            .unwrap()
+            .is_empty()
     );
 
-    // Commits still flow while application reads are denied; restoring access
-    // must work without resetting MLS state or replaying denied plaintext.
+    // Restoring SeeMessage (permission 5) restores read visibility for stored messages
     set_default(&alice, group_id, 5).await;
     await_permissions(&bob, group_id, 5).await;
     assert!(
@@ -1123,9 +1131,8 @@ async fn test_message_permissions_defaults_revocation_and_cached_history() {
         .unwrap()
         .unwrap();
     assert_eq!(visible.id, visible_id);
-    for item in history.get(group_id, u64::MAX / 2, 100).await.unwrap() {
-        assert!(!String::from_utf8_lossy(&item.message).contains("hidden while revoked"));
-    }
+    let all_history = history.get(group_id, u64::MAX / 2, 100).await.unwrap();
+    assert!(all_history.iter().any(|item| String::from_utf8_lossy(&item.message).contains("hidden while revoked")));
     alice.dispose().await;
     bob.dispose().await;
     cleanup_dir(&test_dir);

@@ -52,6 +52,10 @@ pub trait FireflyWsClientCallback: Send + Sync {
 
     async fn on_group_joined(&self, _group_id: u64) {}
 
+    async fn on_group_updated(&self, _group_id: u64) {}
+
+    async fn on_unauthenticated(&self) {}
+
     async fn on_call_signal(&self, _signal: CallSignal) {}
 
     async fn on_group_meeting_signal(&self, _signal: GroupMeetingSignal) {}
