@@ -451,6 +451,58 @@ impl FireflyMlsGroup {
         .is_ok())
     }
 
+    pub async fn has_full_channel_access(&self) -> anyhow::Result<bool> {
+        let group = self.group.lock().await;
+        let extension = group
+            .context()
+            .extensions()
+            .get_as::<FireflyGroupExtension>()?
+            .context("no firefly extension on group")?;
+        let wrapper = extension.deserialize()?;
+        let username = get_username_from_signing_identity(
+            &group
+                .member_at_index(group.current_member_index())
+                .context("local MLS member missing")?
+                .signing_identity,
+        )?;
+        let role = wrapper.get_role_of_user(&username).unwrap_or(0);
+        if role == 1 {
+            return Ok(true);
+        }
+        if !rules::has_permission(
+            rules::FireflyMlsRules::message_permissions(&wrapper, &username, 0),
+            config::UserPermission::SeeMessage as u32,
+        ) {
+            return Ok(false);
+        }
+        for ch in &wrapper.inner().channels {
+            if !rules::has_permission(
+                rules::FireflyMlsRules::message_permissions(&wrapper, &username, ch.id),
+                config::UserPermission::SeeMessage as u32,
+            ) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    pub async fn is_owner(&self) -> anyhow::Result<bool> {
+        let group = self.group.lock().await;
+        let extension = group
+            .context()
+            .extensions()
+            .get_as::<FireflyGroupExtension>()?
+            .context("no firefly extension on group")?;
+        let wrapper = extension.deserialize()?;
+        let username = get_username_from_signing_identity(
+            &group
+                .member_at_index(group.current_member_index())
+                .context("local MLS member missing")?
+                .signing_identity,
+        )?;
+        Ok(wrapper.get_role_of_user(&username).unwrap_or(0) == 1)
+    }
+
     pub async fn process(&self, message: &[u8]) -> anyhow::Result<FireflyMlsReceivedMessage> {
         let mut group = self.group.lock().await;
 
@@ -472,29 +524,8 @@ impl FireflyMlsGroup {
                     .get_as::<FireflyGroupExtension>()?
                     .context("no firefly extension on group")?;
                 let wrapper = extension.deserialize()?;
-                let local_username = get_username_from_signing_identity(
-                    &group
-                        .member_at_index(group.current_member_index())
-                        .context("local MLS member missing")?
-                        .signing_identity,
-                )?;
                 let data = application_message_description.data();
-                let permission_result =
-                    rules::FireflyMlsRules::check_message_sender(&wrapper, &sender_username, data)
-                        .and_then(|_| {
-                            rules::FireflyMlsRules::require_message_permission(
-                                &wrapper,
-                                &local_username,
-                                rules::FireflyMlsRules::message_metadata(data).0,
-                                config::UserPermission::SeeMessage,
-                            )
-                        });
-                if let Err(denied) = permission_result {
-                    // Decryption consumes a ratchet generation even when policy
-                    // rejects the plaintext. Persist it, but never expose data.
-                    group.write_to_storage().await?;
-                    return Err(denied.into());
-                }
+                rules::FireflyMlsRules::check_message_sender(&wrapper, &sender_username, data)?;
 
                 FireflyMlsReceivedMessage::Message(EncryptedMessage {
                     sender: sender_username,

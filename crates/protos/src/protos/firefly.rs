@@ -2950,6 +2950,8 @@ impl<'a> MessageRead<'a> for UserMessageInner<'a> {
                 Ok(26) => msg.message = firefly::mod_UserMessageInner::OneOfmessage::messagePayload(r.read_message::<firefly::MessagePayload>(bytes)?),
                 Ok(34) => msg.message = firefly::mod_UserMessageInner::OneOfmessage::selfMessage(r.read_message::<firefly::SelfUserMessage>(bytes)?),
                 Ok(50) => msg.message = firefly::mod_UserMessageInner::OneOfmessage::reaction(r.read_message::<firefly::Reaction>(bytes)?),
+                Ok(58) => msg.message = firefly::mod_UserMessageInner::OneOfmessage::backupKeySync(r.read_message::<firefly::DirectBackupKeySync>(bytes)?),
+                Ok(66) => msg.message = firefly::mod_UserMessageInner::OneOfmessage::directPinSnapshot(r.read_message::<firefly::DirectPinSnapshotSecret>(bytes)?),
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -2969,6 +2971,8 @@ impl<'a> MessageWrite for UserMessageInner<'a> {
             firefly::mod_UserMessageInner::OneOfmessage::messagePayload(ref m) => 1 + sizeof_len((m).get_size()),
             firefly::mod_UserMessageInner::OneOfmessage::selfMessage(ref m) => 1 + sizeof_len((m).get_size()),
             firefly::mod_UserMessageInner::OneOfmessage::reaction(ref m) => 1 + sizeof_len((m).get_size()),
+            firefly::mod_UserMessageInner::OneOfmessage::backupKeySync(ref m) => 1 + sizeof_len((m).get_size()),
+            firefly::mod_UserMessageInner::OneOfmessage::directPinSnapshot(ref m) => 1 + sizeof_len((m).get_size()),
             firefly::mod_UserMessageInner::OneOfmessage::None => 0,
     }    }
 
@@ -2980,6 +2984,8 @@ impl<'a> MessageWrite for UserMessageInner<'a> {
             firefly::mod_UserMessageInner::OneOfmessage::messagePayload(ref m) => { w.write_with_tag(26, |w| w.write_message(m))? },
             firefly::mod_UserMessageInner::OneOfmessage::selfMessage(ref m) => { w.write_with_tag(34, |w| w.write_message(m))? },
             firefly::mod_UserMessageInner::OneOfmessage::reaction(ref m) => { w.write_with_tag(50, |w| w.write_message(m))? },
+            firefly::mod_UserMessageInner::OneOfmessage::backupKeySync(ref m) => { w.write_with_tag(58, |w| w.write_message(m))? },
+            firefly::mod_UserMessageInner::OneOfmessage::directPinSnapshot(ref m) => { w.write_with_tag(66, |w| w.write_message(m))? },
             firefly::mod_UserMessageInner::OneOfmessage::None => {},
     }        Ok(())
     }
@@ -2996,6 +3002,8 @@ pub enum OneOfmessage<'a> {
     messagePayload(firefly::MessagePayload<'a>),
     selfMessage(firefly::SelfUserMessage<'a>),
     reaction(firefly::Reaction),
+    backupKeySync(firefly::DirectBackupKeySync<'a>),
+    directPinSnapshot(firefly::DirectPinSnapshotSecret<'a>),
     None,
 }
 
@@ -4759,6 +4767,492 @@ impl<'a> MessageWrite for GroupSyncBundle<'a> {
         if self.bundle_id != "" { w.write_with_tag(58, |w| w.write_string(&**&self.bundle_id))?; }
         if self.page != 0u32 { w.write_with_tag(64, |w| w.write_uint32(*&self.page))?; }
         if self.last_page != false { w.write_with_tag(72, |w| w.write_bool(*&self.last_page))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct DirectBackupChunk<'a> {
+    pub id: Cow<'a, str>,
+    pub start: u64,
+    pub count: u32,
+    pub blob_path: Cow<'a, str>,
+    pub byte_size: u64,
+    pub ciphertext_hash: Cow<'a, [u8]>,
+}
+
+impl<'a> MessageRead<'a> for DirectBackupChunk<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(10) => msg.id = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(16) => msg.start = r.read_uint64(bytes)?,
+                Ok(24) => msg.count = r.read_uint32(bytes)?,
+                Ok(34) => msg.blob_path = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(40) => msg.byte_size = r.read_uint64(bytes)?,
+                Ok(50) => msg.ciphertext_hash = r.read_bytes(bytes).map(Cow::Borrowed)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for DirectBackupChunk<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.id == "" { 0 } else { 1 + sizeof_len((&self.id).len()) }
+        + if self.start == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.start) as u64) }
+        + if self.count == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.count) as u64) }
+        + if self.blob_path == "" { 0 } else { 1 + sizeof_len((&self.blob_path).len()) }
+        + if self.byte_size == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.byte_size) as u64) }
+        + if self.ciphertext_hash == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.ciphertext_hash).len()) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.id != "" { w.write_with_tag(10, |w| w.write_string(&**&self.id))?; }
+        if self.start != 0u64 { w.write_with_tag(16, |w| w.write_uint64(*&self.start))?; }
+        if self.count != 0u32 { w.write_with_tag(24, |w| w.write_uint32(*&self.count))?; }
+        if self.blob_path != "" { w.write_with_tag(34, |w| w.write_string(&**&self.blob_path))?; }
+        if self.byte_size != 0u64 { w.write_with_tag(40, |w| w.write_uint64(*&self.byte_size))?; }
+        if self.ciphertext_hash != Cow::Borrowed(b"") { w.write_with_tag(50, |w| w.write_bytes(&**&self.ciphertext_hash))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct DirectBackupManifest<'a> {
+    pub version: u32,
+    pub epoch: Cow<'a, str>,
+    pub salt: Cow<'a, [u8]>,
+    pub verifier: Cow<'a, [u8]>,
+    pub schedule_days: u32,
+    pub chunks: Vec<firefly::DirectBackupChunk<'a>>,
+    pub authentication: Cow<'a, [u8]>,
+}
+
+impl<'a> MessageRead<'a> for DirectBackupManifest<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.version = r.read_uint32(bytes)?,
+                Ok(18) => msg.epoch = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(26) => msg.salt = r.read_bytes(bytes).map(Cow::Borrowed)?,
+                Ok(34) => msg.verifier = r.read_bytes(bytes).map(Cow::Borrowed)?,
+                Ok(40) => msg.schedule_days = r.read_uint32(bytes)?,
+                Ok(50) => msg.chunks.push(r.read_message::<firefly::DirectBackupChunk>(bytes)?),
+                Ok(58) => msg.authentication = r.read_bytes(bytes).map(Cow::Borrowed)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for DirectBackupManifest<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.version == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.version) as u64) }
+        + if self.epoch == "" { 0 } else { 1 + sizeof_len((&self.epoch).len()) }
+        + if self.salt == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.salt).len()) }
+        + if self.verifier == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.verifier).len()) }
+        + if self.schedule_days == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.schedule_days) as u64) }
+        + self.chunks.iter().map(|s| 1 + sizeof_len((s).get_size())).sum::<usize>()
+        + if self.authentication == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.authentication).len()) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.version != 0u32 { w.write_with_tag(8, |w| w.write_uint32(*&self.version))?; }
+        if self.epoch != "" { w.write_with_tag(18, |w| w.write_string(&**&self.epoch))?; }
+        if self.salt != Cow::Borrowed(b"") { w.write_with_tag(26, |w| w.write_bytes(&**&self.salt))?; }
+        if self.verifier != Cow::Borrowed(b"") { w.write_with_tag(34, |w| w.write_bytes(&**&self.verifier))?; }
+        if self.schedule_days != 0u32 { w.write_with_tag(40, |w| w.write_uint32(*&self.schedule_days))?; }
+        for s in &self.chunks { w.write_with_tag(50, |w| w.write_message(s))?; }
+        if self.authentication != Cow::Borrowed(b"") { w.write_with_tag(58, |w| w.write_bytes(&**&self.authentication))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct DirectBackupState<'a> {
+    pub revision: i64,
+    pub updated_at: i64,
+    pub manifest: Option<firefly::DirectBackupManifest<'a>>,
+}
+
+impl<'a> MessageRead<'a> for DirectBackupState<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.revision = r.read_int64(bytes)?,
+                Ok(16) => msg.updated_at = r.read_int64(bytes)?,
+                Ok(26) => msg.manifest = Some(r.read_message::<firefly::DirectBackupManifest>(bytes)?),
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for DirectBackupState<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.revision == 0i64 { 0 } else { 1 + sizeof_varint(*(&self.revision) as u64) }
+        + if self.updated_at == 0i64 { 0 } else { 1 + sizeof_varint(*(&self.updated_at) as u64) }
+        + self.manifest.as_ref().map_or(0, |m| 1 + sizeof_len((m).get_size()))
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.revision != 0i64 { w.write_with_tag(8, |w| w.write_int64(*&self.revision))?; }
+        if self.updated_at != 0i64 { w.write_with_tag(16, |w| w.write_int64(*&self.updated_at))?; }
+        if let Some(ref s) = self.manifest { w.write_with_tag(26, |w| w.write_message(s))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct DirectBackupRequest<'a> {
+    pub action: firefly::mod_DirectBackupRequest::Action,
+    pub revision: i64,
+    pub lease: Cow<'a, str>,
+    pub id: Cow<'a, str>,
+    pub ciphertext: Cow<'a, [u8]>,
+    pub manifest: Option<firefly::DirectBackupManifest<'a>>,
+    pub object: Option<firefly::DirectBackupChunk<'a>>,
+}
+
+impl<'a> MessageRead<'a> for DirectBackupRequest<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.action = r.read_enum(bytes)?,
+                Ok(16) => msg.revision = r.read_int64(bytes)?,
+                Ok(26) => msg.lease = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(34) => msg.id = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(42) => msg.ciphertext = r.read_bytes(bytes).map(Cow::Borrowed)?,
+                Ok(50) => msg.manifest = Some(r.read_message::<firefly::DirectBackupManifest>(bytes)?),
+                Ok(58) => msg.object = Some(r.read_message::<firefly::DirectBackupChunk>(bytes)?),
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for DirectBackupRequest<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.action == firefly::mod_DirectBackupRequest::Action::invalid { 0 } else { 1 + sizeof_varint(*(&self.action) as u64) }
+        + if self.revision == 0i64 { 0 } else { 1 + sizeof_varint(*(&self.revision) as u64) }
+        + if self.lease == "" { 0 } else { 1 + sizeof_len((&self.lease).len()) }
+        + if self.id == "" { 0 } else { 1 + sizeof_len((&self.id).len()) }
+        + if self.ciphertext == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.ciphertext).len()) }
+        + self.manifest.as_ref().map_or(0, |m| 1 + sizeof_len((m).get_size()))
+        + self.object.as_ref().map_or(0, |m| 1 + sizeof_len((m).get_size()))
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.action != firefly::mod_DirectBackupRequest::Action::invalid { w.write_with_tag(8, |w| w.write_enum(*&self.action as i32))?; }
+        if self.revision != 0i64 { w.write_with_tag(16, |w| w.write_int64(*&self.revision))?; }
+        if self.lease != "" { w.write_with_tag(26, |w| w.write_string(&**&self.lease))?; }
+        if self.id != "" { w.write_with_tag(34, |w| w.write_string(&**&self.id))?; }
+        if self.ciphertext != Cow::Borrowed(b"") { w.write_with_tag(42, |w| w.write_bytes(&**&self.ciphertext))?; }
+        if let Some(ref s) = self.manifest { w.write_with_tag(50, |w| w.write_message(s))?; }
+        if let Some(ref s) = self.object { w.write_with_tag(58, |w| w.write_message(s))?; }
+        Ok(())
+    }
+}
+
+pub mod mod_DirectBackupRequest {
+
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum Action {
+    invalid = 0,
+    lease = 1,
+    put = 2,
+    commit = 3,
+    release = 4,
+}
+
+impl Default for Action {
+    fn default() -> Self {
+        Action::invalid
+    }
+}
+
+impl From<i32> for Action {
+    fn from(i: i32) -> Self {
+        match i {
+            0 => Action::invalid,
+            1 => Action::lease,
+            2 => Action::put,
+            3 => Action::commit,
+            4 => Action::release,
+            _ => Self::default(),
+        }
+    }
+}
+
+impl<'a> From<&'a str> for Action {
+    fn from(s: &'a str) -> Self {
+        match s {
+            "invalid" => Action::invalid,
+            "lease" => Action::lease,
+            "put" => Action::put,
+            "commit" => Action::commit,
+            "release" => Action::release,
+            _ => Self::default(),
+        }
+    }
+}
+
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct DirectBackupRecord<'a> {
+    pub source_id: u64,
+    pub other: Cow<'a, str>,
+    pub sent_by_other: bool,
+    pub message: Cow<'a, [u8]>,
+    pub message_type: u32,
+}
+
+impl<'a> MessageRead<'a> for DirectBackupRecord<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.source_id = r.read_uint64(bytes)?,
+                Ok(18) => msg.other = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(24) => msg.sent_by_other = r.read_bool(bytes)?,
+                Ok(34) => msg.message = r.read_bytes(bytes).map(Cow::Borrowed)?,
+                Ok(40) => msg.message_type = r.read_uint32(bytes)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for DirectBackupRecord<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.source_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.source_id) as u64) }
+        + if self.other == "" { 0 } else { 1 + sizeof_len((&self.other).len()) }
+        + if self.sent_by_other == false { 0 } else { 1 + sizeof_varint(*(&self.sent_by_other) as u64) }
+        + if self.message == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.message).len()) }
+        + if self.message_type == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.message_type) as u64) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.source_id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.source_id))?; }
+        if self.other != "" { w.write_with_tag(18, |w| w.write_string(&**&self.other))?; }
+        if self.sent_by_other != false { w.write_with_tag(24, |w| w.write_bool(*&self.sent_by_other))?; }
+        if self.message != Cow::Borrowed(b"") { w.write_with_tag(34, |w| w.write_bytes(&**&self.message))?; }
+        if self.message_type != 0u32 { w.write_with_tag(40, |w| w.write_uint32(*&self.message_type))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct DirectBackupRecords<'a> {
+    pub version: u32,
+    pub records: Vec<firefly::DirectBackupRecord<'a>>,
+}
+
+impl<'a> MessageRead<'a> for DirectBackupRecords<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.version = r.read_uint32(bytes)?,
+                Ok(18) => msg.records.push(r.read_message::<firefly::DirectBackupRecord>(bytes)?),
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for DirectBackupRecords<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.version == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.version) as u64) }
+        + self.records.iter().map(|s| 1 + sizeof_len((s).get_size())).sum::<usize>()
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.version != 0u32 { w.write_with_tag(8, |w| w.write_uint32(*&self.version))?; }
+        for s in &self.records { w.write_with_tag(18, |w| w.write_message(s))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct DirectBackupBinding<'a> {
+    pub version: u32,
+    pub username: Cow<'a, str>,
+    pub epoch: Cow<'a, str>,
+    pub chunk_id: Cow<'a, str>,
+    pub start: u64,
+    pub count: u32,
+}
+
+impl<'a> MessageRead<'a> for DirectBackupBinding<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.version = r.read_uint32(bytes)?,
+                Ok(18) => msg.username = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(26) => msg.epoch = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(34) => msg.chunk_id = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(40) => msg.start = r.read_uint64(bytes)?,
+                Ok(48) => msg.count = r.read_uint32(bytes)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for DirectBackupBinding<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.version == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.version) as u64) }
+        + if self.username == "" { 0 } else { 1 + sizeof_len((&self.username).len()) }
+        + if self.epoch == "" { 0 } else { 1 + sizeof_len((&self.epoch).len()) }
+        + if self.chunk_id == "" { 0 } else { 1 + sizeof_len((&self.chunk_id).len()) }
+        + if self.start == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.start) as u64) }
+        + if self.count == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.count) as u64) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.version != 0u32 { w.write_with_tag(8, |w| w.write_uint32(*&self.version))?; }
+        if self.username != "" { w.write_with_tag(18, |w| w.write_string(&**&self.username))?; }
+        if self.epoch != "" { w.write_with_tag(26, |w| w.write_string(&**&self.epoch))?; }
+        if self.chunk_id != "" { w.write_with_tag(34, |w| w.write_string(&**&self.chunk_id))?; }
+        if self.start != 0u64 { w.write_with_tag(40, |w| w.write_uint64(*&self.start))?; }
+        if self.count != 0u32 { w.write_with_tag(48, |w| w.write_uint32(*&self.count))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct DirectBackupKeySync<'a> {
+    pub version: u32,
+    pub epoch: Cow<'a, str>,
+    pub key: Cow<'a, [u8]>,
+    pub request_key: bool,
+    pub request_id: Cow<'a, str>,
+}
+
+impl<'a> MessageRead<'a> for DirectBackupKeySync<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.version = r.read_uint32(bytes)?,
+                Ok(18) => msg.epoch = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(26) => msg.key = r.read_bytes(bytes).map(Cow::Borrowed)?,
+                Ok(32) => msg.request_key = r.read_bool(bytes)?,
+                Ok(42) => msg.request_id = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for DirectBackupKeySync<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.version == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.version) as u64) }
+        + if self.epoch == "" { 0 } else { 1 + sizeof_len((&self.epoch).len()) }
+        + if self.key == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.key).len()) }
+        + if self.request_key == false { 0 } else { 1 + sizeof_varint(*(&self.request_key) as u64) }
+        + if self.request_id == "" { 0 } else { 1 + sizeof_len((&self.request_id).len()) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.version != 0u32 { w.write_with_tag(8, |w| w.write_uint32(*&self.version))?; }
+        if self.epoch != "" { w.write_with_tag(18, |w| w.write_string(&**&self.epoch))?; }
+        if self.key != Cow::Borrowed(b"") { w.write_with_tag(26, |w| w.write_bytes(&**&self.key))?; }
+        if self.request_key != false { w.write_with_tag(32, |w| w.write_bool(*&self.request_key))?; }
+        if self.request_id != "" { w.write_with_tag(42, |w| w.write_string(&**&self.request_id))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct DirectPinSnapshotSecret<'a> {
+    pub version: u32,
+    pub other: Cow<'a, str>,
+    pub snapshot_id: Cow<'a, str>,
+    pub key: Cow<'a, [u8]>,
+    pub ciphertext_hash: Cow<'a, [u8]>,
+    pub message_count: u32,
+}
+
+impl<'a> MessageRead<'a> for DirectPinSnapshotSecret<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.version = r.read_uint32(bytes)?,
+                Ok(18) => msg.other = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(26) => msg.snapshot_id = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(34) => msg.key = r.read_bytes(bytes).map(Cow::Borrowed)?,
+                Ok(42) => msg.ciphertext_hash = r.read_bytes(bytes).map(Cow::Borrowed)?,
+                Ok(48) => msg.message_count = r.read_uint32(bytes)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for DirectPinSnapshotSecret<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.version == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.version) as u64) }
+        + if self.other == "" { 0 } else { 1 + sizeof_len((&self.other).len()) }
+        + if self.snapshot_id == "" { 0 } else { 1 + sizeof_len((&self.snapshot_id).len()) }
+        + if self.key == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.key).len()) }
+        + if self.ciphertext_hash == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.ciphertext_hash).len()) }
+        + if self.message_count == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.message_count) as u64) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.version != 0u32 { w.write_with_tag(8, |w| w.write_uint32(*&self.version))?; }
+        if self.other != "" { w.write_with_tag(18, |w| w.write_string(&**&self.other))?; }
+        if self.snapshot_id != "" { w.write_with_tag(26, |w| w.write_string(&**&self.snapshot_id))?; }
+        if self.key != Cow::Borrowed(b"") { w.write_with_tag(34, |w| w.write_bytes(&**&self.key))?; }
+        if self.ciphertext_hash != Cow::Borrowed(b"") { w.write_with_tag(42, |w| w.write_bytes(&**&self.ciphertext_hash))?; }
+        if self.message_count != 0u32 { w.write_with_tag(48, |w| w.write_uint32(*&self.message_count))?; }
         Ok(())
     }
 }

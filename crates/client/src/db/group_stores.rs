@@ -36,6 +36,7 @@ impl GroupStateStore {
         )
         .await?;
 
+        crate::receipt_coordinator::ReceiptCoordinator::init(&pool).await?;
         Ok(Self { pool })
     }
 

@@ -59,13 +59,21 @@ pub fn compute_unencrypted_hash(messages: &[GroupMessage]) -> anyhow::Result<Vec
 }
 
 pub fn pack_messages_into_chunk(messages: &[GroupMessage]) -> anyhow::Result<PackedChunk> {
-    if messages.is_empty() || messages.len() > DEFAULT_CHUNK_SIZE {
+    pack_records(messages, false)
+}
+
+pub fn pack_snapshot_records(messages: &[GroupMessage]) -> anyhow::Result<PackedChunk> {
+    pack_records(messages, true)
+}
+
+fn pack_records(messages: &[GroupMessage], allow_empty: bool) -> anyhow::Result<PackedChunk> {
+    if (!allow_empty && messages.is_empty()) || messages.len() > DEFAULT_CHUNK_SIZE {
         return Err(anyhow::anyhow!("Cannot pack empty messages into a chunk"));
     }
 
     check_plaintext_budget(messages)?;
-    let start_msg_id = messages.first().unwrap().id;
-    let end_msg_id = messages.last().unwrap().id;
+    let start_msg_id = messages.first().map(|m|m.id).unwrap_or(0);
+    let end_msg_id = messages.last().map(|m|m.id).unwrap_or(0);
     let msg_count = messages.len() as u32;
 
     let pb_messages: Vec<_> = messages
@@ -130,6 +138,14 @@ pub fn decrypt_and_unpack_chunk(
     key: &[u8],
     expected_hash: &[u8],
 ) -> anyhow::Result<Vec<GroupMessage>> {
+    unpack_records(blob,key,expected_hash,false)
+}
+
+pub fn decrypt_snapshot_records(blob: &[u8], key: &[u8], hash: &[u8]) -> anyhow::Result<Vec<GroupMessage>> {
+    unpack_records(blob,key,hash,true)
+}
+
+fn unpack_records(blob: &[u8], key: &[u8], expected_hash: &[u8], allow_empty: bool) -> anyhow::Result<Vec<GroupMessage>> {
     if blob.len() < 12 || blob.len() > MAX_CHUNK_BYTES {
         return Err(anyhow::anyhow!("Blob too small to contain 12-byte nonce"));
     }
@@ -164,7 +180,7 @@ pub fn decrypt_and_unpack_chunk(
     let pb_messages =
         deserialize_proto::<firefly_protos::firefly::GroupHistoryRecords>(&unencrypted_bytes)?;
     anyhow::ensure!(pb_messages.format_version == 1, "Unsupported history format");
-    anyhow::ensure!(!pb_messages.messages.is_empty() && pb_messages.messages.len() <= DEFAULT_CHUNK_SIZE, "Invalid history count");
+    anyhow::ensure!((allow_empty || !pb_messages.messages.is_empty()) && pb_messages.messages.len() <= DEFAULT_CHUNK_SIZE, "Invalid history count");
 
     let mut result = Vec::with_capacity(pb_messages.messages.len());
     for m in pb_messages.messages {
@@ -184,6 +200,8 @@ pub fn decrypt_and_unpack_chunk(
             })
             .unwrap_or(0);
 
+        // Historical wire flags never override the current pin snapshot.
+        let message_type=message_type & !firefly_protos::MESSAGE_TYPE_PINNED;
         result.push(GroupMessage {
             id: m.id,
             group_id: m.group_id,

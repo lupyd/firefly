@@ -299,6 +299,34 @@ impl GroupMessagesStore {
         tx.commit().await?;
         Ok(imported)
     }
+    pub async fn purge_imported_chunk(&self, group: u64, chunk: u64) -> anyhow::Result<usize> {
+        let _lock = self.pin_writes.lock().await;
+        let mut tx = self.pool.begin().await?;
+        let deleted = sqlx::query(
+            "DELETE FROM group_messages WHERE group_id = ? AND id IN (SELECT message_id FROM group_history_imports WHERE group_id = ? AND chunk_id = ?)"
+        )
+        .bind(group as i64)
+        .bind(group as i64)
+        .bind(chunk as i64)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected() as usize;
+
+        sqlx::query("DELETE FROM group_history_imports WHERE group_id = ? AND chunk_id = ?")
+            .bind(group as i64)
+            .bind(chunk as i64)
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query("DELETE FROM group_history_imported_chunks WHERE group_id = ? AND chunk_id = ?")
+            .bind(group as i64)
+            .bind(chunk as i64)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(deleted)
+    }
     pub async fn get_range(
         &self,
         group_id: u64,
@@ -325,6 +353,40 @@ impl GroupMessagesStore {
             .map_err(Into::into)
     }
 
+
+    /// Apply a complete validated snapshot. Missing references are cached separately
+    /// from authenticated receipts and can never become independent vote evidence.
+    /// Adder-trusted recent snapshots may be reshared, but never used as votes.
+    pub async fn snapshot_history_range(&self,group:u64,start:u64,end:u64)->anyhow::Result<Vec<GroupMessage>> {
+        let rows=sqlx::query_as::<_,GroupMessage>("SELECT id,group_id,by,message,channel_id,epoch,message_type FROM group_messages WHERE group_id=? AND id>=? AND id<=? AND (message_type & 2)=0 AND by<>'' ORDER BY id LIMIT 1000")
+            .bind(group as i64).bind(start as i64).bind(end as i64).fetch_all(&self.pool).await?;
+        self.visible_messages(rows).await
+    }
+
+    pub async fn mark_snapshot_join_pending(&self,group_id:u64)->anyhow::Result<()> {
+        super::keyvalue::KeyValueStore::new(self.pool.clone()).await?.set(
+            &format!("snapshot-join-pending:{group_id}"),&format!("{:016x}",rand::random::<u64>())
+        ).await
+    }
+
+    pub async fn apply_pin_snapshot(&self, group_id:u64, records:&[GroupMessage], hash:&[u8]) -> anyhow::Result<()> {
+        anyhow::ensure!(records.len()<=50,"Too many pins");
+        if let (Some(first),Some(last))=(records.first(),records.last()) {
+            crate::history::validate_chunk_records(records,group_id,first.id,last.id,records.len() as u32)?;
+        }
+        self.import_verified_history(group_id,0,hash,records).await?;
+        let mut tx=self.pool.begin().await?;
+        sqlx::query("UPDATE group_messages SET message_type=message_type & ~1 WHERE group_id=? AND (message_type & 1)<>0").bind(group_id as i64).execute(&mut *tx).await?;
+        // Snapshot state supersedes the unreleased per-message pin protocol.
+        // Preserve it when the authenticated original later replaces an import.
+        sqlx::query("UPDATE group_pin_updates SET pinned=0,event_id=9223372036854775807 WHERE group_id=?").bind(group_id as i64).execute(&mut *tx).await?;
+        for record in records {
+            sqlx::query("INSERT INTO group_pin_updates(group_id,message_id,channel_id,event_id,pinned) VALUES(?,?,?,9223372036854775807,1) ON CONFLICT(group_id,message_id,channel_id) DO UPDATE SET pinned=1,event_id=excluded.event_id").bind(group_id as i64).bind(record.id as i64).bind(record.channel_id as i64).execute(&mut *tx).await?;
+            sqlx::query("UPDATE group_messages SET message_type=message_type | 1 WHERE group_id=? AND id=?").bind(group_id as i64).bind(record.id as i64).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
 
     pub async fn get_pinned_messages(&self, group_id: u64) -> anyhow::Result<Vec<GroupMessage>> {
         let _pin_write = self.pin_writes.lock().await;

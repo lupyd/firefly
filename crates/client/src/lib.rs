@@ -17,6 +17,10 @@ pub mod error;
 
 pub mod group;
 pub mod history;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod direct_backups;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod direct_pins;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod logger;
@@ -24,6 +28,9 @@ pub mod logger;
 pub mod schema;
 pub mod storage;
 pub mod utils;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod receipt_coordinator;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod websocket;

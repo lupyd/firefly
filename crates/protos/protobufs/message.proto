@@ -471,6 +471,8 @@ message UserMessageInner {
     MessagePayload messagePayload = 3;
     SelfUserMessage selfMessage = 4;
     Reaction reaction = 6;
+    DirectBackupKeySync backupKeySync = 7;
+    DirectPinSnapshotSecret directPinSnapshot = 8;
   }
 
   fixed32 nonce = 10;
@@ -774,4 +776,76 @@ message GroupSyncBundle {
   string bundle_id = 7;
   uint32 page = 8;
   bool last_page = 9;
+}
+
+// Account-wide password-encrypted direct chat backups. No password/key on the wire.
+message DirectBackupChunk {
+  string id = 1;
+  uint64 start = 2; // Archive ordinal, not a device's local message ID.
+  uint32 count = 3; // 1..1000; only the final chunk may be partial.
+  string blob_path = 4; // Relative to configured trusted CDN origin.
+  uint64 byte_size = 5;
+  bytes ciphertext_hash = 6;
+}
+message DirectBackupManifest {
+  uint32 version = 1;
+  string epoch = 2;
+  bytes salt = 3; // Argon2id v19: m=65536 KiB, t=3, p=1, output=32 bytes.
+  bytes verifier = 4; // AES-GCM authenticated format/account/key check.
+  uint32 schedule_days = 5; // 7 or 30.
+  repeated DirectBackupChunk chunks = 6;
+  bytes authentication = 7; // AES-GCM sealed SHA-256 of this manifest with authentication cleared.
+}
+message DirectBackupState {
+  int64 revision = 1;
+  int64 updated_at = 2;
+  DirectBackupManifest manifest = 3;
+}
+message DirectBackupRequest {
+  enum Action { invalid = 0; lease = 1; put = 2; commit = 3; release = 4; }
+  Action action = 1;
+  int64 revision = 2;
+  string lease = 3; // Random operation ID, fenced by revision and server expiry.
+  string id = 4;
+  bytes ciphertext = 5;
+  DirectBackupManifest manifest = 6;
+  DirectBackupChunk object = 7; // Reservation metadata, never ciphertext.
+}
+message DirectBackupRecord {
+  uint64 source_id = 1; // Display/import hint only; never dedup identity.
+  string other = 2;
+  bool sent_by_other = 3;
+  bytes message = 4; // Canonically encoded UserMessageInner, including send nonce.
+  uint32 message_type = 5;
+}
+message DirectBackupRecords {
+  uint32 version = 1;
+  repeated DirectBackupRecord records = 2;
+}
+message DirectBackupBinding {
+  uint32 version = 1;
+  string username = 2;
+  string epoch = 3;
+  string chunk_id = 4;
+  uint64 start = 5;
+  uint32 count = 6;
+}
+
+// ONLY valid inside a decrypted SelfUserMessage from the same account.
+message DirectBackupKeySync {
+  uint32 version = 1;
+  string epoch = 2;
+  bytes key = 3; // 32-byte derived unlock key; absent for requests.
+  bool request_key = 4;
+  string request_id = 5;
+}
+
+// Opaque compressed/encrypted user-to-user pin snapshot capability.
+message DirectPinSnapshotSecret {
+  uint32 version = 1;
+  string other = 2;
+  string snapshot_id = 3;
+  bytes key = 4; // 32 bytes; delivered only in E2EE user messages.
+  bytes ciphertext_hash = 5;
+  uint32 message_count = 6;
 }

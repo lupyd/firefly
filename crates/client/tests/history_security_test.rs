@@ -193,3 +193,36 @@ async fn three_stores_require_independent_receipts_not_joiner_imports() -> anyho
     assert_ne!(compute_unencrypted_hash(&evidence)?,forged_chunk.unencrypted_hash);
     Ok(())
 }
+
+#[tokio::test]
+async fn dispute_purges_only_imported_records_preserving_authenticated_originals() -> anyhow::Result<()> {
+    let pool = setup_pool("sqlite::memory:", 1).await?;
+    let store = GroupMessagesStore::new(pool.clone()).await?;
+
+    let live_msg = record(1, 1)?;
+    store.add(live_msg.id, 42, 1, 1, &live_msg.by, &live_msg.message, 0).await?;
+
+    let msg2 = record(2, 1)?;
+    let msg3 = record(3, 1)?;
+    assert_eq!(store.import_verified_history(42, 10, &[1; 32], &[msg2, msg3]).await?, 2);
+
+    assert!(store.get_message(42, 1).await?.is_some());
+    assert!(store.get_message(42, 2).await?.is_some());
+    assert!(store.get_message(42, 3).await?.is_some());
+
+    let purged = store.purge_imported_chunk(42, 10).await?;
+    assert_eq!(purged, 2);
+
+    assert!(store.get_message(42, 1).await?.is_some());
+    assert!(store.get_message(42, 2).await?.is_none());
+    assert!(store.get_message(42, 3).await?.is_none());
+
+    let valid2 = record(2, 1)?;
+    let valid3 = record(3, 1)?;
+    assert_eq!(store.import_verified_history(42, 11, &[2; 32], &[valid2, valid3]).await?, 2);
+    assert!(store.get_message(42, 2).await?.is_some());
+    assert!(store.get_message(42, 3).await?.is_some());
+    assert!(store.get_message(42, 1).await?.is_some());
+
+    Ok(())
+}

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use firefly_client::callbacks::FireflyWsClientCallback;
+use firefly_client::callbacks::{FireflyWsClientCallback, GroupHistorySignal};
 use firefly_client::db::{
     group_messages::GroupMessage,
     messages::{MessagesStore, UserMessage},
@@ -39,6 +39,7 @@ struct TestCallbacks {
     message_tx: mpsc::Sender<UserMessage>,
     group_message_tx: mpsc::Sender<GroupMessage>,
     messages_store: MessagesStore,
+    client: Arc<tokio::sync::RwLock<Option<Arc<FireflyWsClient>>>>,
 }
 
 #[async_trait]
@@ -60,6 +61,12 @@ impl FireflyWsClientCallback for TestCallbacks {
 
     async fn on_group_message(&self, group_message: GroupMessage) {
         let _ = self.group_message_tx.send(group_message).await;
+    }
+
+    async fn on_group_history_signal(&self, signal: GroupHistorySignal) {
+        if let Some(client) = self.client.read().await.as_ref() {
+            let _ = client.handle_group_history_signal(signal).await;
+        }
     }
 }
 
@@ -136,12 +143,14 @@ async fn test_pinned_messages_persist_across_1to1_address_rotation() {
         let store = MessagesStore::new(mem_pool).await.unwrap();
         alice_stores.push(store.clone());
 
+        let client_holder = Arc::new(tokio::sync::RwLock::new(None));
         let callbacks = TestCallbacks {
             name: alice_name.clone(),
             token: alice_name.clone(),
             message_tx: msg_tx,
             group_message_tx: gmsg_tx,
             messages_store: store,
+            client: client_holder.clone(),
         };
 
         let db = format!("{}/alice_{}.db", test_dir, i);
@@ -179,12 +188,14 @@ async fn test_pinned_messages_persist_across_1to1_address_rotation() {
     let (bob_gmsg_tx, _bob_gmsg_rx) = mpsc::channel(100);
     let bob_mem_pool = SqlitePool::connect(":memory:").await.unwrap();
     let bob_store = MessagesStore::new(bob_mem_pool).await.unwrap();
+    let bob_holder = Arc::new(tokio::sync::RwLock::new(None));
     let bob_callbacks = TestCallbacks {
         name: bob_name.clone(),
         token: bob_name.clone(),
         message_tx: bob_msg_tx,
         group_message_tx: bob_gmsg_tx,
         messages_store: bob_store.clone(),
+        client: bob_holder.clone(),
     };
     let bob_db = format!("{}/bob.db", test_dir);
     let bob_client = FireflyWsClient::create(
@@ -198,6 +209,7 @@ async fn test_pinned_messages_persist_across_1to1_address_rotation() {
     .await
     .expect("Failed to create Bob client");
     let bob_client = Arc::new(bob_client);
+    *bob_holder.write().await = Some(bob_client.clone());
     let bob_init = bob_client.clone();
     tokio::spawn(async move {
         let _ = bob_init.initialize_with_retrying().await;
@@ -247,12 +259,14 @@ async fn test_pinned_messages_persist_across_1to1_address_rotation() {
     let (gmsg_tx6, _gmsg_rx6) = mpsc::channel(100);
     let mem_pool6 = SqlitePool::connect(":memory:").await.unwrap();
     let store6 = MessagesStore::new(mem_pool6).await.unwrap();
+    let client6_holder = Arc::new(tokio::sync::RwLock::new(None));
     let callbacks6 = TestCallbacks {
         name: alice_name.clone(),
         token: alice_name.clone(),
         message_tx: msg_tx6,
         group_message_tx: gmsg_tx6,
         messages_store: store6.clone(),
+        client: client6_holder.clone(),
     };
 
     let db6 = format!("{}/alice_6.db", test_dir);
@@ -267,6 +281,7 @@ async fn test_pinned_messages_persist_across_1to1_address_rotation() {
     .await
     .expect("Failed to create Alice client 6");
     let client6 = Arc::new(client6);
+    *client6_holder.write().await = Some(client6.clone());
 
     let client_init6 = client6.clone();
     tokio::spawn(async move {
@@ -387,12 +402,14 @@ async fn test_pinned_messages_persist_across_group_readd_and_rotation() {
     let (alice_gmsg_tx, mut alice_gmsg_rx) = mpsc::channel(100);
     let alice_pool = SqlitePool::connect(":memory:").await.unwrap();
     let alice_store = MessagesStore::new(alice_pool).await.unwrap();
+    let alice_holder = Arc::new(tokio::sync::RwLock::new(None));
     let alice_callbacks = TestCallbacks {
         name: alice_name.clone(),
         token: alice_name.clone(),
         message_tx: alice_msg_tx,
         group_message_tx: alice_gmsg_tx,
         messages_store: alice_store,
+        client: alice_holder.clone(),
     };
     let alice_db = format!("{}/alice.db", test_dir);
     let alice_client = FireflyWsClient::create(
@@ -406,6 +423,7 @@ async fn test_pinned_messages_persist_across_group_readd_and_rotation() {
     .await
     .expect("Alice client create");
     let alice_client = Arc::new(alice_client);
+    *alice_holder.write().await = Some(alice_client.clone());
     let alice_init = alice_client.clone();
     tokio::spawn(async move {
         let _ = alice_init.initialize_with_retrying().await;
@@ -417,12 +435,14 @@ async fn test_pinned_messages_persist_across_group_readd_and_rotation() {
     let (bob1_gmsg_tx, mut bob1_gmsg_rx) = mpsc::channel(100);
     let bob1_pool = SqlitePool::connect(":memory:").await.unwrap();
     let bob1_store = MessagesStore::new(bob1_pool).await.unwrap();
+    let bob1_holder = Arc::new(tokio::sync::RwLock::new(None));
     let bob1_callbacks = TestCallbacks {
         name: bob_name.clone(),
         token: bob_name.clone(),
         message_tx: bob1_msg_tx,
         group_message_tx: bob1_gmsg_tx,
         messages_store: bob1_store,
+        client: bob1_holder.clone(),
     };
     let bob1_db = format!("{}/bob1.db", test_dir);
     let bob1_client = FireflyWsClient::create(
@@ -436,6 +456,7 @@ async fn test_pinned_messages_persist_across_group_readd_and_rotation() {
     .await
     .expect("Bob1 client create");
     let bob1_client = Arc::new(bob1_client);
+    *bob1_holder.write().await = Some(bob1_client.clone());
     let bob1_init = bob1_client.clone();
     tokio::spawn(async move {
         let _ = bob1_init.initialize_with_retrying().await;
@@ -485,19 +506,27 @@ async fn test_pinned_messages_persist_across_group_readd_and_rotation() {
         .expect("Alice send pinned message");
     assert!(uploaded_id > 0);
 
-    // Bob 1 receives the pinned group message
+    // Bob 1 receives the group message
     let bob1_msg = tokio::time::timeout(Duration::from_secs(10), bob1_gmsg_rx.recv())
         .await
         .expect("Timeout waiting for pinned message on Bob1")
         .expect("Channel closed");
-    assert_ne!(bob1_msg.message_type & MESSAGE_TYPE_PINNED, 0);
+    assert_eq!(bob1_msg.group_id, group_id);
 
     // Verify Bob 1 and Alice both have 1 pinned message in their local DBs
-    let b1_pinned = bob1_client
-        .group_message_store()
-        .get_pinned_messages(group_id)
-        .await
-        .expect("Bob1 get_pinned_messages");
+    let mut b1_pinned = Vec::new();
+    for _ in 0..50 {
+        let _ = bob1_client.resume_snapshots(group_id).await;
+        b1_pinned = bob1_client
+            .group_message_store()
+            .get_pinned_messages(group_id)
+            .await
+            .expect("Bob1 get_pinned_messages");
+        if !b1_pinned.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     assert_eq!(b1_pinned.len(), 1);
     assert_ne!(b1_pinned[0].message_type & MESSAGE_TYPE_PINNED, 0);
 
@@ -514,12 +543,14 @@ async fn test_pinned_messages_persist_across_group_readd_and_rotation() {
     let (bob2_gmsg_tx, mut bob2_gmsg_rx) = mpsc::channel(100);
     let bob2_pool = SqlitePool::connect(":memory:").await.unwrap();
     let bob2_store = MessagesStore::new(bob2_pool).await.unwrap();
+    let bob2_holder = Arc::new(tokio::sync::RwLock::new(None));
     let bob2_callbacks = TestCallbacks {
         name: bob_name.clone(),
         token: bob_name.clone(),
         message_tx: bob2_msg_tx,
         group_message_tx: bob2_gmsg_tx,
         messages_store: bob2_store,
+        client: bob2_holder.clone(),
     };
     let bob2_db = format!("{}/bob2.db", test_dir);
     let bob2_client = FireflyWsClient::create(
@@ -533,6 +564,7 @@ async fn test_pinned_messages_persist_across_group_readd_and_rotation() {
     .await
     .expect("Bob2 client create");
     let bob2_client = Arc::new(bob2_client);
+    *bob2_holder.write().await = Some(bob2_client.clone());
     let bob2_init = bob2_client.clone();
     tokio::spawn(async move {
         let _ = bob2_init.initialize_with_retrying().await;
@@ -553,6 +585,7 @@ async fn test_pinned_messages_persist_across_group_readd_and_rotation() {
 
     // Bob 2 syncs
     bob2_client.check_setup().await.expect("Bob2 check_setup");
+    let _ = bob2_client.resume_snapshots(group_id).await;
 
     // 7. Bob Device 2 must receive the re-encrypted pinned message!
     println!("Checking if Bob Device 2 receives the re-encrypted pinned message...");

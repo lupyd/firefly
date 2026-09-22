@@ -3598,6 +3598,51 @@ impl FireflyWsClient {
         Ok(())
     }
 
+    pub async fn set_direct_message_pin(&self, other: String, message_id: u64, pinned: bool) -> anyhow::Result<()> {
+        let token=self.callbacks.get_access_token().await.context("token not found")?;
+        let before=self.messages_store.get_last_messages_of(&other,i64::MAX,100_000).await?;
+        let old=before.iter().find(|m|m.id==message_id).ok_or_else(||anyhow::anyhow!("Message unavailable for pinning"))?.message_type;
+        let next=if pinned {old|firefly_protos::MESSAGE_TYPE_PINNED}else{old&!firefly_protos::MESSAGE_TYPE_PINNED};
+        self.messages_store.update_message_type(&other,message_id,next).await?;
+        let pins=self.messages_store.get_pinned_messages_of(&other).await?;
+        match crate::direct_pins::publish(&self.firefly_base_url,&token,&other,&pins).await {
+            Ok(secret)=>{if let Err(e)=self.send_direct_pin_snapshot(&other,secret).await {self.messages_store.update_message_type(&other,message_id,old).await?;return Err(e)}Ok(())},
+            Err(e)=>{self.messages_store.update_message_type(&other,message_id,old).await?;Err(e)}
+        }
+    }
+    async fn send_direct_pin_snapshot(&self, other: &str, secret: firefly::DirectPinSnapshotSecret<'static>) -> anyhow::Result<()> {
+        let payload = serialize_proto(&firefly::UserMessageInner {
+            message: firefly::mod_UserMessageInner::OneOfmessage::directPinSnapshot(secret),
+            nonce: rng().next_u32(),
+            message_type: firefly_protos::MESSAGE_TYPE_HIDDEN,
+        })?
+        .to_vec();
+        // 1. Sync encryption key capability to the chat participant (other user)
+        self.encrypt_and_send_internal(other, &payload, firefly_protos::MESSAGE_TYPE_HIDDEN).await?;
+        // 2. Sync encryption key capability between own sibling devices
+        let my_username = self.callbacks.name();
+        if !my_username.is_empty() && my_username != other {
+            if let Err(e) = self.encrypt_and_send_internal(my_username, &payload, firefly_protos::MESSAGE_TYPE_HIDDEN).await {
+                log::warn!("Failed to sync direct pin snapshot to sibling devices: {e}");
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn send_backup_key_sync(
+        &self,
+        sync: firefly_protos::firefly::DirectBackupKeySync<'static>,
+    ) -> anyhow::Result<()> {
+        let payload = firefly_protos::serialize_proto(&firefly_protos::firefly::UserMessageInner {
+            message: firefly_protos::firefly::mod_UserMessageInner::OneOfmessage::backupKeySync(sync),
+            nonce: rand::rng().next_u32(),
+            message_type: 0,
+        })?
+        .to_vec();
+        let username = self.callbacks.name().to_string();
+        self.encrypt_and_send_internal(&username, &payload, 0).await.map(|_| ())
+    }
+
     pub async fn fulfill_group_history(&self, group_id:u64, request_id:u64, start_msg_id:u64, end_msg_id:u64)->anyhow::Result<bool> {
         if !self.history_enabled(group_id).await? {return Ok(false);}
         if !self.claim_group_history_request(group_id,request_id,start_msg_id,end_msg_id).await? {return Ok(false);}
@@ -3977,6 +4022,17 @@ async fn on_user_message(
                         {
                             is_dummy = true;
                         }
+                        if let firefly::mod_UserMessageInner::OneOfmessage::backupKeySync(sync) = inner_inner.message {
+                            is_dummy = true;
+                            let owned_sync = firefly_protos::firefly::DirectBackupKeySync {
+                                version: sync.version,
+                                epoch: sync.epoch.into_owned().into(),
+                                key: sync.key.into_owned().into(),
+                                request_key: sync.request_key,
+                                request_id: sync.request_id.into_owned().into(),
+                            };
+                            callbacks.on_direct_backup_key_sync(owned_sync).await;
+                        }
                     }
                 }
             }
@@ -3988,6 +4044,30 @@ async fn on_user_message(
         }
     } else if is_self_msg {
         is_dummy = true;
+    }
+
+    if let Ok(inner) = deserialize_proto::<firefly::UserMessageInner>(&final_message) {
+        if let firefly::mod_UserMessageInner::OneOfmessage::directPinSnapshot(secret) = inner.message {
+            is_dummy = true;
+            let conversation_peer = if sent_by_other {
+                other_username.clone()
+            } else {
+                secret.other.to_string()
+            };
+            callbacks
+                .on_direct_pin_snapshot(
+                    conversation_peer,
+                    firefly::DirectPinSnapshotSecret {
+                        version: secret.version,
+                        other: secret.other.into_owned().into(),
+                        snapshot_id: secret.snapshot_id.into_owned().into(),
+                        key: secret.key.into_owned().into(),
+                        ciphertext_hash: secret.ciphertext_hash.into_owned().into(),
+                        message_count: secret.message_count,
+                    },
+                )
+                .await;
+        }
     }
 
     if !is_dummy {
@@ -4659,6 +4739,12 @@ pub struct FfiFireflyWsClient {
 
 impl FfiFireflyWsClient {
     pub fn set_cdn_url(&self, url: String) { self.inner.set_cdn_url(url); }
+    pub async fn set_direct_message_pin(&self, other:String, message_id:u64, pinned:bool)->anyhow::Result<()> {let name=self.inner.callbacks.name().to_string();CURRENT_CLIENT.scope(name,self.inner.set_direct_message_pin(other,message_id,pinned)).await}
+
+    pub async fn send_backup_key_sync(&self, sync: firefly_protos::firefly::DirectBackupKeySync<'static>) -> anyhow::Result<()> {
+        let name = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT.scope(name, self.inner.send_backup_key_sync(sync)).await
+    }
     pub async fn request_group_history(&self, group: u64, start: u64, end: u64) -> anyhow::Result<()> { self.inner.request_group_history(group, start, end).await.map(|_| ()) }
     pub async fn import_group_history_page(&self, group: u64, since: u64, until: u64) -> anyhow::Result<HistoryImportPage> { self.inner.import_group_history_page(group,since,until).await }
     pub async fn handle_group_history_signal(&self, signal: crate::callbacks::GroupHistorySignal) -> anyhow::Result<()> {

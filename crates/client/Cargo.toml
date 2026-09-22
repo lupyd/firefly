@@ -37,6 +37,7 @@ twox-hash = "2.1.2"
 hex = "0.4.3"
 sha2.workspace = true
 zstd = "0.14.0"
+argon2 = "0.6.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 android_logger = "0.15.1"
@@ -57,5 +58,6 @@ tokio = { workspace = true, features = ["sync", "macros"] }
 
 [dev-dependencies]
 dotenv = { workspace = true }
+mls-rs-crypto-rustcrypto = "0.21.0"
 
 

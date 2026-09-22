@@ -63,5 +63,9 @@ pub trait FireflyWsClientCallback: Send + Sync {
     async fn on_group_history_signal(&self, _signal: GroupHistorySignal) {}
 
     async fn on_read_user_messages_upto(&self, _read: ReadUserMessagesUpto) {}
+
+    async fn on_direct_backup_key_sync(&self, _sync: firefly_protos::firefly::DirectBackupKeySync<'static>) {}
+
+    async fn on_direct_pin_snapshot(&self, _peer: String, _secret: firefly_protos::firefly::DirectPinSnapshotSecret<'static>) {}
 }
 

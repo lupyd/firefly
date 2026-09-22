@@ -51,10 +51,28 @@ pub async fn ensure_column(
     }
     let cols = get_table_columns(pool, table).await?;
     if !cols.contains(&column.to_lowercase()) {
-        log::info!("Migrating table '{}': adding column '{} {}'", table, column, column_def);
+        log::info!(
+            "Migrating table '{}': adding column '{} {}'",
+            table,
+            column,
+            column_def
+        );
         let sql = format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, column_def);
         pool.execute(sql.as_str()).await?;
     }
+    pool.execute(r#"
+        CREATE TABLE IF NOT EXISTS receipt_journal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id BLOB NOT NULL,
+            epoch INTEGER NOT NULL,
+            capability_key TEXT,
+            capability_value TEXT,
+            state TEXT NOT NULL DEFAULT 'staged',
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS receipt_journal_staged ON receipt_journal (state);
+        INSERT OR IGNORE INTO _schema_migrations(version,name,applied_at) VALUES(6,'receipt_journal_v6',0);
+    "#).await?;
     Ok(())
 }
 
@@ -76,17 +94,19 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     )
     .await?;
 
-    // Fast path: If shared_pins_v4 is already applied, return immediately without any table scans.
-    let already_applied: Option<i64> = sqlx::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 4")
-        .fetch_optional(&mut *conn)
-        .await?;
+    // Fast path: If snapshot_inbox_v5 is already applied, return immediately without any table scans.
+    let already_applied: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 5")
+            .fetch_optional(&mut *conn)
+            .await?;
     if already_applied.is_some() {
         return Ok(());
     }
 
-    let v1_applied: Option<i64> = sqlx::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 1")
-        .fetch_optional(&mut *conn)
-        .await?;
+    let v1_applied: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 1")
+            .fetch_optional(&mut *conn)
+            .await?;
     drop(conn);
 
     if v1_applied.is_none() {
@@ -137,68 +157,104 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         )
         .await?;
 
-    // 3. Migrate user_messages columns
-    ensure_column(pool, "user_messages", "message_type", "INTEGER NOT NULL DEFAULT 0").await?;
-    ensure_column(pool, "user_messages", "text", "TEXT NOT NULL DEFAULT ''").await?;
+        // 3. Migrate user_messages columns
+        ensure_column(
+            pool,
+            "user_messages",
+            "message_type",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        ensure_column(pool, "user_messages", "text", "TEXT NOT NULL DEFAULT ''").await?;
 
-    // 4. Migrate group_messages columns
-    ensure_column(pool, "group_messages", "epoch", "INTEGER NOT NULL DEFAULT 0").await?;
-    ensure_column(pool, "group_messages", "message_type", "INTEGER NOT NULL DEFAULT 0").await?;
-    ensure_column(pool, "group_messages", "text", "TEXT NOT NULL DEFAULT ''").await?;
+        // 4. Migrate group_messages columns
+        ensure_column(
+            pool,
+            "group_messages",
+            "epoch",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        ensure_column(
+            pool,
+            "group_messages",
+            "message_type",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        ensure_column(pool, "group_messages", "text", "TEXT NOT NULL DEFAULT ''").await?;
 
-    // 5. Migrate favourite_messages columns
-    ensure_column(pool, "favourite_messages", "message_type", "INTEGER NOT NULL DEFAULT 0").await?;
-    ensure_column(pool, "favourite_messages", "epoch", "INTEGER NOT NULL DEFAULT 0").await?;
-    ensure_column(pool, "favourite_messages", "text", "TEXT NOT NULL DEFAULT ''").await?;
+        // 5. Migrate favourite_messages columns
+        ensure_column(
+            pool,
+            "favourite_messages",
+            "message_type",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        ensure_column(
+            pool,
+            "favourite_messages",
+            "epoch",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        ensure_column(
+            pool,
+            "favourite_messages",
+            "text",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        .await?;
 
-    // 6. Backfill user_messages text in batches
-    let mut had_unmigrated_users = false;
-    loop {
-        let batch = sqlx::query("SELECT rowid, message FROM user_messages WHERE text = '' AND length(message) > 0 LIMIT 500")
+        // 6. Backfill user_messages text in batches
+        let mut had_unmigrated_users = false;
+        loop {
+            let batch = sqlx::query("SELECT rowid, message FROM user_messages WHERE text = '' AND length(message) > 0 LIMIT 500")
             .fetch_all(pool)
             .await?;
-        if batch.is_empty() {
-            break;
+            if batch.is_empty() {
+                break;
+            }
+            had_unmigrated_users = true;
+            for row in batch {
+                let rowid: i64 = row.try_get("rowid")?;
+                let msg_bytes: Vec<u8> = row.try_get("message")?;
+                let text = extract_user_message_text(&msg_bytes);
+                let update_text = if text.is_empty() { " " } else { text.as_str() };
+                sqlx::query("UPDATE user_messages SET text = ? WHERE rowid = ?")
+                    .bind(update_text)
+                    .bind(rowid)
+                    .execute(pool)
+                    .await?;
+            }
         }
-        had_unmigrated_users = true;
-        for row in batch {
-            let rowid: i64 = row.try_get("rowid")?;
-            let msg_bytes: Vec<u8> = row.try_get("message")?;
-            let text = extract_user_message_text(&msg_bytes);
-            let update_text = if text.is_empty() { " " } else { text.as_str() };
-            sqlx::query("UPDATE user_messages SET text = ? WHERE rowid = ?")
-                .bind(update_text)
-                .bind(rowid)
-                .execute(pool)
-                .await?;
-        }
-    }
 
-    // 7. Backfill group_messages text in batches
-    let mut had_unmigrated_groups = false;
-    loop {
-        let batch = sqlx::query("SELECT rowid, message FROM group_messages WHERE text = '' AND length(message) > 0 LIMIT 500")
+        // 7. Backfill group_messages text in batches
+        let mut had_unmigrated_groups = false;
+        loop {
+            let batch = sqlx::query("SELECT rowid, message FROM group_messages WHERE text = '' AND length(message) > 0 LIMIT 500")
             .fetch_all(pool)
             .await?;
-        if batch.is_empty() {
-            break;
+            if batch.is_empty() {
+                break;
+            }
+            had_unmigrated_groups = true;
+            for row in batch {
+                let rowid: i64 = row.try_get("rowid")?;
+                let msg_bytes: Vec<u8> = row.try_get("message")?;
+                let text = extract_group_message_text(&msg_bytes);
+                let update_text = if text.is_empty() { " " } else { text.as_str() };
+                sqlx::query("UPDATE group_messages SET text = ? WHERE rowid = ?")
+                    .bind(update_text)
+                    .bind(rowid)
+                    .execute(pool)
+                    .await?;
+            }
         }
-        had_unmigrated_groups = true;
-        for row in batch {
-            let rowid: i64 = row.try_get("rowid")?;
-            let msg_bytes: Vec<u8> = row.try_get("message")?;
-            let text = extract_group_message_text(&msg_bytes);
-            let update_text = if text.is_empty() { " " } else { text.as_str() };
-            sqlx::query("UPDATE group_messages SET text = ? WHERE rowid = ?")
-                .bind(update_text)
-                .bind(rowid)
-                .execute(pool)
-                .await?;
-        }
-    }
 
-    // 8. Create indexes and FTS5 triggers safely
-    pool.execute(
+        // 8. Create indexes and FTS5 triggers safely
+        pool.execute(
         r#"
         CREATE INDEX IF NOT EXISTS user_messages_other_idx ON user_messages (other, id);
         CREATE INDEX IF NOT EXISTS user_messages_other_type_idx ON user_messages (other, message_type);
@@ -257,30 +313,38 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     )
     .await?;
 
-    // 9. Synchronize FTS5 indexes if new data was migrated (O(1) existence checks, never full table scan)
-    let fts_user_has_rows = sqlx::query_scalar::<_, i64>("SELECT 1 FROM user_messages_fts LIMIT 1")
-        .fetch_optional(pool)
-        .await?
-        .is_some();
-    let user_msgs_have_text = sqlx::query_scalar::<_, i64>("SELECT 1 FROM user_messages WHERE text != '' LIMIT 1")
-        .fetch_optional(pool)
-        .await?
-        .is_some();
-    if had_unmigrated_users || (!fts_user_has_rows && user_msgs_have_text) {
-        let _ = pool.execute("INSERT INTO user_messages_fts(user_messages_fts) VALUES('rebuild')").await;
-    }
+        // 9. Synchronize FTS5 indexes if new data was migrated (O(1) existence checks, never full table scan)
+        let fts_user_has_rows =
+            sqlx::query_scalar::<_, i64>("SELECT 1 FROM user_messages_fts LIMIT 1")
+                .fetch_optional(pool)
+                .await?
+                .is_some();
+        let user_msgs_have_text =
+            sqlx::query_scalar::<_, i64>("SELECT 1 FROM user_messages WHERE text != '' LIMIT 1")
+                .fetch_optional(pool)
+                .await?
+                .is_some();
+        if had_unmigrated_users || (!fts_user_has_rows && user_msgs_have_text) {
+            let _ = pool
+                .execute("INSERT INTO user_messages_fts(user_messages_fts) VALUES('rebuild')")
+                .await;
+        }
 
-    let fts_grp_has_rows = sqlx::query_scalar::<_, i64>("SELECT 1 FROM group_messages_fts LIMIT 1")
-        .fetch_optional(pool)
-        .await?
-        .is_some();
-    let grp_msgs_have_text = sqlx::query_scalar::<_, i64>("SELECT 1 FROM group_messages WHERE text != '' LIMIT 1")
-        .fetch_optional(pool)
-        .await?
-        .is_some();
-    if had_unmigrated_groups || (!fts_grp_has_rows && grp_msgs_have_text) {
-        let _ = pool.execute("INSERT INTO group_messages_fts(group_messages_fts) VALUES('rebuild')").await;
-    }
+        let fts_grp_has_rows =
+            sqlx::query_scalar::<_, i64>("SELECT 1 FROM group_messages_fts LIMIT 1")
+                .fetch_optional(pool)
+                .await?
+                .is_some();
+        let grp_msgs_have_text =
+            sqlx::query_scalar::<_, i64>("SELECT 1 FROM group_messages WHERE text != '' LIMIT 1")
+                .fetch_optional(pool)
+                .await?
+                .is_some();
+        if had_unmigrated_groups || (!fts_grp_has_rows && grp_msgs_have_text) {
+            let _ = pool
+                .execute("INSERT INTO group_messages_fts(group_messages_fts) VALUES('rebuild')")
+                .await;
+        }
 
         // Record migration 1 applied
         let now = get_current_timestamp_millis_since_epoch() as i64;
@@ -291,9 +355,10 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     }
 
     // 10. Migration v2: Group History Chunks Keys and Disapprovals
-    let v2_applied: Option<i64> = sqlx::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 2")
-        .fetch_optional(pool)
-        .await?;
+    let v2_applied: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 2")
+            .fetch_optional(pool)
+            .await?;
     if v2_applied.is_none() {
         pool.execute(
             r#"
@@ -328,7 +393,6 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
             .await;
     }
 
-
     pool.execute(r#"
         CREATE TABLE IF NOT EXISTS group_history_keys_v3 (
             group_id INTEGER NOT NULL, start_msg_id INTEGER NOT NULL, end_msg_id INTEGER NOT NULL,
@@ -354,6 +418,28 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         );
         INSERT OR IGNORE INTO _schema_migrations(version,name,applied_at) VALUES(4,'shared_pins_v4',0);
     "#).await?;
+    pool.execute(r#"
+        CREATE TABLE IF NOT EXISTS group_snapshot_inbox (
+            group_id INTEGER NOT NULL,snapshot_id TEXT NOT NULL,
+            done INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt INTEGER NOT NULL DEFAULT 0,last_error TEXT,
+            PRIMARY KEY(group_id,snapshot_id)
+        );
+        CREATE INDEX IF NOT EXISTS group_snapshot_inbox_due ON group_snapshot_inbox(group_id,done,next_attempt);
+        INSERT OR IGNORE INTO _schema_migrations(version,name,applied_at) VALUES(5,'snapshot_inbox_v5',0);
+    "#).await?;
+    pool.execute(r#"
+        CREATE TABLE IF NOT EXISTS receipt_journal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id BLOB NOT NULL,
+            epoch INTEGER NOT NULL,
+            capability_key TEXT,
+            capability_value TEXT,
+            state TEXT NOT NULL DEFAULT 'staged',
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS receipt_journal_staged ON receipt_journal (state);
+        INSERT OR IGNORE INTO _schema_migrations(version,name,applied_at) VALUES(6,'receipt_journal_v6',0);
+    "#).await?;
     Ok(())
 }
-

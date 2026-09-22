@@ -118,6 +118,19 @@ impl FireflyMlsRules {
                 return Ok(());
             }
         }
+        if let Ok(inner) = deserialize_proto::<firefly_protos::firefly::GroupMessageInner>(data) {
+            if let firefly_protos::firefly::mod_GroupMessageInner::OneOfmessage::syncBundle(bundle) = inner.message {
+                Self::require_message_permission(extension, username, 0, UserPermission::SeeMessage)?;
+                if inner.message_type != firefly_protos::MESSAGE_TYPE_HIDDEN || inner.channelId != 0
+                    || bundle.format_version != 1 || bundle.group_id == 0 || data.len() > 256 * 1024
+                    || bundle.keys.len() > 32 || bundle.chunks.len() > 32 {
+                    return Err(MessagePermissionDenied { permission: UserPermission::SeeMessage, channel_id: 0 });
+                }
+                // This transports capabilities only. Snapshot writes are independently
+                // authorized by the server, and receivers bind keys to immutable bytes.
+                return Ok(());
+            }
+        }
         let (channel_id, message_type) = Self::message_metadata(data);
         Self::require_message_permission(
             extension,

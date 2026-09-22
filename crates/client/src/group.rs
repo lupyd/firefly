@@ -396,6 +396,14 @@ impl FfiMlsGroup {
         self.group.can_see_message(channel_id).await
     }
 
+    pub async fn has_full_channel_access(&self) -> anyhow::Result<bool> {
+        self.group.has_full_channel_access().await
+    }
+
+    pub async fn is_owner(&self) -> anyhow::Result<bool> {
+        self.group.is_owner().await
+    }
+
     pub async fn re_add_member(&self, username: String, address: u64) -> anyhow::Result<u64> {
         self.group.re_add_member(username, address).await
     }
