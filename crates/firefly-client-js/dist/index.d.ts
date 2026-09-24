@@ -120,3 +120,4 @@ export declare class FireflyClient {
 declare const FireflyBot: typeof FireflyClient;
 export { FireflyBot, initLogger };
 export { FireflyClientNode, protos };
+export * from "./service";

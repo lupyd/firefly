@@ -32,6 +32,9 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
+var __exportStar = (this && this.__exportStar) || function(m, exports) {
+    for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.protos = exports.FireflyClientNode = exports.initLogger = exports.FireflyBot = exports.FireflyClient = exports.DEFAULT_GROUP_PERMISSIONS = exports.UserPermission = void 0;
 const fs = __importStar(require("fs"));
@@ -170,8 +173,10 @@ class FireflyClient {
                 text,
                 files: undefined,
                 replyingTo: 0n,
+                messageType: 0,
             },
             nonce: Math.floor(Math.random() * 9_999_999),
+            messageType: 0,
         };
         const messageInnerBytes = UserMessageInner.encode(payload).finish();
         return await this.client.encryptAndSend(to, Array.from(messageInnerBytes));
@@ -186,8 +191,10 @@ class FireflyClient {
                 text,
                 files: undefined,
                 replyingTo: 0n,
+                messageType: 0,
             },
             channelId,
+            messageType: 0,
         };
         const messageInnerBytes = GroupMessageInner.encode(payload).finish();
         return await this.client.encryptAndSendGroup(groupId, Array.from(messageInnerBytes));
@@ -545,8 +552,10 @@ class FireflyClient {
                             text: replyText,
                             files: undefined,
                             replyingTo: 0n,
+                            messageType: 0,
                         },
                         channelId: channelId,
+                        messageType: 0,
                     };
                     const messageInnerBytes = GroupMessageInner.encode(payload).finish();
                     await this.client.encryptAndSendGroup(groupId, Array.from(messageInnerBytes));
@@ -557,8 +566,10 @@ class FireflyClient {
                             text: replyText,
                             files: undefined,
                             replyingTo: 0n,
+                            messageType: 0,
                         },
                         nonce: Math.floor(Math.random() * 9_999_999),
+                        messageType: 0,
                     };
                     const messageInnerBytes = UserMessageInner.encode(payload).finish();
                     await this.client.encryptAndSend(sender, Array.from(messageInnerBytes));
@@ -734,3 +745,4 @@ class FireflyClient {
 exports.FireflyClient = FireflyClient;
 const FireflyBot = FireflyClient;
 exports.FireflyBot = FireflyBot;
+__exportStar(require("./service"), exports);

@@ -3443,7 +3443,7 @@ impl FireflyWsClient {
         Ok(())
     }
 
-    /// Automatic archival is bounded and only publishes full 1000-visible-record batches.
+    /// Automatic archival is bounded and only publishes full 5000-visible-record batches.
     pub async fn archive_ready_history(&self, group_id:u64)->anyhow::Result<()> {
         // Wait instead of dropping another group's archival wake-up.
         let _work=self.history_work.lock().await;

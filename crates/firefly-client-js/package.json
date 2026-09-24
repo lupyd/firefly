@@ -1,18 +1,39 @@
 {
   "name": "firefly-client-js",
-  "version": "0.0.1",
-  "description": "A clean, class-based client API for deploying bots and automation on the Firefly MLS network",
+  "version": "1.0.3",
+  "description": "Firefly client library and bot automation API for browser and Node.js",
   "main": "dist/index.js",
+  "browser": "dist/browser.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    },
+    "./service": {
+      "types": "./dist/service.d.ts",
+      "import": "./dist/service.js"
+    }
+  },
   "scripts": {
-    "build": "tsc",
-    "test": "bun test --timeout 120000 tests/integration.test.ts"
+    "build": "tsc"
   },
   "dependencies": {
-    "firefly-client-node": "file:../client-node"
+    "firefly-protos-js": "^0.0.7"
+  },
+  "peerDependencies": {
+    "firefly-client-node": "*"
+  },
+  "peerDependenciesMeta": {
+    "firefly-client-node": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
+    "firefly-client-node": "file:../client-node",
     "typescript": "latest"
   }
 }

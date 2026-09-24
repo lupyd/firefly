@@ -52,14 +52,21 @@ impl FireflyMlsRules {
         if extension.get_permissions_from_role_id(role).is_none() {
             return 0;
         }
+        let group_role_perms = extension.get_permissions_from_role_id(role).unwrap_or(0);
         match extension.get_channel(channel_id) {
-            Some(channel) => channel
-                .roles
-                .iter()
-                .find(|r| r.id == role)
-                .map(|r| r.permissions)
-                .unwrap_or(channel.default_permissions),
-            None if channel_id == 0 => extension.get_permissions_from_role_id(role).unwrap_or(0),
+            Some(channel) => {
+                let raw_perms = if let Some(r) = channel.roles.iter().find(|r| r.id == role) {
+                    r.permissions
+                } else if role > 0 {
+                    group_role_perms
+                } else if channel.default_permissions == 0 {
+                    extension.inner().default_permissions
+                } else {
+                    channel.default_permissions
+                };
+                raw_perms & !(UserPermission::NullPermission as u32)
+            }
+            None if channel_id == 0 => group_role_perms & !(UserPermission::NullPermission as u32),
             None => 0,
         }
     }

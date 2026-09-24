@@ -358,7 +358,7 @@ impl GroupMessagesStore {
     /// from authenticated receipts and can never become independent vote evidence.
     /// Adder-trusted recent snapshots may be reshared, but never used as votes.
     pub async fn snapshot_history_range(&self,group:u64,start:u64,end:u64)->anyhow::Result<Vec<GroupMessage>> {
-        let rows=sqlx::query_as::<_,GroupMessage>("SELECT id,group_id,by,message,channel_id,epoch,message_type FROM group_messages WHERE group_id=? AND id>=? AND id<=? AND (message_type & 2)=0 AND by<>'' ORDER BY id LIMIT 1000")
+        let rows=sqlx::query_as::<_,GroupMessage>("SELECT id,group_id,by,message,channel_id,epoch,message_type FROM group_messages WHERE group_id=? AND id>=? AND id<=? AND (message_type & 2)=0 AND by<>'' ORDER BY id LIMIT 5000")
             .bind(group as i64).bind(start as i64).bind(end as i64).fetch_all(&self.pool).await?;
         self.visible_messages(rows).await
     }

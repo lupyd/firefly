@@ -5,7 +5,8 @@ use crate::history::{decrypt_snapshot_records, pack_snapshot_records};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const PIN_BYTES: usize = 8 * 1024 * 1024;
+const PIN_BYTES: usize = 64 * 1024;
+const TAIL_BYTES: usize = 200 * 1024;
 #[derive(Serialize, Deserialize)]
 struct PendingSnapshot {
     secret: String, // serialized protobuf, hex; secrets remain in the account database
@@ -52,7 +53,7 @@ fn validate_secret(s: &firefly::GroupSnapshotSecret) -> anyhow::Result<()> {
     );
     anyhow::ensure!(
         (s.kind == 1 && s.message_count <= 50)
-            || (s.kind == 2 && (1..=999).contains(&s.message_count)),
+            || (s.kind == 2 && (1..=4999).contains(&s.message_count)),
         "Invalid snapshot count"
     );
     anyhow::ensure!(
@@ -94,6 +95,10 @@ fn pack(
         kind != 1 || packed.blob.len() <= PIN_BYTES,
         "Pin snapshot too large"
     );
+    anyhow::ensure!(
+        kind != 2 || packed.blob.len() < TAIL_BYTES,
+        "Tail snapshot too large"
+    );
     Ok((secret, packed.blob))
 }
 fn unpack(
@@ -105,6 +110,10 @@ fn unpack(
     anyhow::ensure!(
         s.kind != 1 || blob.len() <= PIN_BYTES,
         "Pin snapshot too large"
+    );
+    anyhow::ensure!(
+        s.kind != 2 || blob.len() < TAIL_BYTES,
+        "Tail snapshot too large"
     );
     anyhow::ensure!(
         Sha256::digest(blob).as_slice() == s.ciphertext_hash.as_ref(),
@@ -234,7 +243,7 @@ impl FireflyWsClient {
         let max = if kind == 1 {
             PIN_BYTES
         } else {
-            MAX_CHUNK_BYTES
+            TAIL_BYTES
         };
         anyhow::ensure!(
             response.content_length().is_none_or(|n| n <= max as u64),
@@ -370,11 +379,14 @@ impl FireflyWsClient {
                     .await?;
                 continue;
             }
-            anyhow::ensure!(
-                response.status().is_success(),
-                "Snapshot publication deferred ({})",
-                response.status()
-            );
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                if !body.trim().is_empty() {
+                    anyhow::bail!("{body}");
+                }
+                anyhow::bail!("Snapshot publication deferred ({status})");
+            }
             return Ok(Some(secret)); // caller clears durable outbox only after MLS send
         }
         anyhow::bail!("Pin snapshot contention; retry persisted operation")
@@ -638,12 +650,12 @@ impl FireflyWsClient {
                     .group_messages_store
                     .snapshot_history_range(g, last.saturating_add(1), i64::MAX as u64)
                     .await?;
-                if records.len() >= 1000 && pinned.is_some() {
+                if records.len() >= 5000 && pinned.is_some() {
                     // Degraded handoff: pins need not wait for peer archive approval.
                     self.send_bundle(g, pinned.clone(), None, false).await?;
                 }
                 anyhow::ensure!(
-                    records.len() < 1000,
+                    records.len() < 5000,
                     "Waiting for full chunks to be verified before tail handoff"
                 );
                 if !records.is_empty() {
@@ -715,9 +727,9 @@ mod tests {
     #[test]
     fn recent_snapshots_require_partial_batches_and_bound_capabilities() {
         assert!(pack(42, 2, &[]).is_err());
-        assert!(pack(42, 2, &(1..=1000).map(record).collect::<Vec<_>>()).is_err());
-        let (secret, blob) = pack(42, 2, &(1..=999).map(record).collect::<Vec<_>>()).unwrap();
-        assert_eq!(unpack(42, &secret, &blob).unwrap().len(), 999);
+        assert!(pack(42, 2, &(1..=5000).map(record).collect::<Vec<_>>()).is_err());
+        let (secret, blob) = pack(42, 2, &(1..=4999).map(record).collect::<Vec<_>>()).unwrap();
+        assert_eq!(unpack(42, &secret, &blob).unwrap().len(), 4999);
         assert!(unpack(43, &secret, &blob).is_err());
         for field in 0..6 {
             let mut bad = secret.clone();

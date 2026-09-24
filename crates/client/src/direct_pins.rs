@@ -9,7 +9,7 @@ use crate::{
 };
 use firefly_protos::firefly;
 
-const LIMIT: usize = 8 * 1024 * 1024;
+const LIMIT: usize = 64 * 1024;
 
 fn peer(other: &str) -> anyhow::Result<&str> {
     anyhow::ensure!(
@@ -134,11 +134,14 @@ pub fn open(
 }
 
 async fn body(response: reqwest::Response) -> anyhow::Result<Vec<u8>> {
-    anyhow::ensure!(
-        response.status().is_success(),
-        "Pinned snapshot server returned {}",
-        response.status()
-    );
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        if !body.trim().is_empty() {
+            anyhow::bail!("{body}");
+        }
+        anyhow::bail!("Pinned snapshot server returned {status}");
+    }
     anyhow::ensure!(
         response.content_length().is_none_or(|n| n <= LIMIT as u64),
         "Pinned snapshot too large"

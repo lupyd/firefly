@@ -105,14 +105,14 @@ async fn download_sends_no_credentials_and_never_follows_redirects() -> anyhow::
 #[test]
 fn thousand_message_zstd_aes_roundtrip_and_count_limit() -> anyhow::Result<()> {
     use aes_gcm::{aead::{Aead,KeyInit},Aes256Gcm,Nonce};
-    let messages=(1..=1000).map(|id|record(id,1)).collect::<anyhow::Result<Vec<_>>>()?;
+    let messages=(1..=5000).map(|id|record(id,1)).collect::<anyhow::Result<Vec<_>>>()?;
     let packed=pack_messages_into_chunk(&messages)?;
     let cipher=Aes256Gcm::new_from_slice(&packed.key)?;
     let compressed=cipher.decrypt(Nonce::from_slice(&packed.blob[..12]),&packed.blob[12..]).map_err(|_|anyhow::anyhow!("decrypt"))?;
     assert_eq!(&compressed[..4],&[0x28,0xb5,0x2f,0xfd],"zstd frame magic");
     let decoded=decrypt_and_unpack_chunk(&packed.blob,&packed.key,&packed.unencrypted_hash)?;
-    validate_chunk_records(&decoded,42,1,1000,1000)?;
-    let mut too_many=messages;too_many.push(record(1001,1)?);
+    validate_chunk_records(&decoded,42,1,5000,5000)?;
+    let mut too_many=messages;too_many.push(record(5001,1)?);
     assert!(pack_messages_into_chunk(&too_many).is_err());
     let mut tampered=packed.blob;tampered[20]^=1;
     assert!(decrypt_and_unpack_chunk(&tampered,&packed.key,&packed.unencrypted_hash).is_err());
@@ -168,7 +168,7 @@ async fn three_stores_require_independent_receipts_not_joiner_imports() -> anyho
     let publisher = GroupMessagesStore::new(setup_pool("sqlite::memory:",1).await?).await?;
     let reviewer = GroupMessagesStore::new(setup_pool("sqlite::memory:",1).await?).await?;
     let joiner = GroupMessagesStore::new(setup_pool("sqlite::memory:",1).await?).await?;
-    let records = (1..=1000).map(|id|record(id,1)).collect::<anyhow::Result<Vec<_>>>()?;
+    let records = (1..=5000).map(|id|record(id,1)).collect::<anyhow::Result<Vec<_>>>()?;
     for r in &records {
         publisher.add(r.id,r.group_id,r.channel_id,1,&r.by,&r.message,0).await?;
         reviewer.add(r.id,r.group_id,r.channel_id,9,&r.by,&r.message,0).await?;
@@ -180,8 +180,8 @@ async fn three_stores_require_independent_receipts_not_joiner_imports() -> anyho
     assert_eq!(compute_unencrypted_hash(&evidence)?,packed.unencrypted_hash);
     assert!(decrypt_and_unpack_chunk(&packed.blob,&[0;32],&packed.unencrypted_hash).is_err());
     let decoded = decrypt_and_unpack_chunk(&packed.blob,&packed.key,&packed.unencrypted_hash)?;
-    validate_chunk_records(&decoded,42,1,1000,1000)?;
-    assert_eq!(joiner.import_verified_history(42,7,&packed.unencrypted_hash,&decoded).await?,1000);
+    validate_chunk_records(&decoded,42,1,5000,5000)?;
+    assert_eq!(joiner.import_verified_history(42,7,&packed.unencrypted_hash,&decoded).await?,5000);
     assert!(joiner.authenticated_history_ids(42,&ids).await?.is_empty());
     // A joiner only becomes an independent witness for actually received IDs.
     let r=&records[0];

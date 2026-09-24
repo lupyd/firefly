@@ -126,12 +126,20 @@ impl<'a> FireflyGroupExtensionWrapper<'a> {
     ) -> Option<u32> {
         let channel = self.get_channel(channel_id)?;
 
-        if role_id == 0 {
-            return Some(channel.default_permissions);
+        if let Ok(idx) = channel.roles.search_by_key(&role_id, |x| x.id) {
+            return Some(channel.roles[idx].permissions & !(crate::config::UserPermission::NullPermission as u32));
         }
-        let idx = channel.roles.search_by_key(&role_id, |x| x.id).ok()?;
 
-        Some(channel.roles[idx].permissions)
+        if role_id > 0 {
+            return self.get_permissions_from_role_id(role_id).map(|p| p & !(crate::config::UserPermission::NullPermission as u32));
+        }
+
+        let perms = if channel.default_permissions == 0 {
+            self.default_permissions()
+        } else {
+            channel.default_permissions
+        };
+        Some(perms & !(crate::config::UserPermission::NullPermission as u32))
     }
 
     pub fn get_role_of_user(&self, username: &str) -> Option<u32> {
@@ -146,19 +154,8 @@ impl<'a> FireflyGroupExtensionWrapper<'a> {
         username: &str,
         channel_id: u32,
     ) -> Option<u32> {
-        let member_role = self.get_role_of_user(username)?;
-
-        let channels = &self.inner.channels;
-        let channel_idx = channels.search_by_key(&channel_id, |x| x.id).ok()?;
-
-        let channel = &channels[channel_idx];
-
-        let roles = &channel.roles;
-        if let Ok(role_idx) = roles.search_by_key(&member_role, |x| x.id) {
-            return Some(roles[role_idx].permissions);
-        }
-
-        Some(channel.default_permissions)
+        let member_role = self.get_role_of_user(username).unwrap_or(0);
+        self.get_permissions_from_role_id_in_channel(member_role, channel_id)
     }
 
     pub fn serialize(&self) -> Result<Vec<u8>, quick_protobuf::Error> {

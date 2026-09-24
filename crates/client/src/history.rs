@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use crate::db::group_messages::GroupMessage;
 use crate::utils::{deserialize_proto, serialize_proto};
 
-pub const DEFAULT_CHUNK_SIZE: usize = 1000;
+pub const DEFAULT_CHUNK_SIZE: usize = 5000;
 pub const MAX_CHUNK_PLAINTEXT: usize = 32 * 1024 * 1024;
 pub const MAX_CHUNK_BYTES: usize = MAX_CHUNK_PLAINTEXT + 65536;
 

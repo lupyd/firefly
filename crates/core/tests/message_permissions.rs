@@ -88,13 +88,13 @@ fn channel_overrides_replace_defaults_and_missing_channels_fail_closed() {
         default_permissions: SEE,
         ..Default::default()
     });
-    // Channel defaults restrict even a group role with more permissions.
-    assert_eq!(FireflyMlsRules::message_permissions(&ext, "alice", 7), SEE);
+    // Role permissions are preserved unless explicitly overwritten in channel.
+    assert_eq!(FireflyMlsRules::message_permissions(&ext, "alice", 7), SEE | ADD);
     assert_eq!(
         FireflyMlsRules::message_permissions(&ext, "default_member", 7),
         SEE
     );
-    assert!(FireflyMlsRules::check_message_sender(&ext, "alice", &payload(7, 0, 0)).is_err());
+    assert!(FireflyMlsRules::check_message_sender(&ext, "alice", &payload(7, 0, 0)).is_ok());
     ext.update_channel_role_permissions(7, 1, SEE | ADD | PIN)
         .unwrap();
     assert!(FireflyMlsRules::check_message_sender(&ext, "alice", &payload(7, 0, 1)).is_ok());
@@ -105,12 +105,42 @@ fn channel_overrides_replace_defaults_and_missing_channels_fail_closed() {
     );
     assert_eq!(FireflyMlsRules::message_permissions(&ext, "alice", 999), 0);
     assert!(FireflyMlsRules::check_message_sender(&ext, "alice", &payload(999, 0, 0)).is_err());
-    // Explicit channel zero overrides the group-wide fallback too.
+    // Channel with default_permissions == 0 falls back to group-level default_permissions
     ext.update_channel(FireflyGroupChannel {
-        id: 0,
+        id: 8,
         default_permissions: 0,
         ..Default::default()
     });
+    assert_eq!(
+        FireflyMlsRules::message_permissions(&ext, "default_member", 8),
+        SEE | ADD | PIN
+    );
+    // Channel with NullPermission explicitly overwrites to grant 0 permissions
+    ext.update_channel(FireflyGroupChannel {
+        id: 9,
+        default_permissions: UserPermission::NullPermission as u32,
+        ..Default::default()
+    });
+    assert_eq!(
+        FireflyMlsRules::message_permissions(&ext, "default_member", 9),
+        0
+    );
+    // Channel with NullPermission | SEE grants SEE
+    ext.update_channel(FireflyGroupChannel {
+        id: 10,
+        default_permissions: (UserPermission::NullPermission as u32) | SEE,
+        ..Default::default()
+    });
+    assert_eq!(
+        FireflyMlsRules::message_permissions(&ext, "default_member", 10),
+        SEE
+    );
+    // Explicit channel zero overrides the group-wide fallback too if role is overwritten
+    ext.update_channel(FireflyGroupChannel {
+        id: 0,
+        ..Default::default()
+    });
+    ext.update_channel_role_permissions(0, 1, 0).unwrap();
     assert_eq!(FireflyMlsRules::message_permissions(&ext, "alice", 0), 0);
 }
 

@@ -11,6 +11,7 @@ export enum UserPermission {
   ManageRole = 16,
   ManageMember = 32,
   ManageGroup = 64,
+  NullPermission = 128,
 }
 
 export const DEFAULT_GROUP_PERMISSIONS = UserPermission.SeeMessage | UserPermission.AddMessage;

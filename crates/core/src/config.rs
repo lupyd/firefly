@@ -123,6 +123,7 @@ pub enum UserPermission {
     ManageRole = 16,
     ManageMember = 32,
     ManageGroup = 64,
+    NullPermission = 128,
 }
 
 pub const DEFAULT_GROUP_PERMISSIONS: u32 = UserPermission::SeeMessage as u32

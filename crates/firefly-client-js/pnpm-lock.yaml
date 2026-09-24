@@ -8,13 +8,16 @@ importers:
 
   .:
     dependencies:
-      firefly-client-node:
-        specifier: file:../client-node
-        version: file:../client-node
+      firefly-protos-js:
+        specifier: ^0.0.7
+        version: 0.0.7
     devDependencies:
       '@types/node':
         specifier: ^20.11.0
         version: 20.19.43
+      firefly-client-node:
+        specifier: file:../client-node
+        version: file:../client-node
       typescript:
         specifier: latest
         version: 7.0.2
@@ -23,6 +26,9 @@ packages:
 
   '@bufbuild/protobuf@2.13.0':
     resolution: {integrity: sha512-acq7c49vxfm1ggJ95P70TX7ABDM0vxr1SYD3BB0o0jnBLB4OAqeHyKuN+cD3w80gXEDQ2zxHpR6CUeA+O/aU9g==}
+
+  '@bufbuild/protobuf@2.15.0':
+    resolution: {integrity: sha512-DAheWUkVr/SJTWCc+lg9dhY0eN4SaWlf4+bG1KzHeXbnqt0AfB/NX0Z+VunGlM1ki1B4zVvye27MpKh/svySUA==}
 
   '@protobufjs/aspromise@1.1.2':
     resolution: {integrity: sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ==}
@@ -177,11 +183,18 @@ packages:
   firefly-client-node@file:../client-node:
     resolution: {directory: ../client-node, type: directory}
 
+  firefly-protos-js@0.0.7:
+    resolution: {integrity: sha512-9cLj1vju6LqnWlefi6xzc/YJZXTvDQ7FYsURa4MLgFwLdzWw9ScQx7CTrbQ8PlHGFQ1QgHeeJEfgp0ZcyDDdZw==}
+
   long@5.3.2:
     resolution: {integrity: sha512-mNAgZ1GmyNhD7AuqnTG3/VQ26o760+ZYBPKjPvugO8+nLbYfX6TVpJPseBvopbdY+qpZ/lKUnmEc1LeZYS3QAA==}
 
   protobufjs@7.6.5:
     resolution: {integrity: sha512-/FPD0nUc9jH6rfFjji9IBqOz4pcSE3CsT1m7Ep6Mdb0LxSUMj8hgl6GomOvZzpNpAqqGaXA0P3VSrZLFzIhQrw==}
+    engines: {node: '>=12.0.0'}
+
+  protobufjs@8.8.0:
+    resolution: {integrity: sha512-N3xhQ5yyBx3vQq4gubBfASzYhJGNzeDbjqBpu61g7UVylsN/qyffU96TKWD3GbbLOKF82VGNRNvv1+BFgE31Eg==}
     engines: {node: '>=12.0.0'}
 
   typescript@7.0.2:
@@ -195,6 +208,8 @@ packages:
 snapshots:
 
   '@bufbuild/protobuf@2.13.0': {}
+
+  '@bufbuild/protobuf@2.15.0': {}
 
   '@protobufjs/aspromise@1.1.2': {}
 
@@ -285,6 +300,11 @@ snapshots:
       '@bufbuild/protobuf': 2.13.0
       protobufjs: 7.6.5
 
+  firefly-protos-js@0.0.7:
+    dependencies:
+      '@bufbuild/protobuf': 2.15.0
+      protobufjs: 8.8.0
+
   long@5.3.2: {}
 
   protobufjs@7.6.5:
@@ -299,6 +319,10 @@ snapshots:
       '@protobufjs/pool': 1.1.0
       '@protobufjs/utf8': 1.1.2
       '@types/node': 20.19.43
+      long: 5.3.2
+
+  protobufjs@8.8.0:
+    dependencies:
       long: 5.3.2
 
   typescript@7.0.2:
