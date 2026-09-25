@@ -1,2 +1,4 @@
 allowBuilds:
   protobufjs: true
+minimumReleaseAgeExclude:
+  - firefly-protos-js@0.0.8

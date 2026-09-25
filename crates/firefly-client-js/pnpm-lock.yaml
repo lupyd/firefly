@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       firefly-protos-js:
-        specifier: ^0.0.7
-        version: 0.0.7
+        specifier: ^0.0.8
+        version: 0.0.8
     devDependencies:
       '@types/node':
         specifier: ^20.11.0
@@ -19,7 +19,7 @@ importers:
         specifier: file:../client-node
         version: file:../client-node
       typescript:
-        specifier: latest
+        specifier: ^7.0.2
         version: 7.0.2
 
 packages:
@@ -183,8 +183,8 @@ packages:
   firefly-client-node@file:../client-node:
     resolution: {directory: ../client-node, type: directory}
 
-  firefly-protos-js@0.0.7:
-    resolution: {integrity: sha512-9cLj1vju6LqnWlefi6xzc/YJZXTvDQ7FYsURa4MLgFwLdzWw9ScQx7CTrbQ8PlHGFQ1QgHeeJEfgp0ZcyDDdZw==}
+  firefly-protos-js@0.0.8:
+    resolution: {integrity: sha512-cFTxUVkWjQqA9Itbqv0/ncKUiChukw2EWvWByEScOkx9N4ahd/vBJF4xS3rMHYckIhipvC8D30P8YkvpCMsz2Q==}
 
   long@5.3.2:
     resolution: {integrity: sha512-mNAgZ1GmyNhD7AuqnTG3/VQ26o760+ZYBPKjPvugO8+nLbYfX6TVpJPseBvopbdY+qpZ/lKUnmEc1LeZYS3QAA==}
@@ -300,7 +300,7 @@ snapshots:
       '@bufbuild/protobuf': 2.13.0
       protobufjs: 7.6.5
 
-  firefly-protos-js@0.0.7:
+  firefly-protos-js@0.0.8:
     dependencies:
       '@bufbuild/protobuf': 2.15.0
       protobufjs: 8.8.0

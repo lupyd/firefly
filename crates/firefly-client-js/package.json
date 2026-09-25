@@ -21,7 +21,7 @@
     "build": "tsc"
   },
   "dependencies": {
-    "firefly-protos-js": "^0.0.7"
+    "firefly-protos-js": "^0.0.8"
   },
   "peerDependencies": {
     "firefly-client-node": "*"
@@ -34,6 +34,6 @@
   "devDependencies": {
     "@types/node": "^20.11.0",
     "firefly-client-node": "file:../client-node",
-    "typescript": "latest"
+    "typescript": "^7.0.2"
   }
 }
