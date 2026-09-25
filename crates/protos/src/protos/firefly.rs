@@ -4924,7 +4924,7 @@ impl<'a> MessageWrite for DirectBackupState<'a> {
 pub struct DirectBackupRequest<'a> {
     pub action: firefly::mod_DirectBackupRequest::Action,
     pub revision: i64,
-    pub lease: Cow<'a, str>,
+    pub lease_id: Cow<'a, str>,
     pub id: Cow<'a, str>,
     pub ciphertext: Cow<'a, [u8]>,
     pub manifest: Option<firefly::DirectBackupManifest<'a>>,
@@ -4938,7 +4938,7 @@ impl<'a> MessageRead<'a> for DirectBackupRequest<'a> {
             match r.next_tag(bytes) {
                 Ok(8) => msg.action = r.read_enum(bytes)?,
                 Ok(16) => msg.revision = r.read_int64(bytes)?,
-                Ok(26) => msg.lease = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(26) => msg.lease_id = r.read_string(bytes).map(Cow::Borrowed)?,
                 Ok(34) => msg.id = r.read_string(bytes).map(Cow::Borrowed)?,
                 Ok(42) => msg.ciphertext = r.read_bytes(bytes).map(Cow::Borrowed)?,
                 Ok(50) => msg.manifest = Some(r.read_message::<firefly::DirectBackupManifest>(bytes)?),
@@ -4956,7 +4956,7 @@ impl<'a> MessageWrite for DirectBackupRequest<'a> {
         0
         + if self.action == firefly::mod_DirectBackupRequest::Action::invalid { 0 } else { 1 + sizeof_varint(*(&self.action) as u64) }
         + if self.revision == 0i64 { 0 } else { 1 + sizeof_varint(*(&self.revision) as u64) }
-        + if self.lease == "" { 0 } else { 1 + sizeof_len((&self.lease).len()) }
+        + if self.lease_id == "" { 0 } else { 1 + sizeof_len((&self.lease_id).len()) }
         + if self.id == "" { 0 } else { 1 + sizeof_len((&self.id).len()) }
         + if self.ciphertext == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.ciphertext).len()) }
         + self.manifest.as_ref().map_or(0, |m| 1 + sizeof_len((m).get_size()))
@@ -4966,7 +4966,7 @@ impl<'a> MessageWrite for DirectBackupRequest<'a> {
     fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
         if self.action != firefly::mod_DirectBackupRequest::Action::invalid { w.write_with_tag(8, |w| w.write_enum(*&self.action as i32))?; }
         if self.revision != 0i64 { w.write_with_tag(16, |w| w.write_int64(*&self.revision))?; }
-        if self.lease != "" { w.write_with_tag(26, |w| w.write_string(&**&self.lease))?; }
+        if self.lease_id != "" { w.write_with_tag(26, |w| w.write_string(&**&self.lease_id))?; }
         if self.id != "" { w.write_with_tag(34, |w| w.write_string(&**&self.id))?; }
         if self.ciphertext != Cow::Borrowed(b"") { w.write_with_tag(42, |w| w.write_bytes(&**&self.ciphertext))?; }
         if let Some(ref s) = self.manifest { w.write_with_tag(50, |w| w.write_message(s))?; }

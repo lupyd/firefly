@@ -805,7 +805,7 @@ message DirectBackupRequest {
   enum Action { invalid = 0; lease = 1; put = 2; commit = 3; release = 4; }
   Action action = 1;
   int64 revision = 2;
-  string lease = 3; // Random operation ID, fenced by revision and server expiry.
+  string lease_id = 3; // Random operation ID, fenced by revision and server expiry.
   string id = 4;
   bytes ciphertext = 5;
   DirectBackupManifest manifest = 6;

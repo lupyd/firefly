@@ -446,7 +446,7 @@ impl Remote<'_> {
             Some(&firefly::DirectBackupRequest {
                 action,
                 revision,
-                lease: lease.into(),
+                lease_id: lease.into(),
                 ..Default::default()
             }),
             None,
@@ -606,7 +606,7 @@ impl Remote<'_> {
                 Some(&firefly::DirectBackupRequest {
                     action: Action::put,
                     revision: state.revision,
-                    lease: lease.into(),
+                    lease_id: lease.into(),
                     id: meta.id.clone(),
                     object: Some(meta.clone()),
                     ..Default::default()
@@ -623,7 +623,7 @@ impl Remote<'_> {
             Some(&firefly::DirectBackupRequest {
                 action: Action::commit,
                 revision: state.revision,
-                lease: lease.into(),
+                lease_id: lease.into(),
                 manifest: Some(m),
                 ..Default::default()
             }),

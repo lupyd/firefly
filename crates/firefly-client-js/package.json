@@ -1,6 +1,6 @@
 {
   "name": "firefly-client-js",
-  "version": "1.0.3",
+  "version": "2.0.0",
   "description": "Firefly client library and bot automation API for browser and Node.js",
   "main": "dist/index.js",
   "browser": "dist/browser.js",
