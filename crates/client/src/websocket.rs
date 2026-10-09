@@ -3016,6 +3016,16 @@ impl FireflyWsClient {
     }
 
     pub async fn delete_group(&self, groupId: u64) -> anyhow::Result<()> {
+        if let Some(mls_client) = self.firefly_mls_client.get() {
+            if let Ok(group_info) = self.group_info_store.get(groupId).await {
+                if let Ok(mls_group) = mls_client.load_group(groupId, group_info.identifier).await {
+                    if !mls_group.is_owner().await.unwrap_or(false) {
+                        anyhow::bail!("Only the group owner can delete the group");
+                    }
+                }
+            }
+        }
+
         let url = format!("{}/group?id={}", self.firefly_base_url, groupId);
         let token = self
             .callbacks
@@ -3024,11 +3034,17 @@ impl FireflyWsClient {
             .context("token not found")?;
         let resp = HTTP_CLIENT.delete(url).bearer_auth(token).send().await?;
 
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
         log::info!(
             "delete group, response: [{}]: {}",
-            resp.status(),
-            resp.text().await?
+            status,
+            body
         );
+
+        if !status.is_success() {
+            anyhow::bail!("Failed to delete group [{}]: {}", status, body);
+        }
 
         self.group_info_store.delete(groupId).await?;
         self.group_messages_store
