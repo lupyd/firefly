@@ -35,6 +35,11 @@ pub mod receipt_coordinator;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod websocket;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use websocket::{
+    FfiFireflyWsClient, FfiFireflyWtClient, FireflyWsClient, FireflyWtClient, TransportProtocol,
+};
+
 pub use storage::{
     FavouriteMessage, FavouriteMessageStorage, FavouriteSource, MemoryFavouriteMessageStore,
 };

@@ -872,15 +872,22 @@ async fn test_used_key_packages_and_pre_keys_cleaned_and_sessions_persist_across
     );
 
     // Bob should have replenished ONLY the consumed group key package (back to 32)
-    let resp_kp_bob2 = reqwest::Client::new()
-        .get(&url_bob_kp)
-        .bearer_auth(&bob_token)
-        .send()
-        .await
-        .unwrap();
-    let kp_bob2_bytes = resp_kp_bob2.bytes().await.unwrap();
-    let kp_bob2 = firefly_protos::deserialize_proto::<firefly_protos::firefly::GroupKeyPackages>(&kp_bob2_bytes).unwrap();
-    let bob_kp_ids2: Vec<i32> = kp_bob2.packages.iter().map(|p| p.id).collect();
+    let mut bob_kp_ids2: Vec<i32> = Vec::new();
+    for _ in 0..50 {
+        let resp_kp_bob2 = reqwest::Client::new()
+            .get(&url_bob_kp)
+            .bearer_auth(&bob_token)
+            .send()
+            .await
+            .unwrap();
+        let kp_bob2_bytes = resp_kp_bob2.bytes().await.unwrap();
+        let kp_bob2 = firefly_protos::deserialize_proto::<firefly_protos::firefly::GroupKeyPackages>(&kp_bob2_bytes).unwrap();
+        bob_kp_ids2 = kp_bob2.packages.iter().map(|p| p.id).collect();
+        if bob_kp_ids2.len() == 32 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     assert_eq!(bob_kp_ids2.len(), 32, "Bob should have 32 key packages after replenishment");
 
     let preserved_kp_count = bob_kp_ids2.iter().filter(|id| initial_bob_kp_ids.contains(id)).count();
@@ -936,6 +943,7 @@ async fn test_used_key_packages_and_pre_keys_cleaned_and_sessions_persist_across
         .expect("Timeout waiting for group message on Alice from reconnected Bob")
         .unwrap();
     println!("Alice received group message from reconnected Bob!");
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let gmsg_alice_reply = firefly_protos::firefly::GroupMessageInner {
         channelId: 0,

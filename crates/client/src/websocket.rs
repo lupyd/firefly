@@ -25,6 +25,72 @@ use tokio::{
     sync::{RwLock, mpsc::Sender, oneshot},
 };
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+#[derive(Debug)]
+pub struct DangerNoCertVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for DangerNoCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ED25519,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+        ]
+    }
+}
+
+pub fn create_wt_client_endpoint() -> anyhow::Result<quinn::Endpoint> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let mut crypto = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(DangerNoCertVerifier))
+        .with_no_client_auth();
+
+    crypto.alpn_protocols = vec![web_transport_quinn::ALPN.as_bytes().to_vec()];
+
+    let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?;
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quic_config));
+
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(Some(Duration::from_secs(60).try_into()?));
+    transport.keep_alive_interval(Some(Duration::from_secs(15)));
+    client_config.transport_config(Arc::new(transport));
+
+    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
+    endpoint.set_default_client_config(client_config);
+    Ok(endpoint)
+}
 
 use crate::{
     callbacks::FireflyWsClientCallback,
@@ -90,6 +156,7 @@ pub struct Connection {
     sender_task: tokio::task::JoinHandle<()>,
     receiver_task: tokio::task::JoinHandle<()>,
     sender: Sender<Bytes>,
+    session: Option<web_transport_quinn::Session>,
 }
 
 impl Connection {
@@ -218,7 +285,132 @@ impl Connection {
             sender_task,
             receiver_task,
             sender,
+            session: None,
         }
+    }
+
+    pub fn new_webtransport(
+        callbacks: Arc<dyn FireflyWsClientCallback>,
+        key_stores: Arc<FfiKeyStores>,
+        pending_requests: PendingRequests,
+        session: web_transport_quinn::Session,
+        on_connection_closed: oneshot::Sender<()>,
+        key_value_store: KeyValueStore,
+        firefly_mls_client: Arc<FfiMlsClient>,
+        group_info_store: GroupInfoStore,
+        group_messages_store: GroupMessagesStore,
+        history_keys_store: HistoryKeysStore,
+        address_id: u64,
+        device_id: u8,
+        firefly_base_url: String,
+        signal_tx: tokio::sync::mpsc::Sender<crate::callbacks::GroupHistorySignal>,
+    ) -> Self {
+        let callbacks: Arc<dyn FireflyWsClientCallback> = Arc::new(InternalSignalCallback {
+            inner: callbacks,
+            signal_tx,
+        });
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<Bytes>(100);
+        let sender2 = sender.clone();
+        let id = callbacks.name().to_string();
+
+        let session_recv = session.clone();
+        let receiver_task = tokio::spawn(CURRENT_CLIENT.scope(id.clone(), async move {
+            while let Ok(mut uni_stream) = session_recv.accept_uni().await {
+                let callbacks = callbacks.clone();
+                let key_stores = key_stores.clone();
+                let pending_requests = pending_requests.clone();
+                let key_value_store = key_value_store.clone();
+                let firefly_mls_client = firefly_mls_client.clone();
+                let group_info_store = group_info_store.clone();
+                let group_messages_store = group_messages_store.clone();
+                let history_keys_store = history_keys_store.clone();
+                let sender2 = sender2.clone();
+                let firefly_base_url = firefly_base_url.clone();
+
+                tokio::spawn(async move {
+                    let mut len_buf = [0u8; 4];
+                    while let Ok(()) = uni_stream.read_exact(&mut len_buf).await {
+                        let len = u32::from_be_bytes(len_buf) as usize;
+                        let mut payload = vec![0u8; len];
+                        if uni_stream.read_exact(&mut payload).await.is_err() {
+                            break;
+                        }
+                        match deserialize_proto::<firefly::ServerMessage<'_>>(&payload) {
+                            Ok(server_message) => {
+                                if let Err(err) = on_server_message(
+                                    server_message,
+                                    &pending_requests,
+                                    &key_stores,
+                                    &callbacks,
+                                    &key_value_store,
+                                    &firefly_mls_client,
+                                    &group_info_store,
+                                    &group_messages_store,
+                                    &history_keys_store,
+                                    sender2.clone(),
+                                    address_id,
+                                    device_id,
+                                    &firefly_base_url,
+                                )
+                                .await
+                                {
+                                    log::error!("failed to handle WT server message: {}", err);
+                                }
+                            }
+                            Err(err) => log::error!("failed to deserialize WT server message: {}", err),
+                        }
+                    }
+                });
+            }
+            log::info!("WT receiver task finished");
+            let _ = on_connection_closed.send(());
+        }));
+
+        let session_send = session.clone();
+        let sender_task = tokio::spawn(CURRENT_CLIENT.scope(id.clone(), async move {
+            while let Some(msg) = receiver.recv().await {
+                let is_request = match deserialize_proto::<firefly::ClientMessage<'_>>(&msg) {
+                    Ok(cm) => matches!(cm.message, firefly::mod_ClientMessage::OneOfmessage::request(_)),
+                    Err(_) => false,
+                };
+
+                if is_request {
+                    if let Ok((mut send_stream, mut recv_stream)) = session_send.open_bi().await {
+                        let _ = send_stream.write_all(&msg).await;
+                        let _ = send_stream.finish();
+                        tokio::spawn(async move {
+                            let mut len_buf = [0u8; 4];
+                            if recv_stream.read_exact(&mut len_buf).await.is_ok() {
+                                let len = u32::from_be_bytes(len_buf) as usize;
+                                let mut buf = vec![0u8; len];
+                                let _ = recv_stream.read_exact(&mut buf).await;
+                            }
+                        });
+                    }
+                } else {
+                    if let Ok(mut send_stream) = session_send.open_uni().await {
+                        let _ = send_stream.write_all(&msg).await;
+                        let _ = send_stream.finish();
+                    }
+                }
+            }
+            log::info!("WT sender task finished");
+        }));
+
+        Self {
+            sender_task,
+            receiver_task,
+            sender,
+            session: Some(session),
+        }
+    }
+
+    pub fn is_webtransport(&self) -> bool {
+        self.session.is_some()
+    }
+
+    pub fn session(&self) -> Option<web_transport_quinn::Session> {
+        self.session.clone()
     }
 }
 
@@ -226,11 +418,22 @@ impl Drop for Connection {
     fn drop(&mut self) {
         self.sender_task.abort();
         self.receiver_task.abort();
+        if let Some(session) = &self.session {
+            session.close(0u32.into(), b"connection dropped");
+        }
         log::info!("dropping connection");
     }
 }
 
 type PendingRequests = Arc<std::sync::Mutex<HashMap<u32, oneshot::Sender<Bytes>>>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TransportProtocol {
+    #[default]
+    Auto,
+    WebSocket,
+    WebTransport,
+}
 
 #[derive(Default, Clone, Debug)]
 pub enum ConnectionState {
@@ -285,6 +488,7 @@ pub struct FireflyWsClient {
     pool: SqlitePool,
     next_request_id: AtomicU32,
     last_connection_error: std::sync::Mutex<Option<String>>,
+    pub transport: TransportProtocol,
 }
 
 impl FireflyWsClient {
@@ -295,6 +499,47 @@ impl FireflyWsClient {
         callbacks: Box<dyn FireflyWsClientCallback>,
         key_stores_pathname: String,
         request_timeout_in_ms: u64,
+    ) -> anyhow::Result<Self> {
+        Self::create_with_transport(
+            firefly_base_url,
+            firefly_base_ws_url,
+            retry_interval_in_ms,
+            callbacks,
+            key_stores_pathname,
+            request_timeout_in_ms,
+            TransportProtocol::Auto,
+        )
+        .await
+    }
+
+    pub async fn create_webtransport(
+        firefly_base_url: String,
+        firefly_base_ws_url: String,
+        retry_interval_in_ms: u64,
+        callbacks: Box<dyn FireflyWsClientCallback>,
+        key_stores_pathname: String,
+        request_timeout_in_ms: u64,
+    ) -> anyhow::Result<Self> {
+        Self::create_with_transport(
+            firefly_base_url,
+            firefly_base_ws_url,
+            retry_interval_in_ms,
+            callbacks,
+            key_stores_pathname,
+            request_timeout_in_ms,
+            TransportProtocol::WebTransport,
+        )
+        .await
+    }
+
+    pub async fn create_with_transport(
+        firefly_base_url: String,
+        firefly_base_ws_url: String,
+        retry_interval_in_ms: u64,
+        callbacks: Box<dyn FireflyWsClientCallback>,
+        key_stores_pathname: String,
+        request_timeout_in_ms: u64,
+        transport: TransportProtocol,
     ) -> anyhow::Result<Self> {
         let pool = setup_pool_from_path(&key_stores_pathname, 5).await?;
         let key_stores = Arc::new(FfiKeyStores::new(pool.clone()).await?);
@@ -317,6 +562,7 @@ impl FireflyWsClient {
             retry_interval: Duration::from_millis(retry_interval_in_ms),
             firefly_base_url,
             firefly_base_ws_url,
+            transport,
             cdn_base_url: std::sync::RwLock::new(
                 std::env::var("FIREFLY_CDN_URL")
                     .or_else(|_| std::env::var("CDN_URL"))
@@ -452,6 +698,211 @@ impl FireflyWsClient {
             .unwrap_or_default()
             .parse::<u64>()
             .unwrap_or_default();
+
+        let use_wt = match self.transport {
+            TransportProtocol::WebTransport => true,
+            TransportProtocol::WebSocket => false,
+            TransportProtocol::Auto => {
+                let env_wt = std::env::var("FIREFLY_TRANSPORT")
+                    .or_else(|_| std::env::var("TRANSPORT"))
+                    .map(|v| v.eq_ignore_ascii_case("webtransport") || v.eq_ignore_ascii_case("wt"))
+                    .unwrap_or(false);
+                env_wt
+                    || self.firefly_base_ws_url.starts_with("https://")
+                    || self.firefly_base_ws_url.starts_with("wt://")
+                    || self.firefly_base_ws_url.starts_with("webtransport://")
+            }
+        };
+
+        if use_wt {
+            let mut base_wt = self
+                .firefly_base_ws_url
+                .trim_end_matches('/')
+                .replace("ws://", "https://")
+                .replace("wss://", "https://")
+                .replace("wt://", "https://")
+                .replace("webtransport://", "https://");
+
+            let expected_host = std::env::var("WT_HOST")
+                .or_else(|_| std::env::var("SERVER_HOST"))
+                .or_else(|_| std::env::var("HOST"))
+                .ok();
+
+            if let Some(ref exp_h) = expected_host {
+                if base_wt.contains("127.0.0.1") {
+                    base_wt = base_wt.replace("127.0.0.1", exp_h);
+                } else if base_wt.contains("0.0.0.0") {
+                    base_wt = base_wt.replace("0.0.0.0", exp_h);
+                }
+            }
+
+            let url = format!(
+                "{}/?uid={}&device_id={}&last_synced_upto={}&token={}",
+                base_wt, addressId, device_id, last_synced_upto, token
+            );
+
+            let sanitized_url = format!(
+                "{}/?uid={}&device_id={}&last_synced_upto={}&token=[REDACTED]",
+                base_wt, addressId, device_id, last_synced_upto
+            );
+
+            let show_connecting = {
+                let last_err = self.last_connection_error.lock().unwrap();
+                last_err.is_none()
+            };
+            if show_connecting {
+                log::info!("connecting via WebTransport to {}", sanitized_url);
+            }
+
+            let parsed_url = match reqwest::Url::parse(&url) {
+                Ok(u) => u,
+                Err(e) => {
+                    log::error!("invalid WT URL: {:?}", e);
+                    return Err(e.into());
+                }
+            };
+
+            let host_str = parsed_url.host_str().unwrap_or("localhost").to_string();
+            let port = parsed_url.port().unwrap_or(443);
+            let socket_addr = match tokio::net::lookup_host(format!("{}:{}", host_str, port)).await {
+                Ok(addrs) => {
+                    let list: Vec<std::net::SocketAddr> = addrs.collect();
+                    list.iter()
+                        .copied()
+                        .find(|sa| sa.is_ipv4())
+                        .or_else(|| list.first().copied())
+                        .ok_or_else(|| anyhow::anyhow!("could not resolve host {}:{}", host_str, port))?
+                }
+                Err(e) => return Err(e.into()),
+            };
+
+            let sni = expected_host.unwrap_or(host_str);
+            let endpoint = create_wt_client_endpoint()?;
+            let quinn_conn = match endpoint.connect(socket_addr, &sni) {
+                Ok(connecting) => match connecting.await {
+                    Ok(conn) => conn,
+                    Err(err) => {
+                        let err_str = format!("{:?}", err);
+                        let mut last_err = self.last_connection_error.lock().unwrap();
+                        if last_err.as_ref() != Some(&err_str) {
+                            log::error!("QUIC connection failed: {:?}", err);
+                            log::info!("waiting {}ms to reconnect", self.retry_interval.as_millis());
+                            *last_err = Some(err_str);
+                        }
+                        return Err(err.into());
+                    }
+                },
+                Err(err) => {
+                    log::error!("endpoint.connect failed: {:?}", err);
+                    return Err(err.into());
+                }
+            };
+
+            let session = match web_transport_quinn::Session::connect(quinn_conn, parsed_url).await {
+                Ok(s) => s,
+                Err(err) => {
+                    let err_str = format!("{:?}", err);
+                    let mut last_err = self.last_connection_error.lock().unwrap();
+                    if last_err.as_ref() != Some(&err_str) {
+                        log::error!("WebTransport session connect failed: {:?}", err);
+                        log::info!("waiting {}ms to reconnect", self.retry_interval.as_millis());
+                        *last_err = Some(err_str);
+                    }
+                    return Err(err.into());
+                }
+            };
+
+            {
+                let mut last_err = self.last_connection_error.lock().unwrap();
+                *last_err = None;
+            }
+
+            {
+                *self.state.write().unwrap() = ConnectionState::Connected;
+            }
+
+            log::info!("connected successfully via WebTransport to {}", sanitized_url);
+
+            let pending_requests = self.pending_requests.clone();
+            let key_stores = self.key_stores.clone();
+            let callbacks = self.callbacks.clone();
+
+            {
+                pending_requests.lock().unwrap().clear();
+            }
+
+            let (on_connection_closed_tx, on_connection_closed_rx) = oneshot::channel::<()>();
+            let mut signal_rx = None;
+            let firefly_mls_client = self
+                .firefly_mls_client
+                .get()
+                .context("firefly_mls_client is uninitialized")?;
+
+            {
+                let mut g = self.connection.write().await;
+                let (signal_tx, signal_rx_new) = tokio::sync::mpsc::channel(100);
+                signal_rx = Some(signal_rx_new);
+                *g = Some(Connection::new_webtransport(
+                    callbacks,
+                    key_stores,
+                    pending_requests,
+                    session,
+                    on_connection_closed_tx,
+                    self.key_value_store.clone(),
+                    firefly_mls_client.clone(),
+                    self.group_info_store.clone(),
+                    self.group_messages_store.clone(),
+                    self.history_keys_store.clone(),
+                    self.addressId.load(std::sync::atomic::Ordering::Relaxed),
+                    self.key_stores
+                        .store()
+                        .identity_store
+                        .get_full_identity_key_pair()
+                        .await
+                        .map(|i| i.device_id)
+                        .unwrap_or(0) as u8,
+                    self.firefly_base_url.clone(),
+                    signal_tx,
+                ));
+            }
+
+            if let Err(err) = self.sync_all_group_messages().await {
+                log::error!("sync group messages failed: {:?}", err);
+            }
+
+            if let Some(token) = self.callbacks.get_access_token().await {
+                let address_id = self.addressId.load(std::sync::atomic::Ordering::Relaxed);
+                let device_id = self
+                    .key_stores
+                    .store()
+                    .identity_store
+                    .get_full_identity_key_pair()
+                    .await
+                    .map(|i| i.device_id)
+                    .unwrap_or(0) as u8;
+
+                let _ = self.join_groups(&token, address_id, device_id).await;
+                let _ = self
+                    .add_requested_re_add_group_members(&token, address_id, device_id)
+                    .await;
+            }
+
+            if let Some(mut rx) = signal_rx {
+                tokio::select! {
+                    _ = on_connection_closed_rx => {},
+                    _ = async {
+                        while let Some(signal) = rx.recv().await {
+                            if let Err(e) = self.handle_group_history_signal(signal).await {
+                                log::error!("auto handle_group_history_signal error: {:?}", e);
+                            }
+                        }
+                    } => {},
+                }
+            } else {
+                on_connection_closed_rx.await?;
+            }
+            return Ok(());
+        }
 
         let base_ws = self.firefly_base_ws_url.trim_end_matches('/');
         let url = format!(
@@ -596,22 +1047,68 @@ impl FireflyWsClient {
     }
 
     pub async fn request(&self, request: firefly::Request<'_>) -> anyhow::Result<Bytes> {
-        let (tx, rx) = oneshot::channel();
-        let id = {
-            self.next_request_id
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        let maybe_session = {
+            let g = self.connection.read().await;
+            g.as_ref().and_then(|c| c.session())
         };
-        let mut request = request;
-        request.id = id;
 
-        {
-            self.pending_requests.lock().unwrap().insert(id, tx);
+        if let Some(session) = maybe_session {
+            let (mut send_stream, mut recv_stream) = session
+                .open_bi()
+                .await
+                .context("failed to open WT bidirectional stream for request")?;
+
+            let client_message = firefly::ClientMessage {
+                message: firefly::mod_ClientMessage::OneOfmessage::request(request),
+            };
+            let payload = serialize_proto(&client_message)?;
+            send_stream
+                .write_all(&payload)
+                .await
+                .context("failed to write request payload to WT stream")?;
+            send_stream
+                .finish()
+                .context("failed to finish WT write stream")?;
+
+            let mut len_buf = [0u8; 4];
+            recv_stream
+                .read_exact(&mut len_buf)
+                .await
+                .context("failed to read response length from WT stream")?;
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut resp_buf = vec![0u8; len];
+            recv_stream
+                .read_exact(&mut resp_buf)
+                .await
+                .context("failed to read response payload from WT stream")?;
+
+            let server_msg = deserialize_proto::<firefly::ServerMessage>(&resp_buf)
+                .context("failed to deserialize server response from WT stream")?;
+
+            if let firefly::mod_ServerMessage::OneOfmessage::response(response) = server_msg.message {
+                let response_bytes = serialize_proto(&response)?;
+                Ok(Bytes::from(response_bytes))
+            } else {
+                Err(anyhow::anyhow!("unexpected message received on WT RPC bi-stream"))
+            }
+        } else {
+            let (tx, rx) = oneshot::channel();
+            let id = {
+                self.next_request_id
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            };
+            let mut request = request;
+            request.id = id;
+
+            {
+                self.pending_requests.lock().unwrap().insert(id, tx);
+            }
+
+            self.send_request(request).await?;
+
+            let bytes = rx.await?;
+            Ok(bytes)
         }
-
-        self.send_request(request).await?;
-
-        let bytes = rx.await?;
-        Ok(bytes)
     }
 
     pub async fn get_online_status(&self, usernames: Vec<String>) -> anyhow::Result<Vec<String>> {
@@ -4795,6 +5292,54 @@ impl FfiFireflyWsClient {
         })
     }
 
+    pub async fn create_webtransport(
+        firefly_base_url: String,
+        firefly_base_ws_url: String,
+        retry_interval_in_ms: u64,
+        callbacks: Box<dyn FireflyWsClientCallback>,
+        key_stores_pathname: String,
+        request_timeout_in_ms: u64,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            inner: Arc::new(
+                FireflyWsClient::create_webtransport(
+                    firefly_base_url,
+                    firefly_base_ws_url,
+                    retry_interval_in_ms,
+                    callbacks,
+                    key_stores_pathname,
+                    request_timeout_in_ms,
+                )
+                .await?,
+            ),
+        })
+    }
+
+    pub async fn create_with_transport(
+        firefly_base_url: String,
+        firefly_base_ws_url: String,
+        retry_interval_in_ms: u64,
+        callbacks: Box<dyn FireflyWsClientCallback>,
+        key_stores_pathname: String,
+        request_timeout_in_ms: u64,
+        transport: TransportProtocol,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            inner: Arc::new(
+                FireflyWsClient::create_with_transport(
+                    firefly_base_url,
+                    firefly_base_ws_url,
+                    retry_interval_in_ms,
+                    callbacks,
+                    key_stores_pathname,
+                    request_timeout_in_ms,
+                    transport,
+                )
+                .await?,
+            ),
+        })
+    }
+
     pub async fn initialize_with_retrying(&self) -> anyhow::Result<()> {
         self.inner.initialize_with_retrying().await?;
         for group in self.inner.group_info_store.get_all().await? {
@@ -5401,3 +5946,6 @@ impl FfiFireflyWsClient {
             .await
     }
 }
+
+pub type FireflyWtClient = FireflyWsClient;
+pub type FfiFireflyWtClient = FfiFireflyWsClient;

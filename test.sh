@@ -15,6 +15,8 @@ fi
 # Default test server URL
 export FIREFLY_BASE_URL="${FIREFLY_BASE_URL:-http://127.0.0.1:39209}"
 export FIREFLY_WS_URL="${FIREFLY_WS_URL:-ws://127.0.0.1:39209}"
+export FIREFLY_WT_URL="${FIREFLY_WT_URL:-https://127.0.0.1:39209}"
+export WT_HOST="${WT_HOST:-localhost}"
 export EMULATOR_MODE="true"
 export RUST_LOG="${RUST_LOG:-info}"
 

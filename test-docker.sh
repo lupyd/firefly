@@ -15,7 +15,7 @@ cleanup() {
     echo " Cleaning up temporary Docker containers..."
     echo "=========================================="
     docker rm -f "$SRV_CONTAINER" "$DB_CONTAINER" >/dev/null 2>&1 || true
-    rm -f "$TMP_ENV"
+    rm -f "$TMP_ENV" "/tmp/${RUN_ID}_wt_key.pem" "/tmp/${RUN_ID}_wt_cert.pem"
     echo "Cleanup complete."
 }
 trap cleanup EXIT INT TERM
@@ -46,6 +46,7 @@ sed "s|DB_CONN_STR=.*|DB_CONN_STR=postgresql://postgres:postgres@127.0.0.1:${DB_
 echo "[1/3] Starting temporary Postgres instance..."
 docker run -d \
     --name "$DB_CONTAINER" \
+    --ulimit nofile=65536:65536 \
     -p "127.0.0.1:${DB_PORT}:5432" \
     -e POSTGRES_PASSWORD=postgres \
     -e POSTGRES_USER=postgres \
@@ -63,12 +64,23 @@ for i in $(seq 1 40); do
     sleep 0.5
 done
 
+# 3.5 Generate temporary TLS self-signed cert for WebTransport
+WT_KEY_PATH="/tmp/${RUN_ID}_wt_key.pem"
+WT_CERT_PATH="/tmp/${RUN_ID}_wt_cert.pem"
+openssl req -x509 -newkey rsa:2048 -keyout "$WT_KEY_PATH" -out "$WT_CERT_PATH" -days 30 -nodes -subj '/CN=localhost' >/dev/null 2>&1 || true
+
 # 4. Start temporary Firefly MLS Server container
 echo "[2/3] Starting temporary Firefly MLS Server..."
 docker run -d \
     --name "$SRV_CONTAINER" \
     --network host \
+    --ulimit nofile=65536:65536 \
     --env-file "$TMP_ENV" \
+    -e WT_HOST=localhost \
+    -e WT_CERT_PATH="$WT_CERT_PATH" \
+    -e WT_KEY_PATH="$WT_KEY_PATH" \
+    -v "$WT_CERT_PATH:$WT_CERT_PATH:ro" \
+    -v "$WT_KEY_PATH:$WT_KEY_PATH:ro" \
     -v "$SCRIPT_DIR/initdb.sql:/initdb.sql:ro" \
     -v "$SCRIPT_DIR/initdb.sql:/app/initdb.sql:ro" \
     hashtag438/firefly-mls-server:latest >/dev/null
@@ -94,6 +106,8 @@ fi
 # 5. Export test environment variables
 export FIREFLY_BASE_URL="http://127.0.0.1:${SRV_PORT}"
 export FIREFLY_WS_URL="ws://127.0.0.1:${SRV_PORT}"
+export FIREFLY_WT_URL="https://127.0.0.1:${SRV_PORT}"
+export WT_HOST="localhost"
 export EMULATOR_MODE="true"
 export RUST_LOG="${RUST_LOG:-info}"
 
@@ -102,7 +116,10 @@ echo "=========================================="
 echo " Target URL: $FIREFLY_BASE_URL"
 echo "=========================================="
 
-if [ "$#" -eq 0 ]; then
+if [ "$1" = "--cmd" ] || [ "$1" = "--run" ]; then
+    shift
+    "$@"
+elif [ "$#" -eq 0 ]; then
     cargo test
 else
     cargo test "$@"
