@@ -7,7 +7,8 @@ export declare enum UserPermission {
     ManageChannel = 8,
     ManageRole = 16,
     ManageMember = 32,
-    ManageGroup = 64
+    ManageGroup = 64,
+    NullPermission = 128
 }
 export declare const DEFAULT_GROUP_PERMISSIONS: number;
 export interface RawUserMessage {

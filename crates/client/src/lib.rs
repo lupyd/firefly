@@ -16,6 +16,7 @@ pub mod db;
 pub mod error;
 
 pub mod group;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod history;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod direct_backups;

@@ -8245,7 +8245,7 @@ export const MessagePayload: MessageFns<MessagePayload> = {
       }
       writer.uint32(49).fixed64(message.deleted);
     }
-    if (message.messageType !== 0) {
+    if (message.messageType !== undefined && message.messageType !== 0) {
       writer.uint32(56).uint32(message.messageType);
     }
     return writer;
@@ -8719,7 +8719,7 @@ export const UserMessageInner: MessageFns<UserMessageInner> = {
     if (message.nonce !== 0) {
       writer.uint32(85).fixed32(message.nonce);
     }
-    if (message.messageType !== 0) {
+    if (message.messageType !== undefined && message.messageType !== 0) {
       writer.uint32(40).uint32(message.messageType);
     }
     return writer;
@@ -9099,7 +9099,7 @@ export const GroupMessageInner: MessageFns<GroupMessageInner> = {
     if (message.reaction !== undefined) {
       Reaction.encode(message.reaction, writer.uint32(58).fork()).join();
     }
-    if (message.messageType !== 0) {
+    if (message.messageType !== undefined && message.messageType !== 0) {
       writer.uint32(24).uint32(message.messageType);
     }
     return writer;
@@ -14767,7 +14767,7 @@ export const DirectBackupRecord: MessageFns<DirectBackupRecord> = {
     if (message.message.length !== 0) {
       writer.uint32(34).bytes(message.message);
     }
-    if (message.messageType !== 0) {
+    if (message.messageType !== undefined && message.messageType !== 0) {
       writer.uint32(40).uint32(message.messageType);
     }
     return writer;

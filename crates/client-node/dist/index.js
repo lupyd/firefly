@@ -47,6 +47,7 @@ var UserPermission;
     UserPermission[UserPermission["ManageRole"] = 16] = "ManageRole";
     UserPermission[UserPermission["ManageMember"] = 32] = "ManageMember";
     UserPermission[UserPermission["ManageGroup"] = 64] = "ManageGroup";
+    UserPermission[UserPermission["NullPermission"] = 128] = "NullPermission";
 })(UserPermission || (exports.UserPermission = UserPermission = {}));
 exports.DEFAULT_GROUP_PERMISSIONS = UserPermission.SeeMessage | UserPermission.AddMessage;
 const initLogger = (filePath) => {

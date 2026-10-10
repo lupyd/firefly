@@ -431,6 +431,8 @@ export interface UserMessageInner {
     messagePayload?: MessagePayload | undefined;
     selfMessage?: SelfUserMessage | undefined;
     reaction?: Reaction | undefined;
+    backupKeySync?: DirectBackupKeySync | undefined;
+    directPinSnapshot?: DirectPinSnapshotSecret | undefined;
     nonce: number;
     messageType: number;
 }
@@ -679,6 +681,97 @@ export interface GroupSyncBundle {
     page: number;
     lastPage: boolean;
 }
+/** Account-wide password-encrypted direct chat backups. No password/key on the wire. */
+export interface DirectBackupChunk {
+    id: string;
+    /** Archive ordinal, not a device's local message ID. */
+    start: bigint;
+    /** 1..1000; only the final chunk may be partial. */
+    count: number;
+    /** Relative to configured trusted CDN origin. */
+    blobPath: string;
+    byteSize: bigint;
+    ciphertextHash: Buffer;
+}
+export interface DirectBackupManifest {
+    version: number;
+    epoch: string;
+    /** Argon2id v19: m=65536 KiB, t=3, p=1, output=32 bytes. */
+    salt: Buffer;
+    /** AES-GCM authenticated format/account/key check. */
+    verifier: Buffer;
+    /** 7 or 30. */
+    scheduleDays: number;
+    chunks: DirectBackupChunk[];
+    /** AES-GCM sealed SHA-256 of this manifest with authentication cleared. */
+    authentication: Buffer;
+}
+export interface DirectBackupState {
+    revision: bigint;
+    updatedAt: bigint;
+    manifest: DirectBackupManifest | undefined;
+}
+export interface DirectBackupRequest {
+    action: DirectBackupRequest_Action;
+    revision: bigint;
+    /** Random operation ID, fenced by revision and server expiry. */
+    leaseId: string;
+    id: string;
+    ciphertext: Buffer;
+    manifest: DirectBackupManifest | undefined;
+    /** Reservation metadata, never ciphertext. */
+    object: DirectBackupChunk | undefined;
+}
+export declare enum DirectBackupRequest_Action {
+    invalid = 0,
+    lease = 1,
+    put = 2,
+    commit = 3,
+    release = 4,
+    UNRECOGNIZED = -1
+}
+export declare function directBackupRequest_ActionFromJSON(object: any): DirectBackupRequest_Action;
+export declare function directBackupRequest_ActionToJSON(object: DirectBackupRequest_Action): string;
+export interface DirectBackupRecord {
+    /** Display/import hint only; never dedup identity. */
+    sourceId: bigint;
+    other: string;
+    sentByOther: boolean;
+    /** Canonically encoded UserMessageInner, including send nonce. */
+    message: Buffer;
+    messageType: number;
+}
+export interface DirectBackupRecords {
+    version: number;
+    records: DirectBackupRecord[];
+}
+export interface DirectBackupBinding {
+    version: number;
+    username: string;
+    epoch: string;
+    chunkId: string;
+    start: bigint;
+    count: number;
+}
+/** ONLY valid inside a decrypted SelfUserMessage from the same account. */
+export interface DirectBackupKeySync {
+    version: number;
+    epoch: string;
+    /** 32-byte derived unlock key; absent for requests. */
+    key: Buffer;
+    requestKey: boolean;
+    requestId: string;
+}
+/** Opaque compressed/encrypted user-to-user pin snapshot capability. */
+export interface DirectPinSnapshotSecret {
+    version: number;
+    other: string;
+    snapshotId: string;
+    /** 32 bytes; delivered only in E2EE user messages. */
+    key: Buffer;
+    ciphertextHash: Buffer;
+    messageCount: number;
+}
 export declare const UserMessage: MessageFns<UserMessage>;
 export declare const Group: MessageFns<Group>;
 export declare const GroupDetails: MessageFns<GroupDetails>;
@@ -782,6 +875,15 @@ export declare const GroupHistoryRecords: MessageFns<GroupHistoryRecords>;
 export declare const ApproveHistoryChunkRequest: MessageFns<ApproveHistoryChunkRequest>;
 export declare const GroupSnapshotSecret: MessageFns<GroupSnapshotSecret>;
 export declare const GroupSyncBundle: MessageFns<GroupSyncBundle>;
+export declare const DirectBackupChunk: MessageFns<DirectBackupChunk>;
+export declare const DirectBackupManifest: MessageFns<DirectBackupManifest>;
+export declare const DirectBackupState: MessageFns<DirectBackupState>;
+export declare const DirectBackupRequest: MessageFns<DirectBackupRequest>;
+export declare const DirectBackupRecord: MessageFns<DirectBackupRecord>;
+export declare const DirectBackupRecords: MessageFns<DirectBackupRecords>;
+export declare const DirectBackupBinding: MessageFns<DirectBackupBinding>;
+export declare const DirectBackupKeySync: MessageFns<DirectBackupKeySync>;
+export declare const DirectPinSnapshotSecret: MessageFns<DirectPinSnapshotSecret>;
 type Builtin = Date | Function | Uint8Array | string | number | boolean | bigint | undefined;
 export type DeepPartial<T> = T extends bigint ? string | number | bigint : T extends Builtin ? T : T extends globalThis.Array<infer U> ? globalThis.Array<DeepPartial<U>> : T extends ReadonlyArray<infer U> ? ReadonlyArray<DeepPartial<U>> : T extends {} ? {
     [K in keyof T]?: DeepPartial<T[K]>;

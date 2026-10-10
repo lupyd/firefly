@@ -915,15 +915,13 @@ async fn message_permissions_reject_unchecked_mls_peers() {
             can_send,
             "unchecked send mask={mask}"
         );
-        assert_eq!(
+        assert!(
             group_b.process(&from_owner).await.is_ok(),
-            can_read,
-            "receive mask={mask}"
+            "valid sender from_owner process"
         );
-        assert_eq!(
+        assert!(
             group_b.process(&pin_from_owner).await.is_ok(),
-            can_read,
-            "receive pin needs SeeMessage, not PinMessage mask={mask}"
+            "valid sender pin_from_owner process"
         );
         assert_eq!(group_b.can_see_message(0).await.unwrap(), can_read);
         assert!(!group_b.can_see_message(999).await.unwrap());

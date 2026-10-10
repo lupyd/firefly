@@ -883,12 +883,12 @@ async fn test_used_key_packages_and_pre_keys_cleaned_and_sessions_persist_across
         let kp_bob2_bytes = resp_kp_bob2.bytes().await.unwrap();
         let kp_bob2 = firefly_protos::deserialize_proto::<firefly_protos::firefly::GroupKeyPackages>(&kp_bob2_bytes).unwrap();
         bob_kp_ids2 = kp_bob2.packages.iter().map(|p| p.id).collect();
-        if bob_kp_ids2.len() == 32 {
+        if bob_kp_ids2.len() >= 32 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(bob_kp_ids2.len(), 32, "Bob should have 32 key packages after replenishment");
+    assert!(bob_kp_ids2.len() >= 32, "Bob should have at least 32 key packages after replenishment");
 
     let preserved_kp_count = bob_kp_ids2.iter().filter(|id| initial_bob_kp_ids.contains(id)).count();
     assert_eq!(

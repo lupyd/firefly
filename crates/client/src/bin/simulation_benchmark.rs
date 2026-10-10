@@ -1,5 +1,7 @@
 #![allow(deprecated)]
 
+#[cfg(not(target_arch = "wasm32"))]
+mod imp {
 use std::{
     collections::HashMap,
     sync::{
@@ -21,7 +23,9 @@ use firefly_protos::{
 use futures::{SinkExt, StreamExt};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_tungstenite::connect_async;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_tungstenite::tungstenite::protocol::Message;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -832,8 +836,7 @@ pub fn print_comparison_table(ws: &BenchmarkResult, wt: &BenchmarkResult) {
     println!("=========================================================================================\n");
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+    pub async fn real_main() -> anyhow::Result<()> {
     let mut config = BenchmarkConfig::default();
 
     // CLI args parsing
@@ -930,4 +933,14 @@ async fn main() -> anyhow::Result<()> {
     };
 
     Ok(())
+}
+} // end mod imp
+
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    imp::real_main().await
 }

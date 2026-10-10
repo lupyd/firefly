@@ -64,6 +64,20 @@ for i in $(seq 1 40); do
     sleep 0.5
 done
 
+# 3.2 Add test-only trigger for emulator/test stack
+PGPASSWORD=postgres psql -h 127.0.0.1 -p "$DB_PORT" -U postgres -d firefly -c "
+CREATE OR REPLACE FUNCTION set_test_group_upgraded() RETURNS TRIGGER AS \$\$
+BEGIN
+    UPDATE groups SET settings = settings | 4, upgraded = TRUE WHERE id = NEW.id;
+    RETURN NEW;
+END;
+\$\$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS test_group_upgraded_trigger ON groups;
+CREATE TRIGGER test_group_upgraded_trigger
+    AFTER INSERT ON groups
+    FOR EACH ROW EXECUTE FUNCTION set_test_group_upgraded();
+" >/dev/null 2>&1
+
 # 3.5 Generate temporary TLS self-signed cert for WebTransport
 WT_KEY_PATH="/tmp/${RUN_ID}_wt_key.pem"
 WT_CERT_PATH="/tmp/${RUN_ID}_wt_cert.pem"
@@ -79,6 +93,7 @@ docker run -d \
     -e WT_HOST=localhost \
     -e WT_CERT_PATH="$WT_CERT_PATH" \
     -e WT_KEY_PATH="$WT_KEY_PATH" \
+    -e SUBSCRIPTIONS_AUTHORIZATION="" \
     -v "$WT_CERT_PATH:$WT_CERT_PATH:ro" \
     -v "$WT_KEY_PATH:$WT_KEY_PATH:ro" \
     -v "$SCRIPT_DIR/initdb.sql:/initdb.sql:ro" \
