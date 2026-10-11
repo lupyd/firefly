@@ -1873,7 +1873,34 @@ impl FireflyWsClient {
         .await
     }
 
+    /// Encrypts `payload` for one device. SQLite can report `database is locked` when an incoming
+    /// message updates the same session concurrently; the session write is atomic, so retrying
+    /// from the stored state is safe.
     async fn create_encrypted_message(
+        &self,
+        address: ProtocolAddress,
+        addressId: u64,
+        settings: u32,
+        payload: Vec<u8>,
+    ) -> anyhow::Result<firefly::UserMessage<'static>> {
+        let mut delay = Duration::from_millis(50);
+        for attempt in 1..=4 {
+            match self
+                .create_encrypted_message_once(address.clone(), addressId, settings, payload.clone())
+                .await
+            {
+                Err(err) if attempt < 4 && format!("{err:#}").contains("database is locked") => {
+                    log::warn!("encrypt for {} hit a locked database, retrying (attempt {})", address, attempt);
+                    tokio::time::sleep(delay).await;
+                    delay *= 3;
+                }
+                result => return result,
+            }
+        }
+        unreachable!("the last attempt always returns")
+    }
+
+    async fn create_encrypted_message_once(
         &self,
         address: ProtocolAddress,
         addressId: u64,
