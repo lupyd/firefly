@@ -1362,7 +1362,11 @@ impl FireflyWsClient {
                 continue;
             }
             if let Err(err) = self.set_user_accepted(&other, true).await {
-                all_ok = false;
+                // A 4xx (e.g. a deleted account) will never succeed; don't retry it forever.
+                let permanent = format!("{err}").contains("status: [4");
+                if !permanent {
+                    all_ok = false;
+                }
                 log::warn!("message request backfill failed for {}: {:?}", other, err);
             }
         }
