@@ -319,3 +319,32 @@ async fn blocked_caller_is_rejected() {
     ivan.client.dispose().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn forged_follow_up_signals_never_reach_an_unaccepting_callee() {
+    if urls().is_none() {
+        return;
+    }
+    let (run, dir) = dir("req_forged");
+    let mallory = peer("mallory_rf", run, &dir, true).await;
+    let mut victim = peer("victim_rf", run, &dir, true).await;
+
+    // No CALL_REQUEST at all: signals with fresh call ids and no live call session.
+    for i in 0..5u64 {
+        mallory
+            .client
+            .send_ice_candidate(9000 + i, victim.name.clone(), format!("c{i}"), "0".into(), 0)
+            .await
+            .unwrap();
+        mallory.client.hangup_call(9100 + i, victim.name.clone()).await.unwrap();
+    }
+    let leaked = next_call(&mut victim.calls, 4).await;
+    assert!(
+        leaked.is_none(),
+        "forged signals from an unaccepted user must be dropped, got {leaked:?}"
+    );
+
+    mallory.client.dispose().await;
+    victim.client.dispose().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
