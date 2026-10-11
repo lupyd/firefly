@@ -69,17 +69,128 @@ impl rustls::client::danger::ServerCertVerifier for DangerNoCertVerifier {
     }
 }
 
-pub fn create_wt_client_endpoint() -> anyhow::Result<quinn::Endpoint> {
+/// Accepts only end-entity certificates whose SHA-256 digest is pinned, mirroring the browser
+/// `serverCertificateHashes` option. Used for self-signed local/test servers.
+#[derive(Debug)]
+pub struct PinnedCertVerifier {
+    hashes: Vec<[u8; 32]>,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        use sha2::Digest;
+        let digest: [u8; 32] = sha2::Sha256::digest(end_entity.as_ref()).into();
+        if self.hashes.iter().any(|h| *h == digest) {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::UnknownIssuer,
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// Builds the rustls config for WebTransport.
+///
+/// Certificates are verified against the webpki roots. For local and test servers with
+/// self-signed certificates either pin them with `FIREFLY_WT_CERT_SHA256` (comma separated hex
+/// digests of the DER certificate) or, as a last resort, set `FIREFLY_WT_INSECURE=1`.
+fn wt_client_crypto() -> anyhow::Result<rustls::ClientConfig> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let mut crypto = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(DangerNoCertVerifier))
-        .with_no_client_auth();
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&[&rustls::version::TLS13])?;
+
+    let pinned: Vec<[u8; 32]> = std::env::var("FIREFLY_WT_CERT_SHA256")
+        .ok()
+        .map(|v| {
+            v.split(',')
+                .filter_map(|h| {
+                    let bytes = hex::decode(h.trim().replace(':', "")).ok()?;
+                    <[u8; 32]>::try_from(bytes.as_slice()).ok()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let insecure = std::env::var("FIREFLY_WT_INSECURE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    let mut crypto = if insecure {
+        log::warn!("FIREFLY_WT_INSECURE is set, WebTransport certificates are NOT verified");
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(DangerNoCertVerifier))
+            .with_no_client_auth()
+    } else if !pinned.is_empty() {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(PinnedCertVerifier {
+                hashes: pinned,
+                provider,
+            }))
+            .with_no_client_auth()
+    } else {
+        let roots = rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        builder.with_root_certificates(roots).with_no_client_auth()
+    };
 
     crypto.alpn_protocols = vec![web_transport_quinn::ALPN.as_bytes().to_vec()];
+    Ok(crypto)
+}
 
-    let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?;
+pub fn create_wt_client_endpoint() -> anyhow::Result<quinn::Endpoint> {
+    create_wt_client_endpoint_for("0.0.0.0:0".parse()?)
+}
+
+fn create_wt_client_endpoint_for(bind: std::net::SocketAddr) -> anyhow::Result<quinn::Endpoint> {
+    let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(wt_client_crypto()?)?;
     let mut client_config = quinn::ClientConfig::new(Arc::new(quic_config));
 
     let mut transport = quinn::TransportConfig::default();
@@ -87,9 +198,105 @@ pub fn create_wt_client_endpoint() -> anyhow::Result<quinn::Endpoint> {
     transport.keep_alive_interval(Some(Duration::from_secs(15)));
     client_config.transport_config(Arc::new(transport));
 
-    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
+    let mut endpoint = quinn::Endpoint::client(bind)?;
     endpoint.set_default_client_config(client_config);
     Ok(endpoint)
+}
+
+/// Which transport an active connection is using.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActiveTransport {
+    WebSocket,
+    WebTransport,
+}
+
+impl ActiveTransport {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ActiveTransport::WebSocket => "websocket",
+            ActiveTransport::WebTransport => "webtransport",
+        }
+    }
+}
+
+const WT_BACKOFF_BASE: Duration = Duration::from_secs(60);
+const WT_BACKOFF_MAX: Duration = Duration::from_secs(30 * 60);
+
+/// Remembers WebTransport failures so `Auto` does not pay the handshake timeout on every
+/// reconnect when UDP is blocked.
+#[derive(Default, Debug)]
+struct WtBackoff {
+    failures: u32,
+    retry_after_ms: u64,
+}
+
+impl WtBackoff {
+    fn allowed(&self, now_ms: u64) -> bool {
+        now_ms >= self.retry_after_ms
+    }
+
+    fn record_failure(&mut self, now_ms: u64) {
+        self.failures = self.failures.saturating_add(1);
+        let factor = 1u32 << self.failures.saturating_sub(1).min(5);
+        let delay = (WT_BACKOFF_BASE * factor).min(WT_BACKOFF_MAX);
+        self.retry_after_ms = now_ms + delay.as_millis() as u64;
+    }
+
+    fn record_success(&mut self) {
+        self.failures = 0;
+        self.retry_after_ms = 0;
+    }
+}
+
+/// Jittered exponential backoff: `base * 2^(failures-1)`, capped at 30s, +/-20% jitter.
+fn reconnect_delay(base: Duration, failures: u32) -> Duration {
+    if failures <= 1 {
+        return base;
+    }
+    let factor = 1u32 << (failures - 1).min(5);
+    let delay = (base * factor).min(Duration::from_secs(30)).max(base);
+    let jitter = (rng().next_u32() % 41) as f64 / 100.0 - 0.2;
+    delay.mul_f64(1.0 + jitter)
+}
+
+enum EstablishedTransport {
+    WebSocket(WebSocketStream<MaybeTlsStream<TcpStream>>),
+    WebTransport(web_transport_quinn::Session),
+}
+
+fn wt_connect_timeout() -> Duration {
+    std::env::var("FIREFLY_WT_CONNECT_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(3))
+}
+
+/// Normalises any configured URL into the `https://` form WebTransport expects.
+fn to_wt_url(url: &str) -> String {
+    let url = url.trim_end_matches('/');
+    for prefix in ["wss://", "ws://", "wt://", "webtransport://", "http://"] {
+        if let Some(rest) = url.strip_prefix(prefix) {
+            return format!("https://{rest}");
+        }
+    }
+    url.to_string()
+}
+
+/// Normalises any configured URL into a `ws(s)://` form.
+fn to_ws_url(url: &str) -> String {
+    let url = url.trim_end_matches('/');
+    for (prefix, replacement) in [
+        ("https://", "wss://"),
+        ("wt://", "wss://"),
+        ("webtransport://", "wss://"),
+        ("http://", "ws://"),
+    ] {
+        if let Some(rest) = url.strip_prefix(prefix) {
+            return format!("{replacement}{rest}");
+        }
+    }
+    url.to_string()
 }
 
 use crate::{
@@ -103,6 +310,7 @@ use crate::{
         group_stores::{GroupInfo, GroupInfoStore, GroupKeyPackageStore, SelfGroupKeyPackageStore},
         history_keys::HistoryKeysStore,
         keyvalue::{KEY_FCM_TOKEN, KEY_LAST_RECEIVED_MESSAGE_ID, KeyValueStore},
+        message_requests::MessageRequestsStore,
         messages::{MessagesStore, UserMessage},
         search::{SearchEngine, SearchResultItem, SearchScope},
         setup_pool_from_path,
@@ -150,6 +358,15 @@ impl FireflyWsClientCallback for InternalSignalCallback {
     async fn on_unauthenticated(&self) {
         self.inner.on_unauthenticated().await;
     }
+    async fn on_direct_backup_key_sync(&self, sync: firefly_protos::firefly::DirectBackupKeySync<'static>) {
+        self.inner.on_direct_backup_key_sync(sync).await;
+    }
+    async fn on_direct_pin_snapshot(&self, peer: String, secret: firefly_protos::firefly::DirectPinSnapshotSecret<'static>) {
+        self.inner.on_direct_pin_snapshot(peer, secret).await;
+    }
+    async fn on_transport_changed(&self, transport: String) {
+        self.inner.on_transport_changed(transport).await;
+    }
 }
 
 pub struct Connection {
@@ -157,6 +374,7 @@ pub struct Connection {
     receiver_task: tokio::task::JoinHandle<()>,
     sender: Sender<Bytes>,
     session: Option<web_transport_quinn::Session>,
+    last_message_sent_ts_secs: Arc<AtomicU64>,
 }
 
 impl Connection {
@@ -255,6 +473,7 @@ impl Connection {
         };
         {
             let ping_sender = sender.clone();
+            let last_message_sent_ts_secs = last_message_sent_ts_secs.clone();
 
             let id = id.clone();
             tokio::spawn(CURRENT_CLIENT.scope(id, async move {
@@ -286,6 +505,7 @@ impl Connection {
             receiver_task,
             sender,
             session: None,
+            last_message_sent_ts_secs,
         }
     }
 
@@ -312,6 +532,7 @@ impl Connection {
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<Bytes>(100);
         let sender2 = sender.clone();
         let id = callbacks.name().to_string();
+        let pending_requests_for_sender = pending_requests.clone();
 
         let session_recv = session.clone();
         let receiver_task = tokio::spawn(CURRENT_CLIENT.scope(id.clone(), async move {
@@ -367,7 +588,12 @@ impl Connection {
         }));
 
         let session_send = session.clone();
+        let last_message_sent_ts_secs =
+            Arc::new(AtomicU64::new(get_current_timestamp_seconds_since_epoch()));
+        let sender_last_sent = last_message_sent_ts_secs.clone();
         let sender_task = tokio::spawn(CURRENT_CLIENT.scope(id.clone(), async move {
+            // Streams are opened sequentially, so their QUIC stream ids preserve the order the
+            // messages were queued in; the server dispatches uni streams in id order.
             while let Some(msg) = receiver.recv().await {
                 let is_request = match deserialize_proto::<firefly::ClientMessage<'_>>(&msg) {
                     Ok(cm) => matches!(cm.message, firefly::mod_ClientMessage::OneOfmessage::request(_)),
@@ -375,24 +601,57 @@ impl Connection {
                 };
 
                 if is_request {
-                    if let Ok((mut send_stream, mut recv_stream)) = session_send.open_bi().await {
-                        let _ = send_stream.write_all(&msg).await;
-                        let _ = send_stream.finish();
-                        tokio::spawn(async move {
-                            let mut len_buf = [0u8; 4];
-                            if recv_stream.read_exact(&mut len_buf).await.is_ok() {
+                    match session_send.open_bi().await {
+                        Ok((mut send_stream, mut recv_stream)) => {
+                            let _ = send_stream.write_all(&msg).await;
+                            let _ = send_stream.finish();
+                            let pending_requests = pending_requests_for_sender.clone();
+                            tokio::spawn(async move {
+                                let mut len_buf = [0u8; 4];
+                                if recv_stream.read_exact(&mut len_buf).await.is_err() {
+                                    return;
+                                }
                                 let len = u32::from_be_bytes(len_buf) as usize;
                                 let mut buf = vec![0u8; len];
-                                let _ = recv_stream.read_exact(&mut buf).await;
-                            }
-                        });
+                                if recv_stream.read_exact(&mut buf).await.is_err() {
+                                    return;
+                                }
+                                // Requests queued through `sender` still expect their reply via
+                                // the pending request map, exactly like the WebSocket path.
+                                if let Ok(server_msg) = deserialize_proto::<firefly::ServerMessage>(&buf) {
+                                    if let firefly::mod_ServerMessage::OneOfmessage::response(response) = server_msg.message {
+                                        let tx = pending_requests.lock().unwrap().remove(&response.id);
+                                        if let (Some(tx), Ok(bytes)) = (tx, serialize_proto(&response)) {
+                                            let _ = tx.send(bytes);
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        Err(err) => {
+                            log::error!("failed to open WT bi stream: {}", err);
+                            break;
+                        }
                     }
                 } else {
-                    if let Ok(mut send_stream) = session_send.open_uni().await {
-                        let _ = send_stream.write_all(&msg).await;
-                        let _ = send_stream.finish();
+                    match session_send.open_uni().await {
+                        Ok(mut send_stream) => {
+                            if let Err(err) = send_stream.write_all(&msg).await {
+                                log::error!("failed to write WT uni stream: {}", err);
+                                break;
+                            }
+                            let _ = send_stream.finish();
+                        }
+                        Err(err) => {
+                            log::error!("failed to open WT uni stream: {}", err);
+                            break;
+                        }
                     }
                 }
+                sender_last_sent.store(
+                    get_current_timestamp_seconds_since_epoch(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
             log::info!("WT sender task finished");
         }));
@@ -402,7 +661,16 @@ impl Connection {
             receiver_task,
             sender,
             session: Some(session),
+            last_message_sent_ts_secs,
         }
+    }
+
+    /// Seconds since this connection last sent anything.
+    pub fn idle_secs(&self) -> u64 {
+        get_current_timestamp_seconds_since_epoch().saturating_sub(
+            self.last_message_sent_ts_secs
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     pub fn is_webtransport(&self) -> bool {
@@ -489,6 +757,11 @@ pub struct FireflyWsClient {
     next_request_id: AtomicU32,
     last_connection_error: std::sync::Mutex<Option<String>>,
     pub transport: TransportProtocol,
+    firefly_base_wt_url: Option<String>,
+    message_requests_store: MessageRequestsStore,
+    wt_backoff: std::sync::Mutex<WtBackoff>,
+    wt_endpoints: std::sync::Mutex<(Option<quinn::Endpoint>, Option<quinn::Endpoint>)>,
+    active_transport: std::sync::RwLock<Option<ActiveTransport>>,
 }
 
 impl FireflyWsClient {
@@ -541,6 +814,53 @@ impl FireflyWsClient {
         request_timeout_in_ms: u64,
         transport: TransportProtocol,
     ) -> anyhow::Result<Self> {
+        Self::create_inner(
+            firefly_base_url,
+            firefly_base_ws_url,
+            None,
+            retry_interval_in_ms,
+            callbacks,
+            key_stores_pathname,
+            request_timeout_in_ms,
+            transport,
+        )
+        .await
+    }
+
+    /// WebTransport first (`firefly_base_wt_url`), falling back to WebSocket
+    /// (`firefly_base_ws_url`) when QUIC is unreachable.
+    pub async fn create_with_endpoints(
+        firefly_base_url: String,
+        firefly_base_ws_url: String,
+        firefly_base_wt_url: Option<String>,
+        retry_interval_in_ms: u64,
+        callbacks: Box<dyn FireflyWsClientCallback>,
+        key_stores_pathname: String,
+        request_timeout_in_ms: u64,
+    ) -> anyhow::Result<Self> {
+        Self::create_inner(
+            firefly_base_url,
+            firefly_base_ws_url,
+            firefly_base_wt_url.filter(|u| !u.trim().is_empty()),
+            retry_interval_in_ms,
+            callbacks,
+            key_stores_pathname,
+            request_timeout_in_ms,
+            TransportProtocol::Auto,
+        )
+        .await
+    }
+
+    async fn create_inner(
+        firefly_base_url: String,
+        firefly_base_ws_url: String,
+        firefly_base_wt_url: Option<String>,
+        retry_interval_in_ms: u64,
+        callbacks: Box<dyn FireflyWsClientCallback>,
+        key_stores_pathname: String,
+        request_timeout_in_ms: u64,
+        transport: TransportProtocol,
+    ) -> anyhow::Result<Self> {
         let pool = setup_pool_from_path(&key_stores_pathname, 5).await?;
         let key_stores = Arc::new(FfiKeyStores::new(pool.clone()).await?);
         let key_value_store = KeyValueStore::new(pool.clone()).await?;
@@ -555,6 +875,7 @@ impl FireflyWsClient {
         let last_connection_established_timestamp = get_current_timestamp_millis_since_epoch();
 
         let group_info_store = GroupInfoStore::new(pool.clone()).await?;
+        let message_requests_store = MessageRequestsStore::new(pool.clone()).await?;
 
         Ok(Self {
             pool,
@@ -592,6 +913,11 @@ impl FireflyWsClient {
             group_info_store,
             next_request_id: Default::default(),
             last_connection_error: std::sync::Mutex::new(None),
+            firefly_base_wt_url,
+            message_requests_store,
+            wt_backoff: Default::default(),
+            wt_endpoints: Default::default(),
+            active_transport: Default::default(),
         })
     }
     pub async fn initialize_with_retrying(&self) -> anyhow::Result<()> {
@@ -636,6 +962,7 @@ impl FireflyWsClient {
         {
             *self.state.write().unwrap() = ConnectionState::Initializing;
         }
+        let mut consecutive_failures: u32 = 0;
         while !self
             .stop_reconnecting
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -650,13 +977,21 @@ impl FireflyWsClient {
                         get_current_timestamp_millis_since_epoch(),
                         std::sync::atomic::Ordering::Relaxed,
                     );
-                    let _ = self.connect().await;
+                    let started = get_current_timestamp_millis_since_epoch();
+                    let result = self.connect().await;
+                    let lived_ms = get_current_timestamp_millis_since_epoch().saturating_sub(started);
+                    // A connection that stayed up for a while resets the backoff.
+                    if result.is_ok() && lived_ms > 30_000 {
+                        consecutive_failures = 0;
+                    } else {
+                        consecutive_failures = consecutive_failures.saturating_add(1);
+                    }
 
                     if !self
                         .stop_reconnecting
                         .load(std::sync::atomic::Ordering::Relaxed)
                     {
-                        tokio::time::sleep(self.retry_interval).await;
+                        tokio::time::sleep(reconnect_delay(self.retry_interval, consecutive_failures)).await;
                     }
                 })
                 .await;
@@ -667,6 +1002,417 @@ impl FireflyWsClient {
         }
 
         Ok(())
+    }
+
+    /// The WebTransport URL to try first, if any.
+    fn wt_candidate(&self) -> Option<String> {
+        if self.transport == TransportProtocol::WebSocket {
+            return None;
+        }
+        let env_transport = std::env::var("FIREFLY_TRANSPORT")
+            .or_else(|_| std::env::var("TRANSPORT"))
+            .ok()
+            .map(|v| v.to_ascii_lowercase());
+        if self.transport == TransportProtocol::Auto
+            && matches!(env_transport.as_deref(), Some("ws" | "websocket"))
+        {
+            return None;
+        }
+        if let Some(url) = &self.firefly_base_wt_url {
+            return Some(to_wt_url(url));
+        }
+        let ws = &self.firefly_base_ws_url;
+        let looks_wt = ws.starts_with("https://")
+            || ws.starts_with("wt://")
+            || ws.starts_with("webtransport://");
+        let env_wt = matches!(env_transport.as_deref(), Some("wt" | "webtransport"));
+        if self.transport == TransportProtocol::WebTransport || env_wt || looks_wt {
+            Some(to_wt_url(ws))
+        } else {
+            None
+        }
+    }
+
+    /// The WebSocket URL to fall back to, if any.
+    fn ws_candidate(&self) -> Option<String> {
+        if self.transport == TransportProtocol::WebTransport {
+            return None;
+        }
+        Some(to_ws_url(&self.firefly_base_ws_url))
+    }
+
+    fn record_connection_error(&self, context: &str, err: &dyn std::fmt::Debug) {
+        let err_str = format!("{context}: {err:?}");
+        let mut last_err = self.last_connection_error.lock().unwrap();
+        if last_err.as_ref() != Some(&err_str) {
+            log::error!("{}", err_str);
+            *last_err = Some(err_str);
+        }
+    }
+
+    fn wt_endpoint(&self, ipv6: bool) -> anyhow::Result<quinn::Endpoint> {
+        let mut endpoints = self.wt_endpoints.lock().unwrap();
+        let slot = if ipv6 { &mut endpoints.1 } else { &mut endpoints.0 };
+        if let Some(endpoint) = slot {
+            return Ok(endpoint.clone());
+        }
+        let bind: std::net::SocketAddr = if ipv6 {
+            "[::]:0".parse()?
+        } else {
+            "0.0.0.0:0".parse()?
+        };
+        let endpoint = create_wt_client_endpoint_for(bind)?;
+        *slot = Some(endpoint.clone());
+        Ok(endpoint)
+    }
+
+    /// Opens a QUIC connection to the WebTransport host, trying IPv4 before IPv6.
+    async fn connect_quic(&self, parsed_url: &reqwest::Url) -> anyhow::Result<quinn::Connection> {
+        let host_str = parsed_url.host_str().unwrap_or("localhost").to_string();
+        let port = parsed_url.port().unwrap_or(443);
+        let mut addrs: Vec<std::net::SocketAddr> =
+            tokio::net::lookup_host(format!("{}:{}", host_str, port))
+                .await?
+                .collect();
+        addrs.sort_by_key(|a| a.is_ipv6());
+        addrs.dedup();
+        if addrs.is_empty() {
+            anyhow::bail!("could not resolve host {}:{}", host_str, port);
+        }
+
+        let sni = std::env::var("WT_HOST").ok().unwrap_or(host_str);
+        let mut last_err = None;
+        for addr in addrs {
+            let endpoint = match self.wt_endpoint(addr.is_ipv6()) {
+                Ok(e) => e,
+                Err(err) => {
+                    last_err = Some(err);
+                    continue;
+                }
+            };
+            match endpoint.connect(addr, &sni) {
+                Ok(connecting) => match connecting.await {
+                    Ok(conn) => return Ok(conn),
+                    Err(err) => last_err = Some(err.into()),
+                },
+                Err(err) => last_err = Some(err.into()),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("QUIC connection failed")))
+    }
+
+    async fn connect_wt(&self, base_wt: &str, query: &str) -> anyhow::Result<web_transport_quinn::Session> {
+        let mut base_wt = base_wt.trim_end_matches('/').to_string();
+        if let Ok(exp_h) = std::env::var("WT_HOST") {
+            base_wt = base_wt
+                .replace("127.0.0.1", &exp_h)
+                .replace("0.0.0.0", &exp_h);
+        }
+        let parsed_url = reqwest::Url::parse(&format!("{}/?{}", base_wt, query))?;
+        let quic = self.connect_quic(&parsed_url).await?;
+        let session = web_transport_quinn::Session::connect(quic, parsed_url).await?;
+        Ok(session)
+    }
+
+    async fn connect_ws(
+        &self,
+        base_ws: &str,
+        query: &str,
+    ) -> anyhow::Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
+        let url = format!("{}/?{}", base_ws.trim_end_matches('/'), query);
+        match tokio_tungstenite::connect_async(&url).await {
+            Ok((stream, response)) => {
+                log::debug!("websocket response headers: {:?}", response.headers());
+                Ok(stream)
+            }
+            Err(err) => {
+                if let tokio_tungstenite::tungstenite::error::Error::Http(ref resp) = err {
+                    if resp.status() == 401 || resp.status() == 403 {
+                        log::warn!("Connection rejected by server with HTTP status {}, invoking on_unauthenticated", resp.status());
+                        self.callbacks.on_unauthenticated().await;
+                    }
+                }
+                Err(err.into())
+            }
+        }
+    }
+
+    fn is_wt_auth_error(err: &anyhow::Error) -> bool {
+        matches!(
+            err.downcast_ref::<web_transport_quinn::ClientError>(),
+            Some(web_transport_quinn::ClientError::HttpError(
+                web_transport_quinn::ConnectError::ErrorStatus(status)
+            )) if status.as_u16() == 401 || status.as_u16() == 403
+        )
+    }
+
+    /// WebTransport first, WebSocket as the fallback.
+    async fn establish(&self, query: &str) -> anyhow::Result<EstablishedTransport> {
+        let wt_url = self.wt_candidate();
+        let ws_url = self.ws_candidate();
+
+        if let Some(wt_url) = wt_url {
+            let now = get_current_timestamp_millis_since_epoch();
+            let allowed = ws_url.is_none() || self.wt_backoff.lock().unwrap().allowed(now);
+            if allowed {
+                let timeout = if ws_url.is_some() {
+                    wt_connect_timeout()
+                } else {
+                    self.request_timeout.max(Duration::from_secs(15))
+                };
+                let result = match tokio::time::timeout(timeout, self.connect_wt(&wt_url, query)).await {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow::anyhow!("WebTransport handshake timed out after {:?}", timeout)),
+                };
+                match result {
+                    Ok(session) => {
+                        self.wt_backoff.lock().unwrap().record_success();
+                        return Ok(EstablishedTransport::WebTransport(session));
+                    }
+                    Err(err) if Self::is_wt_auth_error(&err) => {
+                        // Auth failures are not transport failures, never retry them on WS.
+                        log::warn!("WebTransport rejected credentials, invoking on_unauthenticated");
+                        self.callbacks.on_unauthenticated().await;
+                        return Err(err);
+                    }
+                    Err(err) => {
+                        self.wt_backoff
+                            .lock()
+                            .unwrap()
+                            .record_failure(get_current_timestamp_millis_since_epoch());
+                        self.record_connection_error("WebTransport connect failed", &err);
+                        if ws_url.is_none() {
+                            return Err(err);
+                        }
+                        log::info!("falling back to WebSocket");
+                    }
+                }
+            }
+        }
+
+        let ws_url = ws_url.context("no transport url configured")?;
+        match self.connect_ws(&ws_url, query).await {
+            Ok(stream) => Ok(EstablishedTransport::WebSocket(stream)),
+            Err(err) => {
+                self.record_connection_error("WebSocket connect failed", &err);
+                Err(err)
+            }
+        }
+    }
+
+    /// While on the WebSocket fallback, periodically checks whether UDP/QUIC is reachable again
+    /// and returns once it is, so the caller can reconnect over WebTransport.
+    async fn wait_for_wt_recovery(&self) {
+        let Some(wt_url) = self.wt_candidate() else {
+            return futures::future::pending().await;
+        };
+        if self.ws_candidate().is_none() {
+            return futures::future::pending().await;
+        }
+        let Ok(parsed_url) = reqwest::Url::parse(&wt_url) else {
+            return futures::future::pending().await;
+        };
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let now = get_current_timestamp_millis_since_epoch();
+            if !self.wt_backoff.lock().unwrap().allowed(now) {
+                continue;
+            }
+            // Avoid reconnecting while the user is actively doing something (e.g. a call).
+            let idle = {
+                let g = self.connection.read().await;
+                g.as_ref().map(|c| c.idle_secs()).unwrap_or(0)
+            };
+            if idle < 30 {
+                continue;
+            }
+            match tokio::time::timeout(wt_connect_timeout(), self.connect_quic(&parsed_url)).await {
+                Ok(Ok(conn)) => {
+                    conn.close(0u32.into(), b"probe");
+                    self.wt_backoff.lock().unwrap().record_success();
+                    log::info!("WebTransport reachable again, migrating off WebSocket");
+                    return;
+                }
+                _ => {
+                    self.wt_backoff
+                        .lock()
+                        .unwrap()
+                        .record_failure(get_current_timestamp_millis_since_epoch());
+                }
+            }
+        }
+    }
+
+    /// Messaging someone implicitly accepts them (mirrors `insert_user_messages` on the server).
+    async fn note_implicit_accept(&self, to: &str, message_type: u32) {
+        if message_type & firefly_protos::MESSAGE_TYPE_HIDDEN != 0 {
+            return;
+        }
+        if self.get_self_username().await.is_ok_and(|me| me == to) {
+            return;
+        }
+        if let Err(err) = self.message_requests_store.set_accepted(to, true).await {
+            log::warn!("failed to cache implicit accept of {}: {:?}", to, err);
+        }
+    }
+
+    /// Whether this account accepted `username` (local cache, works offline).
+    pub async fn is_user_accepted(&self, username: &str) -> bool {
+        if self.get_self_username().await.is_ok_and(|me| me == username) {
+            return true;
+        }
+        self.message_requests_store
+            .is_accepted(username)
+            .await
+            .unwrap_or(false)
+    }
+
+    pub async fn accepted_users(&self) -> anyhow::Result<Vec<String>> {
+        self.message_requests_store.list().await
+    }
+
+    /// See [`MessageRequestsStore::mark_request_notified`].
+    pub async fn mark_request_notified(&self, username: &str) -> anyhow::Result<bool> {
+        self.message_requests_store
+            .mark_request_notified(username)
+            .await
+    }
+
+    async fn bearer_token(&self) -> anyhow::Result<String> {
+        self.callbacks
+            .get_access_token()
+            .await
+            .context("token not found")
+    }
+
+    /// Explicitly accepts (or un-accepts) `other`'s message request.
+    pub async fn set_user_accepted(&self, other: &str, accepted: bool) -> anyhow::Result<()> {
+        let token = self.bearer_token().await?;
+        let mut url = reqwest::Url::parse(&format!("{}/user/accept", self.firefly_base_url))?;
+        url.query_pairs_mut().append_pair("other", other);
+        let request = if accepted {
+            HTTP_CLIENT.post(url)
+        } else {
+            HTTP_CLIENT.delete(url)
+        };
+        let response = request.bearer_auth(token).send().await?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "unexpected status: [{}] {}",
+                response.status(),
+                response.text().await.unwrap_or_default()
+            );
+        }
+        self.message_requests_store
+            .set_accepted(other, accepted)
+            .await
+    }
+
+    async fn fetch_accepted_users(&self, token: &str) -> anyhow::Result<Vec<String>> {
+        let response = HTTP_CLIENT
+            .get(format!("{}/user/accepted", self.firefly_base_url))
+            .bearer_auth(token)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "unexpected status: [{}] {}",
+                response.status(),
+                response.text().await.unwrap_or_default()
+            );
+        }
+        let body = response.bytes().await?;
+        let accepted = deserialize_proto::<firefly::AcceptedUsers>(&body)?;
+        Ok(accepted
+            .usernames
+            .into_iter()
+            .map(|u| u.into_owned())
+            .collect())
+    }
+
+    /// Syncs the accepted-users cache with the server. The first run after upgrading also
+    /// backfills conversations recorded in this client's own message store, so existing
+    /// contacts keep being able to call each other once the server enforces requests.
+    pub async fn refresh_accepted_users(&self) -> anyhow::Result<Vec<String>> {
+        let candidates = self.message_requests_store.users_messaged_by_me().await?;
+        self.backfill_accepted_users(candidates, "message_requests_backfill_v1")
+            .await?;
+        let token = self.bearer_token().await?;
+        let accepted = self.fetch_accepted_users(&token).await?;
+        self.message_requests_store.replace_all(&accepted).await?;
+        Ok(accepted)
+    }
+
+    /// One-time (per `flag_key`) accept of users this account already messaged before message
+    /// requests existed. Apps that keep their message history elsewhere pass it in here.
+    pub async fn backfill_accepted_users(
+        &self,
+        candidates: Vec<String>,
+        flag_key: &str,
+    ) -> anyhow::Result<()> {
+        if self.key_value_store.get(flag_key).await.unwrap_or_default() == "1" {
+            return Ok(());
+        }
+        let me = self.get_self_username().await.unwrap_or_default();
+        let token = self.bearer_token().await?;
+        let accepted = self.fetch_accepted_users(&token).await?;
+        let mut all_ok = true;
+        for other in candidates {
+            if other.is_empty() || other == me || accepted.contains(&other) {
+                continue;
+            }
+            if let Err(err) = self.set_user_accepted(&other, true).await {
+                all_ok = false;
+                log::warn!("message request backfill failed for {}: {:?}", other, err);
+            }
+        }
+        if all_ok {
+            self.key_value_store.set(flag_key, "1").await?;
+        }
+        Ok(())
+    }
+
+    pub async fn get_requests_disabled(&self) -> anyhow::Result<bool> {
+        let token = self.bearer_token().await?;
+        let response = HTTP_CLIENT
+            .get(format!("{}/user/privacy", self.firefly_base_url))
+            .bearer_auth(token)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "unexpected status: [{}] {}",
+                response.status(),
+                response.text().await.unwrap_or_default()
+            );
+        }
+        let body = response.bytes().await?;
+        Ok(deserialize_proto::<firefly::MessageRequestSettings>(&body)?.requests_disabled)
+    }
+
+    pub async fn set_requests_disabled(&self, disabled: bool) -> anyhow::Result<()> {
+        let token = self.bearer_token().await?;
+        let body = serialize_proto(&firefly::MessageRequestSettings {
+            requests_disabled: disabled,
+        })?;
+        let response = HTTP_CLIENT
+            .put(format!("{}/user/privacy", self.firefly_base_url))
+            .bearer_auth(token)
+            .body(body.to_vec())
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "unexpected status: [{}] {}",
+                response.status(),
+                response.text().await.unwrap_or_default()
+            );
+        }
+        Ok(())
+    }
+
+    pub fn current_transport(&self) -> Option<ActiveTransport> {
+        *self.active_transport.read().unwrap()
     }
 
     async fn connect(&self) -> anyhow::Result<()> {
@@ -699,248 +1445,27 @@ impl FireflyWsClient {
             .parse::<u64>()
             .unwrap_or_default();
 
-        let use_wt = match self.transport {
-            TransportProtocol::WebTransport => true,
-            TransportProtocol::WebSocket => false,
-            TransportProtocol::Auto => {
-                let env_wt = std::env::var("FIREFLY_TRANSPORT")
-                    .or_else(|_| std::env::var("TRANSPORT"))
-                    .map(|v| v.eq_ignore_ascii_case("webtransport") || v.eq_ignore_ascii_case("wt"))
-                    .unwrap_or(false);
-                env_wt
-                    || self.firefly_base_ws_url.starts_with("https://")
-                    || self.firefly_base_ws_url.starts_with("wt://")
-                    || self.firefly_base_ws_url.starts_with("webtransport://")
-            }
-        };
-
-        if use_wt {
-            let mut base_wt = self
-                .firefly_base_ws_url
-                .trim_end_matches('/')
-                .replace("ws://", "https://")
-                .replace("wss://", "https://")
-                .replace("wt://", "https://")
-                .replace("webtransport://", "https://");
-
-            let expected_host = std::env::var("WT_HOST")
-                .or_else(|_| std::env::var("SERVER_HOST"))
-                .or_else(|_| std::env::var("HOST"))
-                .ok();
-
-            if let Some(ref exp_h) = expected_host {
-                if base_wt.contains("127.0.0.1") {
-                    base_wt = base_wt.replace("127.0.0.1", exp_h);
-                } else if base_wt.contains("0.0.0.0") {
-                    base_wt = base_wt.replace("0.0.0.0", exp_h);
-                }
-            }
-
-            let url = format!(
-                "{}/?uid={}&device_id={}&last_synced_upto={}&token={}",
-                base_wt, addressId, device_id, last_synced_upto, token
-            );
-
-            let sanitized_url = format!(
-                "{}/?uid={}&device_id={}&last_synced_upto={}&token=[REDACTED]",
-                base_wt, addressId, device_id, last_synced_upto
-            );
-
-            let show_connecting = {
-                let last_err = self.last_connection_error.lock().unwrap();
-                last_err.is_none()
-            };
-            if show_connecting {
-                log::info!("connecting via WebTransport to {}", sanitized_url);
-            }
-
-            let parsed_url = match reqwest::Url::parse(&url) {
-                Ok(u) => u,
-                Err(e) => {
-                    log::error!("invalid WT URL: {:?}", e);
-                    return Err(e.into());
-                }
-            };
-
-            let host_str = parsed_url.host_str().unwrap_or("localhost").to_string();
-            let port = parsed_url.port().unwrap_or(443);
-            let socket_addr = match tokio::net::lookup_host(format!("{}:{}", host_str, port)).await {
-                Ok(addrs) => {
-                    let list: Vec<std::net::SocketAddr> = addrs.collect();
-                    list.iter()
-                        .copied()
-                        .find(|sa| sa.is_ipv4())
-                        .or_else(|| list.first().copied())
-                        .ok_or_else(|| anyhow::anyhow!("could not resolve host {}:{}", host_str, port))?
-                }
-                Err(e) => return Err(e.into()),
-            };
-
-            let sni = expected_host.unwrap_or(host_str);
-            let endpoint = create_wt_client_endpoint()?;
-            let quinn_conn = match endpoint.connect(socket_addr, &sni) {
-                Ok(connecting) => match connecting.await {
-                    Ok(conn) => conn,
-                    Err(err) => {
-                        let err_str = format!("{:?}", err);
-                        let mut last_err = self.last_connection_error.lock().unwrap();
-                        if last_err.as_ref() != Some(&err_str) {
-                            log::error!("QUIC connection failed: {:?}", err);
-                            log::info!("waiting {}ms to reconnect", self.retry_interval.as_millis());
-                            *last_err = Some(err_str);
-                        }
-                        return Err(err.into());
-                    }
-                },
-                Err(err) => {
-                    log::error!("endpoint.connect failed: {:?}", err);
-                    return Err(err.into());
-                }
-            };
-
-            let session = match web_transport_quinn::Session::connect(quinn_conn, parsed_url).await {
-                Ok(s) => s,
-                Err(err) => {
-                    let err_str = format!("{:?}", err);
-                    let mut last_err = self.last_connection_error.lock().unwrap();
-                    if last_err.as_ref() != Some(&err_str) {
-                        log::error!("WebTransport session connect failed: {:?}", err);
-                        log::info!("waiting {}ms to reconnect", self.retry_interval.as_millis());
-                        *last_err = Some(err_str);
-                    }
-                    return Err(err.into());
-                }
-            };
-
-            {
-                let mut last_err = self.last_connection_error.lock().unwrap();
-                *last_err = None;
-            }
-
-            {
-                *self.state.write().unwrap() = ConnectionState::Connected;
-            }
-
-            log::info!("connected successfully via WebTransport to {}", sanitized_url);
-
-            let pending_requests = self.pending_requests.clone();
-            let key_stores = self.key_stores.clone();
-            let callbacks = self.callbacks.clone();
-
-            {
-                pending_requests.lock().unwrap().clear();
-            }
-
-            let (on_connection_closed_tx, on_connection_closed_rx) = oneshot::channel::<()>();
-            let mut signal_rx = None;
-            let firefly_mls_client = self
-                .firefly_mls_client
-                .get()
-                .context("firefly_mls_client is uninitialized")?;
-
-            {
-                let mut g = self.connection.write().await;
-                let (signal_tx, signal_rx_new) = tokio::sync::mpsc::channel(100);
-                signal_rx = Some(signal_rx_new);
-                *g = Some(Connection::new_webtransport(
-                    callbacks,
-                    key_stores,
-                    pending_requests,
-                    session,
-                    on_connection_closed_tx,
-                    self.key_value_store.clone(),
-                    firefly_mls_client.clone(),
-                    self.group_info_store.clone(),
-                    self.group_messages_store.clone(),
-                    self.history_keys_store.clone(),
-                    self.addressId.load(std::sync::atomic::Ordering::Relaxed),
-                    self.key_stores
-                        .store()
-                        .identity_store
-                        .get_full_identity_key_pair()
-                        .await
-                        .map(|i| i.device_id)
-                        .unwrap_or(0) as u8,
-                    self.firefly_base_url.clone(),
-                    signal_tx,
-                ));
-            }
-
-            if let Err(err) = self.sync_all_group_messages().await {
-                log::error!("sync group messages failed: {:?}", err);
-            }
-
-            if let Some(token) = self.callbacks.get_access_token().await {
-                let address_id = self.addressId.load(std::sync::atomic::Ordering::Relaxed);
-                let device_id = self
-                    .key_stores
-                    .store()
-                    .identity_store
-                    .get_full_identity_key_pair()
-                    .await
-                    .map(|i| i.device_id)
-                    .unwrap_or(0) as u8;
-
-                let _ = self.join_groups(&token, address_id, device_id).await;
-                let _ = self
-                    .add_requested_re_add_group_members(&token, address_id, device_id)
-                    .await;
-            }
-
-            if let Some(mut rx) = signal_rx {
-                tokio::select! {
-                    _ = on_connection_closed_rx => {},
-                    _ = async {
-                        while let Some(signal) = rx.recv().await {
-                            if let Err(e) = self.handle_group_history_signal(signal).await {
-                                log::error!("auto handle_group_history_signal error: {:?}", e);
-                            }
-                        }
-                    } => {},
-                }
-            } else {
-                on_connection_closed_rx.await?;
-            }
-            return Ok(());
-        }
-
-        let base_ws = self.firefly_base_ws_url.trim_end_matches('/');
-        let url = format!(
-            "{}/?uid={}&device_id={}&last_synced_upto={}&token={}",
-            base_ws, addressId, device_id, last_synced_upto, token
+        let query = format!(
+            "uid={}&device_id={}&last_synced_upto={}&token={}",
+            addressId, device_id, last_synced_upto, token
         );
 
-        let sanitized_url = format!(
-            "{}/?uid={}&device_id={}&last_synced_upto={}&token=[REDACTED]",
-            base_ws, addressId, device_id, last_synced_upto
-        );
-
-        let show_connecting = {
-            let last_err = self.last_connection_error.lock().unwrap();
-            last_err.is_none()
-        };
+        let show_connecting = self.last_connection_error.lock().unwrap().is_none();
         if show_connecting {
-            log::info!("connecting to {}", sanitized_url);
+            log::info!(
+                "connecting (wt: {:?}, ws: {:?}) uid={} device_id={} last_synced_upto={}",
+                self.wt_candidate(),
+                self.ws_candidate(),
+                addressId,
+                device_id,
+                last_synced_upto
+            );
         }
 
-        let (stream, response) = match tokio_tungstenite::connect_async(&url).await {
-            Ok(v) => v,
-            Err(err) => {
-                let err_str = format!("{:?}", err);
-                if let tokio_tungstenite::tungstenite::error::Error::Http(ref resp) = err {
-                    if resp.status() == 401 || resp.status() == 403 {
-                        log::warn!("Connection rejected by server with HTTP status {}, invoking on_unauthenticated", resp.status());
-                        self.callbacks.on_unauthenticated().await;
-                    }
-                }
-                let mut last_err = self.last_connection_error.lock().unwrap();
-                if last_err.as_ref() != Some(&err_str) {
-                    log::error!("connection request failed {:?}", err);
-                    log::info!("waiting {}ms to reconnect", self.retry_interval.as_millis());
-                    *last_err = Some(err_str);
-                }
-                return Err(err.into());
-            }
+        let established = self.establish(&query).await?;
+        let active = match &established {
+            EstablishedTransport::WebSocket(_) => ActiveTransport::WebSocket,
+            EstablishedTransport::WebTransport(_) => ActiveTransport::WebTransport,
         };
 
         {
@@ -952,11 +1477,14 @@ impl FireflyWsClient {
             *self.state.write().unwrap() = ConnectionState::Connected;
         }
 
-        log::info!(
-            "connected successfully to {}, Headers: {:?} ",
-            sanitized_url,
-            response.headers()
-        );
+        {
+            *self.active_transport.write().unwrap() = Some(active);
+        }
+
+        log::info!("connected successfully via {}", active.as_str());
+        self.callbacks
+            .on_transport_changed(active.as_str().to_string())
+            .await;
 
         let pending_requests = self.pending_requests.clone();
         let key_stores = self.key_stores.clone();
@@ -968,38 +1496,50 @@ impl FireflyWsClient {
 
         let (on_connection_closed_tx, on_connection_closed_rx) = oneshot::channel::<()>();
 
-        let mut signal_rx = None;
         let firefly_mls_client = self
             .firefly_mls_client
             .get()
             .context("firefly_mls_client is uninitialized")?;
 
+        let (signal_tx, mut signal_rx) = tokio::sync::mpsc::channel(100);
         {
             let mut g = self.connection.write().await;
-            let (signal_tx, signal_rx_new) = tokio::sync::mpsc::channel(100);
-            signal_rx = Some(signal_rx_new);
-            *g = Some(Connection::new(
-                callbacks,
-                key_stores,
-                pending_requests,
-                stream,
-                on_connection_closed_tx,
-                self.key_value_store.clone(),
-                firefly_mls_client.clone(),
-                self.group_info_store.clone(),
-                self.group_messages_store.clone(),
-                self.history_keys_store.clone(),
-                self.addressId.load(std::sync::atomic::Ordering::Relaxed),
-                self.key_stores
-                    .store()
-                    .identity_store
-                    .get_full_identity_key_pair()
-                    .await
-                    .map(|i| i.device_id)
-                    .unwrap_or(0) as u8,
-                self.firefly_base_url.clone(),
-                signal_tx,
-            ));
+            let address_id = self.addressId.load(std::sync::atomic::Ordering::Relaxed);
+            let device_id = device_id as u8;
+            *g = Some(match established {
+                EstablishedTransport::WebSocket(stream) => Connection::new(
+                    callbacks,
+                    key_stores,
+                    pending_requests,
+                    stream,
+                    on_connection_closed_tx,
+                    self.key_value_store.clone(),
+                    firefly_mls_client.clone(),
+                    self.group_info_store.clone(),
+                    self.group_messages_store.clone(),
+                    self.history_keys_store.clone(),
+                    address_id,
+                    device_id,
+                    self.firefly_base_url.clone(),
+                    signal_tx,
+                ),
+                EstablishedTransport::WebTransport(session) => Connection::new_webtransport(
+                    callbacks,
+                    key_stores,
+                    pending_requests,
+                    session,
+                    on_connection_closed_tx,
+                    self.key_value_store.clone(),
+                    firefly_mls_client.clone(),
+                    self.group_info_store.clone(),
+                    self.group_messages_store.clone(),
+                    self.history_keys_store.clone(),
+                    address_id,
+                    device_id,
+                    self.firefly_base_url.clone(),
+                    signal_tx,
+                ),
+            });
         }
 
         if let Err(err) = self.sync_all_group_messages().await {
@@ -1008,34 +1548,40 @@ impl FireflyWsClient {
 
         if let Some(token) = self.callbacks.get_access_token().await {
             let address_id = self.addressId.load(std::sync::atomic::Ordering::Relaxed);
-            let device_id = self
-                .key_stores
-                .store()
-                .identity_store
-                .get_full_identity_key_pair()
-                .await
-                .map(|i| i.device_id)
-                .unwrap_or(0) as u8;
-
-            let _ = self.join_groups(&token, address_id, device_id).await;
+            let _ = self.join_groups(&token, address_id, device_id as u8).await;
             let _ = self
-                .add_requested_re_add_group_members(&token, address_id, device_id)
+                .add_requested_re_add_group_members(&token, address_id, device_id as u8)
                 .await;
         }
 
-        if let Some(mut rx) = signal_rx {
-            tokio::select! {
-                _ = on_connection_closed_rx => {},
-                _ = async {
-                    while let Some(signal) = rx.recv().await {
-                        if let Err(e) = self.handle_group_history_signal(signal).await {
-                            log::error!("auto handle_group_history_signal error: {:?}", e);
-                        }
-                    }
-                } => {},
+        if let Err(err) = self.refresh_accepted_users().await {
+            log::warn!("failed to refresh accepted users: {:?}", err);
+        }
+
+        let migrate_to_wt = async {
+            if active == ActiveTransport::WebSocket {
+                self.wait_for_wt_recovery().await
+            } else {
+                futures::future::pending::<()>().await
             }
-        } else {
-            on_connection_closed_rx.await?;
+        };
+
+        tokio::select! {
+            _ = on_connection_closed_rx => {},
+            _ = async {
+                while let Some(signal) = signal_rx.recv().await {
+                    if let Err(e) = self.handle_group_history_signal(signal).await {
+                        log::error!("auto handle_group_history_signal error: {:?}", e);
+                    }
+                }
+            } => {},
+            _ = migrate_to_wt => {
+                self.connection.write().await.take();
+            },
+        }
+
+        {
+            *self.active_transport.write().unwrap() = None;
         }
         Ok(())
     }
@@ -1214,6 +1760,7 @@ impl FireflyWsClient {
             sdp_m_line_index,
             sdp_mid: std::borrow::Cow::Owned(sdp_mid),
             sender_device_id,
+            ..Default::default()
         };
 
         let client_message = firefly_protos::firefly::ClientMessage {
@@ -1432,6 +1979,9 @@ impl FireflyWsClient {
         message_type: u32,
     ) -> anyhow::Result<UserMessage> {
         let result = self.encrypt_and_send_internal(&to, &payload, message_type).await;
+        if result.is_ok() {
+            self.note_implicit_accept(&to, message_type).await;
+        }
         match result {
             Ok(msg) => Ok(msg),
             Err(err) => {
@@ -1448,7 +1998,11 @@ impl FireflyWsClient {
                         return Err(err);
                     }
                     log::info!("re-registered device address successfully, retrying encrypt_and_send");
-                    return self.encrypt_and_send_internal(&to, &payload, message_type).await;
+                    let retried = self.encrypt_and_send_internal(&to, &payload, message_type).await;
+                    if retried.is_ok() {
+                        self.note_implicit_accept(&to, message_type).await;
+                    }
+                    return retried;
                 }
                 Err(err)
             }
@@ -1504,7 +2058,12 @@ impl FireflyWsClient {
 
         let mut message_entries = firefly::UploadUserMessage::default();
 
-        let message_settings = 0;
+        // Hidden protocol messages (pin snapshots, ...) must not count as accepting `to`.
+        let message_settings = if message_type & firefly_protos::MESSAGE_TYPE_HIDDEN != 0 {
+            firefly_protos::USER_MESSAGE_SETTINGS_PROTOCOL
+        } else {
+            0
+        };
         let self_message_settings = 1;
 
         let mut effective_payload = payload.to_vec();
@@ -4644,7 +5203,8 @@ async fn on_user_message(
                             fromId: msg.toId,
                             text: cipher.cipher_text.into(),
                             type_pb: cipher.ty as u32,
-                            settings: 0,
+                            // An automatic reply, not the user accepting the sender's request.
+                            settings: firefly_protos::USER_MESSAGE_SETTINGS_PROTOCOL,
                             fromUsername: Default::default(),
                             fromDeviceId: Default::default(),
                             hashValue: hash_value,
@@ -5174,6 +5734,7 @@ async fn on_server_message(
                 sdp_m_line_index: signal.sdp_m_line_index,
                 sdp_mid: signal.sdp_mid.to_string(),
                 sender_device_id: signal.sender_device_id,
+                reject_reason: signal.reject_reason as i32,
             };
             callbacks.on_call_signal(ffi_signal).await;
         }
@@ -5470,6 +6031,82 @@ impl FfiFireflyWsClient {
     pub fn get_connection_state(&self) -> ConnectionState {
         let guard = self.inner.state.read().unwrap();
         guard.clone()
+    }
+
+    /// `Some("webtransport" | "websocket")` while connected.
+    pub fn current_transport(&self) -> Option<String> {
+        self.inner.current_transport().map(|t| t.as_str().to_string())
+    }
+
+    pub async fn is_user_accepted(&self, username: String) -> bool {
+        self.inner.is_user_accepted(&username).await
+    }
+
+    pub async fn accepted_users(&self) -> anyhow::Result<Vec<String>> {
+        self.inner.accepted_users().await
+    }
+
+    pub async fn mark_request_notified(&self, username: String) -> anyhow::Result<bool> {
+        self.inner.mark_request_notified(&username).await
+    }
+
+    pub async fn set_user_accepted(&self, other: String, accepted: bool) -> anyhow::Result<()> {
+        let name = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT
+            .scope(name, self.inner.set_user_accepted(&other, accepted))
+            .await
+    }
+
+    pub async fn refresh_accepted_users(&self) -> anyhow::Result<Vec<String>> {
+        let name = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT
+            .scope(name, self.inner.refresh_accepted_users())
+            .await
+    }
+
+    /// Backfills accepts from history kept outside this client (one time).
+    pub async fn backfill_accepted_users(&self, candidates: Vec<String>) -> anyhow::Result<()> {
+        let name = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT
+            .scope(
+                name,
+                self.inner
+                    .backfill_accepted_users(candidates, "message_requests_backfill_external_v1"),
+            )
+            .await
+    }
+
+    pub async fn get_requests_disabled(&self) -> anyhow::Result<bool> {
+        self.inner.get_requests_disabled().await
+    }
+
+    pub async fn set_requests_disabled(&self, disabled: bool) -> anyhow::Result<()> {
+        self.inner.set_requests_disabled(disabled).await
+    }
+
+    pub async fn create_with_endpoints(
+        firefly_base_url: String,
+        firefly_base_ws_url: String,
+        firefly_base_wt_url: Option<String>,
+        retry_interval_in_ms: u64,
+        callbacks: Box<dyn FireflyWsClientCallback>,
+        key_stores_pathname: String,
+        request_timeout_in_ms: u64,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            inner: Arc::new(
+                FireflyWsClient::create_with_endpoints(
+                    firefly_base_url,
+                    firefly_base_ws_url,
+                    firefly_base_wt_url,
+                    retry_interval_in_ms,
+                    callbacks,
+                    key_stores_pathname,
+                    request_timeout_in_ms,
+                )
+                .await?,
+            ),
+        })
     }
 
     pub fn is_initialized(&self) -> bool {
@@ -5949,3 +6586,46 @@ impl FfiFireflyWsClient {
 
 pub type FireflyWtClient = FireflyWsClient;
 pub type FfiFireflyWtClient = FfiFireflyWsClient;
+
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[test]
+    fn url_normalisation() {
+        assert_eq!(to_wt_url("wss://firefly.lupyd.com/"), "https://firefly.lupyd.com");
+        assert_eq!(to_wt_url("ws://127.0.0.1:39205"), "https://127.0.0.1:39205");
+        assert_eq!(to_wt_url("https://firefly.lupyd.com:39205/"), "https://firefly.lupyd.com:39205");
+        assert_eq!(to_ws_url("https://firefly.lupyd.com/"), "wss://firefly.lupyd.com");
+        assert_eq!(to_ws_url("http://127.0.0.1:39205"), "ws://127.0.0.1:39205");
+        assert_eq!(to_ws_url("wss://firefly.lupyd.com/"), "wss://firefly.lupyd.com");
+    }
+
+    #[test]
+    fn wt_backoff_grows_and_caps() {
+        let mut b = WtBackoff::default();
+        assert!(b.allowed(0));
+        b.record_failure(0);
+        assert!(!b.allowed(59_999));
+        assert!(b.allowed(60_000));
+        for _ in 0..20 {
+            b.record_failure(0);
+        }
+        assert_eq!(b.retry_after_ms, WT_BACKOFF_MAX.as_millis() as u64);
+        b.record_success();
+        assert!(b.allowed(0));
+    }
+
+    #[test]
+    fn reconnect_delay_is_bounded() {
+        let base = Duration::from_secs(1);
+        assert_eq!(reconnect_delay(base, 0), base);
+        assert_eq!(reconnect_delay(base, 1), base);
+        for failures in 2..50 {
+            let d = reconnect_delay(base, failures);
+            assert!(d >= base.mul_f64(0.8), "{d:?}");
+            assert!(d <= Duration::from_secs(36), "{d:?}");
+        }
+    }
+}

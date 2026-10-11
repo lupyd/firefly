@@ -54,6 +54,7 @@ web-transport-quinn = "0.12.0"
 quinn = "0.11.11"
 rustls = { version = "0.23.12", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 dashmap = "6.1.0"
+webpki-roots = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }

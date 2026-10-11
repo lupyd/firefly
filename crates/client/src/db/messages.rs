@@ -178,6 +178,18 @@ impl MessagesStore {
         Ok(())
     }
 
+    /// Peers this account sent at least one visible (non-hidden) message to.
+    pub async fn peers_messaged_by_me(&self) -> anyhow::Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT other FROM user_messages WHERE sent_by_other = 0 AND (message_type & 2) = 0",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| r.try_get::<String, _>("other").map_err(Into::into))
+            .collect()
+    }
+
     pub async fn has_user_message(&self, id: u64) -> anyhow::Result<bool> {
         let row = sqlx::query("SELECT 1 FROM user_messages WHERE id = ? LIMIT 1")
             .bind(id as i64)

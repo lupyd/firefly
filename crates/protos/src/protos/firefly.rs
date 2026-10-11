@@ -62,6 +62,41 @@ impl<'a> From<&'a str> for CallSignalType {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum CallRejectReason {
+    CALL_REJECT_REASON_NONE = 0,
+    CALL_REJECT_NOT_ACCEPTED = 1,
+    CALL_REJECT_BLOCKED = 2,
+}
+
+impl Default for CallRejectReason {
+    fn default() -> Self {
+        CallRejectReason::CALL_REJECT_REASON_NONE
+    }
+}
+
+impl From<i32> for CallRejectReason {
+    fn from(i: i32) -> Self {
+        match i {
+            0 => CallRejectReason::CALL_REJECT_REASON_NONE,
+            1 => CallRejectReason::CALL_REJECT_NOT_ACCEPTED,
+            2 => CallRejectReason::CALL_REJECT_BLOCKED,
+            _ => Self::default(),
+        }
+    }
+}
+
+impl<'a> From<&'a str> for CallRejectReason {
+    fn from(s: &'a str) -> Self {
+        match s {
+            "CALL_REJECT_REASON_NONE" => CallRejectReason::CALL_REJECT_REASON_NONE,
+            "CALL_REJECT_NOT_ACCEPTED" => CallRejectReason::CALL_REJECT_NOT_ACCEPTED,
+            "CALL_REJECT_BLOCKED" => CallRejectReason::CALL_REJECT_BLOCKED,
+            _ => Self::default(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum CallMessageType {
     none = 0,
     request = 1,
@@ -1977,6 +2012,7 @@ pub struct CallSignal<'a> {
     pub sdp_m_line_index: i32,
     pub sdp_mid: Cow<'a, str>,
     pub sender_device_id: u32,
+    pub reject_reason: firefly::CallRejectReason,
 }
 
 impl<'a> MessageRead<'a> for CallSignal<'a> {
@@ -1993,6 +2029,7 @@ impl<'a> MessageRead<'a> for CallSignal<'a> {
                 Ok(56) => msg.sdp_m_line_index = r.read_int32(bytes)?,
                 Ok(66) => msg.sdp_mid = r.read_string(bytes).map(Cow::Borrowed)?,
                 Ok(72) => msg.sender_device_id = r.read_uint32(bytes)?,
+                Ok(80) => msg.reject_reason = r.read_enum(bytes)?,
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -2013,6 +2050,7 @@ impl<'a> MessageWrite for CallSignal<'a> {
         + if self.sdp_m_line_index == 0i32 { 0 } else { 1 + sizeof_varint(*(&self.sdp_m_line_index) as u64) }
         + if self.sdp_mid == "" { 0 } else { 1 + sizeof_len((&self.sdp_mid).len()) }
         + if self.sender_device_id == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.sender_device_id) as u64) }
+        + if self.reject_reason == firefly::CallRejectReason::CALL_REJECT_REASON_NONE { 0 } else { 1 + sizeof_varint(*(&self.reject_reason) as u64) }
     }
 
     fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
@@ -2025,6 +2063,71 @@ impl<'a> MessageWrite for CallSignal<'a> {
         if self.sdp_m_line_index != 0i32 { w.write_with_tag(56, |w| w.write_int32(*&self.sdp_m_line_index))?; }
         if self.sdp_mid != "" { w.write_with_tag(66, |w| w.write_string(&**&self.sdp_mid))?; }
         if self.sender_device_id != 0u32 { w.write_with_tag(72, |w| w.write_uint32(*&self.sender_device_id))?; }
+        if self.reject_reason != firefly::CallRejectReason::CALL_REJECT_REASON_NONE { w.write_with_tag(80, |w| w.write_enum(*&self.reject_reason as i32))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct MessageRequestSettings {
+    pub requests_disabled: bool,
+}
+
+impl<'a> MessageRead<'a> for MessageRequestSettings {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.requests_disabled = r.read_bool(bytes)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl MessageWrite for MessageRequestSettings {
+    fn get_size(&self) -> usize {
+        0
+        + if self.requests_disabled == false { 0 } else { 1 + sizeof_varint(*(&self.requests_disabled) as u64) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.requests_disabled != false { w.write_with_tag(8, |w| w.write_bool(*&self.requests_disabled))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct AcceptedUsers<'a> {
+    pub usernames: Vec<Cow<'a, str>>,
+}
+
+impl<'a> MessageRead<'a> for AcceptedUsers<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(10) => msg.usernames.push(r.read_string(bytes).map(Cow::Borrowed)?),
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for AcceptedUsers<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + self.usernames.iter().map(|s| 1 + sizeof_len((s).len())).sum::<usize>()
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        for s in &self.usernames { w.write_with_tag(10, |w| w.write_string(&**s))?; }
         Ok(())
     }
 }

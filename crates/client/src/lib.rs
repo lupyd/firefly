@@ -38,7 +38,8 @@ pub mod websocket;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use websocket::{
-    FfiFireflyWsClient, FfiFireflyWtClient, FireflyWsClient, FireflyWtClient, TransportProtocol,
+    ActiveTransport, FfiFireflyWsClient, FfiFireflyWtClient, FireflyWsClient, FireflyWtClient,
+    TransportProtocol,
 };
 
 pub use storage::{

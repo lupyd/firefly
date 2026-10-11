@@ -3,7 +3,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use firefly_client::callbacks::FireflyWsClientCallback;
 use firefly_client::db::{group_messages::GroupMessage, messages::UserMessage};
-use firefly_client::websocket::FireflyWsClient;
+use firefly_client::websocket::{ActiveTransport, FireflyWsClient};
 use tokio::sync::mpsc;
 
 struct TestCallbacks {
@@ -47,6 +47,11 @@ async fn setup_server() -> Option<(String, String, String)> {
                 .replace("http://", "https://")
                 .replace("ws://", "https://")
         });
+        // Local test servers use self-signed WebTransport certificates.
+        if std::env::var("FIREFLY_WT_CERT_SHA256").is_err() {
+            // SAFETY: set before any client thread is spawned in this test.
+            unsafe { std::env::set_var("FIREFLY_WT_INSECURE", "1") };
+        }
         firefly_client::init_logger("/tmp/firefly/test_wt.log".to_string());
         Some((base_url, ws_url, wt_url))
     } else {
@@ -258,4 +263,109 @@ async fn test_webtransport_auto_detection() {
 
     charlie_client.dispose().await;
     let _ = std::fs::remove_dir_all(&test_dir);
+}
+
+
+async fn spawn_endpoints_client(
+    base_url: &str,
+    ws_url: &str,
+    wt_url: Option<String>,
+    name: &str,
+    db: String,
+) -> (Arc<FireflyWsClient>, mpsc::Receiver<UserMessage>) {
+    let (msg_tx, msg_rx) = mpsc::channel(100);
+    let (gmsg_tx, _gmsg_rx) = mpsc::channel(100);
+    let callbacks = TestCallbacks {
+        name: name.to_string(),
+        token: name.to_string(),
+        message_tx: msg_tx,
+        group_message_tx: gmsg_tx,
+    };
+    let client = FireflyWsClient::create_with_endpoints(
+        base_url.to_string(),
+        ws_url.to_string(),
+        wt_url,
+        1000,
+        Box::new(callbacks),
+        db,
+        5000,
+    )
+    .await
+    .expect("failed to create client");
+    let client = Arc::new(client);
+    let init = client.clone();
+    tokio::spawn(async move {
+        let _ = init.initialize_with_retrying().await;
+    });
+    wait_for_init(&client).await.expect("client failed to initialize");
+    (client, msg_rx)
+}
+
+async fn wait_for_transport(client: &FireflyWsClient) -> Option<ActiveTransport> {
+    for _ in 0..40 {
+        if let Some(t) = client.current_transport() {
+            return Some(t);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    None
+}
+
+#[tokio::test]
+async fn test_endpoints_prefer_webtransport() {
+    let (base_url, ws_url, wt_url) = match setup_server().await {
+        Some(urls) => urls,
+        None => return,
+    };
+    let run = rand::random::<u32>();
+    let dir = format!("/tmp/firefly/wt_pref_{}", run);
+    let _ = std::fs::create_dir_all(&dir);
+    let name = format!("dora_wt_{}", run);
+
+    let (client, _rx) =
+        spawn_endpoints_client(&base_url, &ws_url, Some(wt_url), &name, format!("{dir}/d.db")).await;
+    assert_eq!(wait_for_transport(&client).await, Some(ActiveTransport::WebTransport));
+
+    client.dispose().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_endpoints_fall_back_to_websocket_when_quic_unreachable() {
+    let (base_url, ws_url, _wt_url) = match setup_server().await {
+        Some(urls) => urls,
+        None => return,
+    };
+    let run = rand::random::<u32>();
+    let dir = format!("/tmp/firefly/wt_fallback_{}", run);
+    let _ = std::fs::create_dir_all(&dir);
+    let eve = format!("eve_fb_{}", run);
+    let fred = format!("fred_fb_{}", run);
+
+    // Nothing listens on UDP port 9, so the QUIC handshake times out and the client must fall
+    // back to the WebSocket URL within the same connection attempt.
+    let unreachable = Some("https://127.0.0.1:9/".to_string());
+    let started = std::time::Instant::now();
+    let (eve_client, _eve_rx) =
+        spawn_endpoints_client(&base_url, &ws_url, unreachable, &eve, format!("{dir}/e.db")).await;
+    assert_eq!(wait_for_transport(&eve_client).await, Some(ActiveTransport::WebSocket));
+    assert!(started.elapsed() < Duration::from_secs(30), "fallback took too long");
+
+    let (fred_client, mut fred_rx) =
+        spawn_endpoints_client(&base_url, &ws_url, None, &fred, format!("{dir}/f.db")).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    eve_client
+        .encrypt_and_send(fred.clone(), b"over the fallback".to_vec())
+        .await
+        .expect("send over fallback");
+    let got = tokio::time::timeout(Duration::from_secs(10), fred_rx.recv())
+        .await
+        .expect("fred timed out")
+        .expect("fred channel closed");
+    assert_eq!(got.message, b"over the fallback");
+
+    eve_client.dispose().await;
+    fred_client.dispose().await;
+    let _ = std::fs::remove_dir_all(&dir);
 }

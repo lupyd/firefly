@@ -11,6 +11,9 @@ pub struct CallSignal {
     pub sdp_m_line_index: i32,
     pub sdp_mid: String,
     pub sender_device_id: u32,
+    /// Maps to CallRejectReason: 0=NONE, 1=NOT_ACCEPTED (message request pending), 2=BLOCKED.
+    #[serde(default)]
+    pub reject_reason: i32,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -67,5 +70,8 @@ pub trait FireflyWsClientCallback: Send + Sync {
     async fn on_direct_backup_key_sync(&self, _sync: firefly_protos::firefly::DirectBackupKeySync<'static>) {}
 
     async fn on_direct_pin_snapshot(&self, _peer: String, _secret: firefly_protos::firefly::DirectPinSnapshotSecret<'static>) {}
+
+    /// Called whenever a connection is established, with `"webtransport"` or `"websocket"`.
+    async fn on_transport_changed(&self, _transport: String) {}
 }
 

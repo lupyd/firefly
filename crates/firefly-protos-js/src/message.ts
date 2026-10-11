@@ -79,6 +79,46 @@ export function callSignalTypeToJSON(object: CallSignalType): string {
   }
 }
 
+export enum CallRejectReason {
+  CALL_REJECT_REASON_NONE = 0,
+  /** CALL_REJECT_NOT_ACCEPTED - callee has not accepted the caller's message request */
+  CALL_REJECT_NOT_ACCEPTED = 1,
+  CALL_REJECT_BLOCKED = 2,
+  UNRECOGNIZED = -1,
+}
+
+export function callRejectReasonFromJSON(object: any): CallRejectReason {
+  switch (object) {
+    case 0:
+    case "CALL_REJECT_REASON_NONE":
+      return CallRejectReason.CALL_REJECT_REASON_NONE;
+    case 1:
+    case "CALL_REJECT_NOT_ACCEPTED":
+      return CallRejectReason.CALL_REJECT_NOT_ACCEPTED;
+    case 2:
+    case "CALL_REJECT_BLOCKED":
+      return CallRejectReason.CALL_REJECT_BLOCKED;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return CallRejectReason.UNRECOGNIZED;
+  }
+}
+
+export function callRejectReasonToJSON(object: CallRejectReason): string {
+  switch (object) {
+    case CallRejectReason.CALL_REJECT_REASON_NONE:
+      return "CALL_REJECT_REASON_NONE";
+    case CallRejectReason.CALL_REJECT_NOT_ACCEPTED:
+      return "CALL_REJECT_NOT_ACCEPTED";
+    case CallRejectReason.CALL_REJECT_BLOCKED:
+      return "CALL_REJECT_BLOCKED";
+    case CallRejectReason.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 export enum CallMessageType {
   none = 0,
   request = 1,
@@ -569,6 +609,18 @@ export interface CallSignal {
   sdpMLineIndex: number;
   sdpMid: string;
   senderDeviceId: number;
+  /** Set by the server on a CALL_REJECT it generates itself; older clients ignore it. */
+  rejectReason: CallRejectReason;
+}
+
+/** GET/PUT /user/privacy */
+export interface MessageRequestSettings {
+  requestsDisabled: boolean;
+}
+
+/** GET /user/accepted: users the caller accepted (explicitly or by messaging them first) */
+export interface AcceptedUsers {
+  usernames: string[];
 }
 
 export interface GroupId {
@@ -5729,6 +5781,7 @@ function createBaseCallSignal(): CallSignal {
     sdpMLineIndex: 0,
     sdpMid: "",
     senderDeviceId: 0,
+    rejectReason: 0,
   };
 }
 
@@ -5763,6 +5816,9 @@ export const CallSignal: MessageFns<CallSignal> = {
     }
     if (message.senderDeviceId !== 0) {
       writer.uint32(72).uint32(message.senderDeviceId);
+    }
+    if (message.rejectReason !== 0) {
+      writer.uint32(80).int32(message.rejectReason);
     }
     return writer;
   },
@@ -5846,6 +5902,14 @@ export const CallSignal: MessageFns<CallSignal> = {
           message.senderDeviceId = reader.uint32();
           continue;
         }
+        case 10: {
+          if (tag !== 80) {
+            break;
+          }
+
+          message.rejectReason = reader.int32() as any;
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5886,6 +5950,11 @@ export const CallSignal: MessageFns<CallSignal> = {
         : isSet(object.sender_device_id)
         ? globalThis.Number(object.sender_device_id)
         : 0,
+      rejectReason: isSet(object.rejectReason)
+        ? callRejectReasonFromJSON(object.rejectReason)
+        : isSet(object.reject_reason)
+        ? callRejectReasonFromJSON(object.reject_reason)
+        : 0,
     };
   },
 
@@ -5918,6 +5987,9 @@ export const CallSignal: MessageFns<CallSignal> = {
     if (message.senderDeviceId !== 0) {
       obj.senderDeviceId = Math.round(message.senderDeviceId);
     }
+    if (message.rejectReason !== 0) {
+      obj.rejectReason = callRejectReasonToJSON(message.rejectReason);
+    }
     return obj;
   },
 
@@ -5935,6 +6007,133 @@ export const CallSignal: MessageFns<CallSignal> = {
     message.sdpMLineIndex = object.sdpMLineIndex ?? 0;
     message.sdpMid = object.sdpMid ?? "";
     message.senderDeviceId = object.senderDeviceId ?? 0;
+    message.rejectReason = object.rejectReason ?? 0;
+    return message;
+  },
+};
+
+function createBaseMessageRequestSettings(): MessageRequestSettings {
+  return { requestsDisabled: false };
+}
+
+export const MessageRequestSettings: MessageFns<MessageRequestSettings> = {
+  encode(message: MessageRequestSettings, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.requestsDisabled !== false) {
+      writer.uint32(8).bool(message.requestsDisabled);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MessageRequestSettings {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMessageRequestSettings();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.requestsDisabled = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): MessageRequestSettings {
+    return {
+      requestsDisabled: isSet(object.requestsDisabled)
+        ? globalThis.Boolean(object.requestsDisabled)
+        : isSet(object.requests_disabled)
+        ? globalThis.Boolean(object.requests_disabled)
+        : false,
+    };
+  },
+
+  toJSON(message: MessageRequestSettings): unknown {
+    const obj: any = {};
+    if (message.requestsDisabled !== false) {
+      obj.requestsDisabled = message.requestsDisabled;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<MessageRequestSettings>, I>>(base?: I): MessageRequestSettings {
+    return MessageRequestSettings.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<MessageRequestSettings>, I>>(object: I): MessageRequestSettings {
+    const message = createBaseMessageRequestSettings();
+    message.requestsDisabled = object.requestsDisabled ?? false;
+    return message;
+  },
+};
+
+function createBaseAcceptedUsers(): AcceptedUsers {
+  return { usernames: [] };
+}
+
+export const AcceptedUsers: MessageFns<AcceptedUsers> = {
+  encode(message: AcceptedUsers, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.usernames) {
+      writer.uint32(10).string(v!);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptedUsers {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAcceptedUsers();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.usernames.push(reader.string());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AcceptedUsers {
+    return {
+      usernames: globalThis.Array.isArray(object?.usernames)
+        ? object.usernames.map((e: any) => globalThis.String(e))
+        : [],
+    };
+  },
+
+  toJSON(message: AcceptedUsers): unknown {
+    const obj: any = {};
+    if (message.usernames?.length) {
+      obj.usernames = message.usernames;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptedUsers>, I>>(base?: I): AcceptedUsers {
+    return AcceptedUsers.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptedUsers>, I>>(object: I): AcceptedUsers {
+    const message = createBaseAcceptedUsers();
+    message.usernames = object.usernames?.map((e) => e) || [];
     return message;
   },
 };

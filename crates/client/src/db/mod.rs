@@ -12,6 +12,7 @@ pub mod group_messages;
 pub mod group_stores;
 pub mod history_keys;
 pub mod keyvalue;
+pub mod message_requests;
 pub mod messages;
 pub mod migrations;
 pub mod search;

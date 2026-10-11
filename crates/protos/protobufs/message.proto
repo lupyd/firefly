@@ -308,6 +308,24 @@ message CallSignal {
   int32 sdp_m_line_index = 7;
   string sdp_mid = 8;
   uint32 sender_device_id = 9;
+  // Set by the server on a CALL_REJECT it generates itself; older clients ignore it.
+  CallRejectReason reject_reason = 10;
+}
+
+enum CallRejectReason {
+  CALL_REJECT_REASON_NONE = 0;
+  CALL_REJECT_NOT_ACCEPTED = 1; // callee has not accepted the caller's message request
+  CALL_REJECT_BLOCKED = 2;
+}
+
+// GET/PUT /user/privacy
+message MessageRequestSettings {
+  bool requests_disabled = 1;
+}
+
+// GET /user/accepted: users the caller accepted (explicitly or by messaging them first)
+message AcceptedUsers {
+  repeated string usernames = 1;
 }
 
 message GroupId {

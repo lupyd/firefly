@@ -1205,6 +1205,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "web-transport-quinn",
+ "webpki-roots 1.0.9",
  "zeroize",
  "zstd",
 ]

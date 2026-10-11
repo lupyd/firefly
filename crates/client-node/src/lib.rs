@@ -1701,6 +1701,7 @@ impl FireflyClientNode {
                                         sdp_m_line_index: sig.sdp_m_line_index,
                                         sdp_mid: sig.sdp_mid.to_string(),
                                         sender_device_id: sig.sender_device_id,
+                                        reject_reason: sig.reject_reason as i32,
                                     }).await;
                                 }
                                 firefly::mod_ServerMessage::OneOfmessage::groupMeetingSignal(sig) => {

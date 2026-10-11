@@ -9,6 +9,13 @@ pub const MESSAGE_TYPE_PINNED: u32 = 1 << 0;
 pub const MESSAGE_TYPE_HIDDEN: u32 = 1 << 1;
 pub const MESSAGE_TYPE_HISTORY_KEYS: u32 = 1 << 2;
 
+/// `UserMessage.settings` bits understood by the server.
+/// The message targets the sender's own devices.
+pub const USER_MESSAGE_SETTINGS_SELF_DEVICE: u32 = 1 << 0;
+/// An automatic protocol message (session accept, hidden sync): delivering it must not count as
+/// the sender accepting the recipient's message request.
+pub const USER_MESSAGE_SETTINGS_PROTOCOL: u32 = 1 << 1;
+
 pub fn deserialize_proto<'a, 'b: 'a, T: quick_protobuf::MessageRead<'a> + Sized>(
     bytes: &'b [u8],
 ) -> Result<T, quick_protobuf::Error> {
