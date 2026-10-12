@@ -395,7 +395,7 @@ impl IdentityDb {
         log::info!("store insert: identity address={}", address);
         let mut tx = self
             .pool
-            .begin()
+            .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|err| SignalProtocolError::FfiBindingError(err.to_string()))?;
 

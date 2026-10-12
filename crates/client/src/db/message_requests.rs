@@ -77,7 +77,7 @@ impl MessageRequestsStore {
     /// Replaces the cache with the server's list.
     pub async fn replace_all(&self, usernames: &[String]) -> anyhow::Result<()> {
         let now = get_current_timestamp_millis_since_epoch() as i64;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("DELETE FROM accepted_users")
             .execute(&mut *tx)
             .await?;

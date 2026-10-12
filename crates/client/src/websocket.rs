@@ -137,6 +137,20 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
 /// Certificates are verified against the webpki roots. For local and test servers with
 /// self-signed certificates either pin them with `FIREFLY_WT_CERT_SHA256` (comma separated hex
 /// digests of the DER certificate) or, as a last resort, set `FIREFLY_WT_INSECURE=1`.
+/// Test-only overrides for reaching a local server with a self-signed certificate
+/// (FIREFLY_WT_CERT_SHA256, FIREFLY_WT_INSECURE, WT_HOST). They are compiled in only with the
+/// `test-hooks` feature, so release apps always verify WebTransport certificates against the
+/// public roots, whatever the environment says.
+#[cfg(feature = "test-hooks")]
+fn test_hook_env(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn test_hook_env(_name: &str) -> Option<String> {
+    None
+}
+
 fn wt_client_crypto() -> anyhow::Result<rustls::ClientConfig> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -144,8 +158,7 @@ fn wt_client_crypto() -> anyhow::Result<rustls::ClientConfig> {
     let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?;
 
-    let pinned: Vec<[u8; 32]> = std::env::var("FIREFLY_WT_CERT_SHA256")
-        .ok()
+    let pinned: Vec<[u8; 32]> = test_hook_env("FIREFLY_WT_CERT_SHA256")
         .map(|v| {
             v.split(',')
                 .filter_map(|h| {
@@ -156,7 +169,7 @@ fn wt_client_crypto() -> anyhow::Result<rustls::ClientConfig> {
         })
         .unwrap_or_default();
 
-    let insecure = std::env::var("FIREFLY_WT_INSECURE")
+    let insecure = test_hook_env("FIREFLY_WT_INSECURE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
@@ -194,8 +207,9 @@ fn create_wt_client_endpoint_for(bind: std::net::SocketAddr) -> anyhow::Result<q
     let mut client_config = quinn::ClientConfig::new(Arc::new(quic_config));
 
     let mut transport = quinn::TransportConfig::default();
-    transport.max_idle_timeout(Some(Duration::from_secs(60).try_into()?));
-    transport.keep_alive_interval(Some(Duration::from_secs(15)));
+    // Same budget as the WebSocket transport: three missed keepalives mean the network is gone.
+    transport.max_idle_timeout(Some(Duration::from_secs(30).try_into()?));
+    transport.keep_alive_interval(Some(Duration::from_secs(10)));
     client_config.transport_config(Arc::new(transport));
 
     let mut endpoint = quinn::Endpoint::client(bind)?;
@@ -377,6 +391,13 @@ pub struct Connection {
     last_message_sent_ts_secs: Arc<AtomicU64>,
 }
 
+/// How often the WebSocket transport pings the server.
+const WS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+/// Silence after which the WebSocket connection is treated as dead (three missed pongs).
+const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Upper bound for opening a WebSocket connection (TCP + TLS + upgrade).
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
 impl Connection {
     pub fn new(
         callbacks: Arc<dyn FireflyWsClientCallback>,
@@ -403,7 +424,21 @@ impl Connection {
         let sender2 = sender.clone();
         let id = callbacks.name().to_string();
         let receiver_task = tokio::spawn(CURRENT_CLIENT.scope(id.clone(), async move {
-            while let Some(Ok(msg)) = ws_receiver.next().await {
+            loop {
+                // The sender pings every WS_KEEPALIVE_INTERVAL and the server answers, so silence
+                // means the network is gone (e.g. packets dropped) even though TCP hasn't noticed.
+                let msg = match tokio::time::timeout(WS_IDLE_TIMEOUT, ws_receiver.next()).await {
+                    Ok(Some(Ok(msg))) => msg,
+                    Ok(Some(Err(err))) => {
+                        log::info!("ws read failed: {}", err);
+                        break;
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        log::warn!("no data from the server for {:?}, dropping the connection", WS_IDLE_TIMEOUT);
+                        break;
+                    }
+                };
                 match msg {
                     Message::Binary(bytes) => {
                         let payload = bytes;
@@ -439,6 +474,9 @@ impl Connection {
                         break;
                     }
 
+                    // Keepalive replies; receiving them is what matters.
+                    Message::Pong(_) | Message::Ping(_) => {}
+
                     _ => {
                         log::warn!("unhandled ws message type {:?}", msg);
                     }
@@ -458,15 +496,30 @@ impl Connection {
             let last_message_sent_ts_secs = last_message_sent_ts_secs.clone();
             let id = id.clone();
             tokio::spawn(CURRENT_CLIENT.scope(id.clone(), async move {
-                while let Some(msg) = receiver.recv().await {
-                    if let Err(err) = ws_sender.send(Message::Binary(msg)).await {
-                        log::error!("failed to send message: {}", err);
-                        break;
+                let mut keepalive = tokio::time::interval(WS_KEEPALIVE_INTERVAL);
+                keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                keepalive.tick().await;
+                loop {
+                    tokio::select! {
+                        msg = receiver.recv() => {
+                            let Some(msg) = msg else { break };
+                            if let Err(err) = ws_sender.send(Message::Binary(msg)).await {
+                                log::error!("failed to send message: {}", err);
+                                break;
+                            }
+                            last_message_sent_ts_secs.store(
+                                get_current_timestamp_seconds_since_epoch(),
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                        }
+                        // WebSocket-level ping: servers answer it with a pong automatically.
+                        _ = keepalive.tick() => {
+                            if let Err(err) = ws_sender.send(Message::Ping(Default::default())).await {
+                                log::error!("failed to send keepalive ping: {}", err);
+                                break;
+                            }
+                        }
                     }
-                    last_message_sent_ts_secs.store(
-                        get_current_timestamp_seconds_since_epoch(),
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
                 }
                 log::info!("ws sender task finished");
             }))
@@ -1080,7 +1133,7 @@ impl FireflyWsClient {
             anyhow::bail!("could not resolve host {}:{}", host_str, port);
         }
 
-        let sni = std::env::var("WT_HOST").ok().unwrap_or(host_str);
+        let sni = test_hook_env("WT_HOST").unwrap_or(host_str);
         let mut last_err = None;
         for addr in addrs {
             let endpoint = match self.wt_endpoint(addr.is_ipv6()) {
@@ -1103,7 +1156,7 @@ impl FireflyWsClient {
 
     async fn connect_wt(&self, base_wt: &str, query: &str) -> anyhow::Result<web_transport_quinn::Session> {
         let mut base_wt = base_wt.trim_end_matches('/').to_string();
-        if let Ok(exp_h) = std::env::var("WT_HOST") {
+        if let Some(exp_h) = test_hook_env("WT_HOST") {
             base_wt = base_wt
                 .replace("127.0.0.1", &exp_h)
                 .replace("0.0.0.0", &exp_h);
@@ -1120,7 +1173,12 @@ impl FireflyWsClient {
         query: &str,
     ) -> anyhow::Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
         let url = format!("{}/?{}", base_ws.trim_end_matches('/'), query);
-        match tokio_tungstenite::connect_async(&url).await {
+        // On a network that drops packets the TCP handshake alone can take minutes to fail,
+        // which would hold up reconnecting once the network is back.
+        let connected = tokio::time::timeout(WS_CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&url))
+            .await
+            .map_err(|_| anyhow::anyhow!("websocket connect timed out after {:?}", WS_CONNECT_TIMEOUT))?;
+        match connected {
             Ok((stream, response)) => {
                 log::debug!("websocket response headers: {:?}", response.headers());
                 Ok(stream)
@@ -3860,6 +3918,66 @@ impl FireflyWsClient {
             .map_err(|e| anyhow::anyhow!(e))
     }
 
+    /// Remembers the last group list the server returned (see `local_group_infos`).
+    async fn cache_group_infos(&self, groups: &[FfiGroupInfo]) -> anyhow::Result<()> {
+        let cached: Vec<CachedGroupInfo> = groups
+            .iter()
+            .map(|g| CachedGroupInfo {
+                id: g.id,
+                name: g.name.clone(),
+                description: g.description.clone(),
+                pending: g.pending,
+                owner: g.owner.clone(),
+            })
+            .collect();
+        self.key_value_store
+            .set(GROUP_INFOS_CACHE_KEY, &serde_json::to_string(&cached)?)
+            .await
+    }
+
+    /// The group list without the server: the last list the server returned, plus groups joined
+    /// since (their local state is the source of truth for membership).
+    async fn local_group_infos(&self) -> anyhow::Result<Vec<FfiGroupInfo>> {
+        let local_groups = self.group_info_store.get_all().await?;
+        let cached: Vec<CachedGroupInfo> = match self.key_value_store.get(GROUP_INFOS_CACHE_KEY).await {
+            Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        let local_ids: std::collections::HashSet<u64> = local_groups.iter().map(|g| g.id).collect();
+
+        let me = self.callbacks.name().to_string();
+        let mut result: Vec<FfiGroupInfo> = cached
+            .into_iter()
+            // Same rule as the server list: groups left since then (local state gone) drop out.
+            .filter(|g| local_ids.contains(&g.id) || g.pending || g.owner == me)
+            .map(|g| FfiGroupInfo {
+                has_local_state: local_ids.contains(&g.id),
+                id: g.id,
+                name: g.name,
+                description: g.description,
+                pending: g.pending,
+                owner: g.owner,
+            })
+            .collect();
+        for group in local_groups {
+            if let Some(existing) = result.iter_mut().find(|g| g.id == group.id) {
+                // Renames are applied to local state as they arrive.
+                existing.name = group.name;
+                existing.description = group.description;
+            } else {
+                result.push(FfiGroupInfo {
+                    id: group.id,
+                    name: group.name,
+                    description: group.description,
+                    pending: false,
+                    owner: String::new(),
+                    has_local_state: true,
+                });
+            }
+        }
+        Ok(result)
+    }
+
     pub async fn get_group_extension(&self, groupId: u64) -> anyhow::Result<Vec<u8>> {
         let client = self.ensure_mls_client_initialized().await?;
 
@@ -5062,18 +5180,27 @@ async fn on_user_message(
 
     let from = msg.fromUsername.clone();
     let fromDeviceId = msg.fromDeviceId as u8;
-    let decrypted = match key_stores
-        .decrypt(
-            ProtocolAddress::new(from.clone().into_owned(), fromDeviceId.try_into()?),
-            msg.text.clone().into_owned(),
-            msg.type_pb as u8,
-        )
-        .await
-    {
-        Ok(d) => d,
-        Err(err) => {
-            log::error!("failed to decrypt message: {}", err);
-            return Err(anyhow::anyhow!(err));
+    let address = ProtocolAddress::new(from.clone().into_owned(), fromDeviceId.try_into()?);
+    // The sync cursor is already past this message, so a transient failure would lose it for good.
+    // A locked database fails before the session state is written, so decrypting again is safe.
+    let mut delay = Duration::from_millis(50);
+    let mut attempt = 1;
+    let decrypted = loop {
+        match key_stores
+            .decrypt(address.clone(), msg.text.clone().into_owned(), msg.type_pb as u8)
+            .await
+        {
+            Ok(d) => break d,
+            Err(err) if attempt < 4 && err.to_string().contains("database is locked") => {
+                log::warn!("decrypt from {} hit a locked database, retrying (attempt {})", address, attempt);
+                tokio::time::sleep(delay).await;
+                delay *= 3;
+                attempt += 1;
+            }
+            Err(err) => {
+                log::error!("failed to decrypt message: {}", err);
+                return Err(anyhow::anyhow!(err));
+            }
         }
     };
 
@@ -5828,6 +5955,17 @@ pub struct FfiConversation {
     pub settings: u64,
 }
 
+const GROUP_INFOS_CACHE_KEY: &str = "group_infos_cache";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedGroupInfo {
+    id: u64,
+    name: String,
+    description: String,
+    pending: bool,
+    owner: String,
+}
+
 pub struct FfiGroupInfo {
     pub id: u64,
     pub name: String,
@@ -6506,63 +6644,89 @@ impl FfiFireflyWsClient {
             .await
     }
 
+    /// Groups the user can open. Read from the server and cached, so the list still renders
+    /// from local data when the server can't be reached.
     pub async fn get_group_infos(&self) -> anyhow::Result<Vec<FfiGroupInfo>> {
         let name = self.inner.callbacks.name().to_string();
         CURRENT_CLIENT
             .scope(name, async {
-                // 1. Fetch server groups
-                let token = self.inner
-                    .callbacks
-                    .get_access_token()
-                    .await
-                    .context("token not found")?;
-
-                let url = format!("{}/groups", self.inner.firefly_base_url);
-                let response = HTTP_CLIENT.get(url).bearer_auth(&token).send().await?;
-
-                if !response.status().is_success() {
-                    return Err(anyhow::anyhow!(
-                        "unexpected status [{}] {}",
-                        response.status(),
-                        response.text().await?
-                    ));
-                }
-
-                let bytes = response.bytes().await?;
-                let groups = deserialize_proto::<firefly::Groups<'_>>(&bytes)?;
-
-                // 2. Fetch local group infos to check which ones we have keys for
-                let local_groups = self.inner.group_info_store.get_all().await.unwrap_or_default();
-                let local_ids: std::collections::HashSet<u64> = local_groups.iter().map(|g| g.id).collect();
-
-                let claims = get_claims_from_token(&token).context("failed to parse claims")?;
-                let username = claims.uname.to_string();
-
-                let mut result = Vec::new();
-                for group in groups.groups {
-                    let has_local_keys = local_ids.contains(&group.id);
-                    let is_pending = group.pending;
-                    let is_owner = group.owner == username;
-
-                    // We include the group if:
-                    // - it is in local_groups (meaning we are a member and have keys)
-                    // - OR it is pending (waiting for approval)
-                    // - OR the current user is the owner (so they can see and delete it)
-                    if has_local_keys || is_pending || is_owner {
-                        result.push(FfiGroupInfo {
-                            id: group.id,
-                            name: group.name.into_owned(),
-                            description: group.description.into_owned(),
-                            pending: is_pending,
-                            owner: group.owner.into_owned(),
-                            has_local_state: has_local_keys,
-                        });
+                match self.fetch_group_infos().await {
+                    Ok(groups) => {
+                        if let Err(e) = self.inner.cache_group_infos(&groups).await {
+                            log::warn!("failed to cache group infos: {e:#}");
+                        }
+                        Ok(groups)
+                    }
+                    Err(e) => {
+                        log::warn!("listing groups from the server failed, using local data: {e:#}");
+                        self.inner.local_group_infos().await
                     }
                 }
-
-                Ok(result)
             })
             .await
+    }
+
+    /// The group list from local data only (last server list plus joined groups), for an
+    /// instant first render before `get_group_infos` reaches the server.
+    pub async fn get_local_group_infos(&self) -> anyhow::Result<Vec<FfiGroupInfo>> {
+        let name = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT
+            .scope(name, async { self.inner.local_group_infos().await })
+            .await
+    }
+
+    async fn fetch_group_infos(&self) -> anyhow::Result<Vec<FfiGroupInfo>> {
+        // 1. Fetch server groups
+        let token = self.inner
+            .callbacks
+            .get_access_token()
+            .await
+            .context("token not found")?;
+
+        let url = format!("{}/groups", self.inner.firefly_base_url);
+        let response = HTTP_CLIENT.get(url).bearer_auth(&token).send().await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "unexpected status [{}] {}",
+                response.status(),
+                response.text().await?
+            ));
+        }
+
+        let bytes = response.bytes().await?;
+        let groups = deserialize_proto::<firefly::Groups<'_>>(&bytes)?;
+
+        // 2. Fetch local group infos to check which ones we have keys for
+        let local_groups = self.inner.group_info_store.get_all().await.unwrap_or_default();
+        let local_ids: std::collections::HashSet<u64> = local_groups.iter().map(|g| g.id).collect();
+
+        let claims = get_claims_from_token(&token).context("failed to parse claims")?;
+        let username = claims.uname.to_string();
+
+        let mut result = Vec::new();
+        for group in groups.groups {
+            let has_local_keys = local_ids.contains(&group.id);
+            let is_pending = group.pending;
+            let is_owner = group.owner == username;
+
+            // We include the group if:
+            // - it is in local_groups (meaning we are a member and have keys)
+            // - OR it is pending (waiting for approval)
+            // - OR the current user is the owner (so they can see and delete it)
+            if has_local_keys || is_pending || is_owner {
+                result.push(FfiGroupInfo {
+                    id: group.id,
+                    name: group.name.into_owned(),
+                    description: group.description.into_owned(),
+                    pending: is_pending,
+                    owner: group.owner.into_owned(),
+                    has_local_state: has_local_keys,
+                });
+            }
+        }
+
+        Ok(result)
     }
 
     pub async fn get_online_status(&self, usernames: Vec<String>) -> anyhow::Result<Vec<String>> {
@@ -6657,6 +6821,22 @@ mod transport_tests {
             let d = reconnect_delay(base, failures);
             assert!(d >= base.mul_f64(0.8), "{d:?}");
             assert!(d <= Duration::from_secs(36), "{d:?}");
+        }
+    }
+}
+
+#[cfg(all(test, not(feature = "test-hooks")))]
+mod test_hook_tests {
+    #[test]
+    fn test_overrides_are_ignored_without_the_feature() {
+        // SAFETY: no other test in this binary reads these variables.
+        unsafe {
+            std::env::set_var("FIREFLY_WT_INSECURE", "1");
+            std::env::set_var("FIREFLY_WT_CERT_SHA256", "00".repeat(32));
+            std::env::set_var("WT_HOST", "attacker.example");
+        }
+        for name in ["FIREFLY_WT_INSECURE", "FIREFLY_WT_CERT_SHA256", "WT_HOST"] {
+            assert_eq!(super::test_hook_env(name), None, "{name} must not be read in release builds");
         }
     }
 }

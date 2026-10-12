@@ -254,3 +254,82 @@ async fn test_offline_group_operations() {
     let _ = alice_client.dispose().await;
     cleanup_dir(&test_dir);
 }
+
+/// The group list keeps rendering from local data when the server can't be reached: the last
+/// list the server returned (owner included) plus groups joined since.
+#[tokio::test]
+async fn test_group_list_without_server() {
+    let (base_url, ws_url) = match setup_server().await {
+        Some(urls) => urls,
+        None => return,
+    };
+
+    let test_run_id = rand::random::<u32>();
+    let test_dir = format!("/tmp/firefly/offlist_{}", test_run_id);
+    let _ = std::fs::create_dir_all(&test_dir);
+    let alice_name = format!("alice_offlist_{}", test_run_id);
+    let alice_db = format!("{}/alice.db", test_dir);
+
+    let callbacks = || {
+        let (message_tx, _) = mpsc::channel(100);
+        let (group_message_tx, _) = mpsc::channel(100);
+        Box::new(TestCallbacks {
+            name: alice_name.clone(),
+            token: alice_name.clone(),
+            message_tx,
+            group_message_tx,
+        })
+    };
+
+    let online = FfiFireflyWsClient::create(base_url.clone(), ws_url.clone(), 1000, callbacks(), alice_db.clone(), 5000)
+        .await
+        .expect("Failed to create Alice client");
+    let init = online.clone();
+    tokio::spawn(async move {
+        let _ = init.initialize_with_retrying().await;
+    });
+    assert!(wait_for_init(&online).await, "Alice failed to initialize");
+    for _ in 0..60 {
+        if matches!(online.get_connection_state(), ConnectionState::Connected) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    let created = online
+        .create_group("Offline List Group".into(), "Description".into(), 0)
+        .await
+        .expect("Alice failed to create group");
+    let listed = online.get_group_infos().await.expect("online group list");
+    assert!(listed.iter().any(|g| g.id == created.id && g.owner == alice_name));
+    online.dispose().await;
+
+    // Same profile, server unreachable (nothing listens on the discard port).
+    let offline = FfiFireflyWsClient::create(
+        "http://127.0.0.1:9".into(),
+        "ws://127.0.0.1:9".into(),
+        1000,
+        callbacks(),
+        alice_db.clone(),
+        5000,
+    )
+    .await
+    .expect("Failed to create offline client");
+    offline.load_all_groups().await.expect("load groups offline");
+
+    for (source, groups) in [
+        ("get_group_infos", offline.get_group_infos().await.expect("group list falls back to local data")),
+        ("get_local_group_infos", offline.get_local_group_infos().await.expect("local group list")),
+    ] {
+        let group = groups
+            .iter()
+            .find(|g| g.id == created.id)
+            .unwrap_or_else(|| panic!("{source}: group missing offline"));
+        assert_eq!(group.name, "Offline List Group", "{source}");
+        assert_eq!(group.owner, alice_name, "{source}: owner comes from the cached list");
+        assert!(group.has_local_state, "{source}");
+        assert!(!group.pending, "{source}");
+    }
+
+    cleanup_dir(&test_dir);
+}

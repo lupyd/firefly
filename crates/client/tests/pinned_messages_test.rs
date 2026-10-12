@@ -10,6 +10,9 @@ use firefly_client::db::{
     messages::{MessagesStore, UserMessage},
 };
 use firefly_client::websocket::FireflyWsClient;
+
+/// Pinned messages and extra channels/roles need an upgraded group (owner on Pro/Organization).
+const UPGRADED_GROUP: u32 = 4;
 use firefly_protos::{
     deserialize_proto, serialize_proto,
     firefly::{self, mod_GroupMessageInner, mod_UserMessageInner, MessagePayload},
@@ -357,7 +360,7 @@ async fn test_integration_pinned_messages_re_encryption_on_member_add() {
 
     // Alice creates a group
     let group = alice_client
-        .create_group("Pinned Test Group".into(), "Desc".into(), 0)
+        .create_group("Pinned Test Group".into(), "Desc".into(), UPGRADED_GROUP)
         .await
         .expect("Alice create group");
 

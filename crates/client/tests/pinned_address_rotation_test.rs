@@ -15,6 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+/// Pinned messages and extra channels/roles need an upgraded group (owner on Pro/Organization).
+const UPGRADED_GROUP: u32 = 4;
+
 fn extract_user_message_text(msg_bytes: &[u8]) -> String {
     if let Ok(inner) = deserialize_proto::<firefly::UserMessageInner>(msg_bytes) {
         if let firefly::mod_UserMessageInner::OneOfmessage::messagePayload(p) = inner.message {
@@ -466,7 +469,7 @@ async fn test_pinned_messages_persist_across_group_readd_and_rotation() {
     // 3. Alice creates MLS group and adds Bob1
     println!("Alice creating MLS group...");
     let group = alice_client
-        .create_group("Pinned Rotation Group".into(), "Desc".into(), 0)
+        .create_group("Pinned Rotation Group".into(), "Desc".into(), UPGRADED_GROUP)
         .await
         .expect("Alice create group");
     let group_id = group.id;

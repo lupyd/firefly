@@ -9,6 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+/// Pinned messages and extra channels/roles need an upgraded group (owner on Pro/Organization).
+const UPGRADED_GROUP: u32 = 4;
+
 struct TestCallbacks {
     name: String,
     token: String,
@@ -738,7 +741,7 @@ async fn test_exhaustive_permission_matrix() {
     let (bob, _, _) = create_client_helper(&base_url, &ws_url, &test_dir, &bob_name).await;
 
     let group_info = alice
-        .create_group("Permission Matrix Group".into(), "Description".into(), 0)
+        .create_group("Permission Matrix Group".into(), "Description".into(), UPGRADED_GROUP)
         .await
         .expect("Alice creates group");
     let group_id = group_info.id;
@@ -951,7 +954,7 @@ async fn test_message_permissions_defaults_revocation_and_cached_history() {
     let (bob, _, mut received) =
         create_client_helper(&base_url, &ws_url, &test_dir, &format!("perm_b_{run}")).await;
     let group_id = alice
-        .create_group("message rules".into(), "".into(), 0)
+        .create_group("message rules".into(), "".into(), UPGRADED_GROUP)
         .await
         .unwrap()
         .id;

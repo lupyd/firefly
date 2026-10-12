@@ -104,6 +104,13 @@ async fn peer(prefix: &str, run: u32, dir: &str, wt: bool) -> Peer {
     }
 }
 
+/// Call ids unique to this run: the server remembers call ids, and a long-running test server
+/// would otherwise confuse this run's calls with an earlier run's.
+fn call_id(n: u64) -> u64 {
+    static BASE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *BASE.get_or_init(|| (rand::random::<u32>() as u64) << 20) + n
+}
+
 async fn next_call(rx: &mut mpsc::Receiver<CallSignal>, secs: u64) -> Option<CallSignal> {
     tokio::time::timeout(Duration::from_secs(secs), rx.recv())
         .await
@@ -129,14 +136,14 @@ async fn unaccepted_caller_is_rejected_and_callee_never_rings() {
 
     alice
         .client
-        .initiate_call(1001, bob.name.clone(), "offer".into())
+        .initiate_call(call_id(1001), bob.name.clone(), "offer".into())
         .await
         .unwrap();
     // A refused caller keeps sending ICE; none of it may reach the callee.
     for i in 0..5 {
         alice
             .client
-            .send_ice_candidate(1001, bob.name.clone(), format!("c{i}"), "0".into(), 0)
+            .send_ice_candidate(call_id(1001), bob.name.clone(), format!("c{i}"), "0".into(), 0)
             .await
             .unwrap();
     }
@@ -144,7 +151,7 @@ async fn unaccepted_caller_is_rejected_and_callee_never_rings() {
     let reject = next_call(&mut alice.calls, 10).await.expect("caller gets a reject");
     assert_eq!(reject.signal_type, CALL_REJECT);
     assert_eq!(reject.reject_reason, REJECT_NOT_ACCEPTED);
-    assert_eq!(reject.call_id, 1001);
+    assert_eq!(reject.call_id, call_id(1001));
     assert!(
         next_call(&mut bob.calls, 3).await.is_none(),
         "callee must not see anything from an unaccepted caller"
@@ -156,19 +163,19 @@ async fn unaccepted_caller_is_rejected_and_callee_never_rings() {
 
     alice
         .client
-        .initiate_call(1002, bob.name.clone(), "offer".into())
+        .initiate_call(call_id(1002), bob.name.clone(), "offer".into())
         .await
         .unwrap();
     for i in 0..200 {
         alice
             .client
-            .send_ice_candidate(1002, bob.name.clone(), format!("c{i}"), "0".into(), 0)
+            .send_ice_candidate(call_id(1002), bob.name.clone(), format!("c{i}"), "0".into(), 0)
             .await
             .unwrap();
     }
     let request = next_call(&mut bob.calls, 10).await.expect("callee rings");
     assert_eq!(request.signal_type, CALL_REQUEST);
-    assert_eq!(request.call_id, 1002);
+    assert_eq!(request.call_id, call_id(1002));
     for i in 0..200 {
         let ice = next_call(&mut bob.calls, 10).await.expect("ice candidate");
         assert_eq!(ice.signal_type, CALL_ICECANDIDATE);
@@ -209,7 +216,7 @@ async fn messaging_first_implicitly_accepts_for_calls() {
 
     // dave may call carol, carol may not call dave.
     dave.client
-        .initiate_call(2001, carol.name.clone(), "offer".into())
+        .initiate_call(call_id(2001), carol.name.clone(), "offer".into())
         .await
         .unwrap();
     let ring = next_call(&mut carol.calls, 10).await.expect("carol rings");
@@ -217,7 +224,7 @@ async fn messaging_first_implicitly_accepts_for_calls() {
 
     carol
         .client
-        .initiate_call(2002, dave.name.clone(), "offer".into())
+        .initiate_call(call_id(2002), dave.name.clone(), "offer".into())
         .await
         .unwrap();
     let reject = next_call(&mut carol.calls, 10).await.expect("carol is refused");
@@ -308,7 +315,7 @@ async fn blocked_caller_is_rejected() {
 
     heidi
         .client
-        .initiate_call(3001, ivan.name.clone(), "offer".into())
+        .initiate_call(call_id(3001), ivan.name.clone(), "offer".into())
         .await
         .unwrap();
     let reject = next_call(&mut heidi.calls, 10).await.expect("blocked caller is refused");
@@ -333,10 +340,10 @@ async fn forged_follow_up_signals_never_reach_an_unaccepting_callee() {
     for i in 0..5u64 {
         mallory
             .client
-            .send_ice_candidate(9000 + i, victim.name.clone(), format!("c{i}"), "0".into(), 0)
+            .send_ice_candidate(call_id(9000 + i), victim.name.clone(), format!("c{i}"), "0".into(), 0)
             .await
             .unwrap();
-        mallory.client.hangup_call(9100 + i, victim.name.clone()).await.unwrap();
+        mallory.client.hangup_call(call_id(9100 + i), victim.name.clone()).await.unwrap();
     }
     let leaked = next_call(&mut victim.calls, 4).await;
     assert!(

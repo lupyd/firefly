@@ -58,8 +58,11 @@ Client integration tests can be executed against a running Firefly MLS server in
    ```
 2. Run client integration tests pointing to the test server:
    ```bash
-   FIREFLY_BASE_URL=http://127.0.0.1:39205 FIREFLY_WS_URL=ws://127.0.0.1:39205/ RUST_LOG=info cargo test
+   FIREFLY_BASE_URL=http://127.0.0.1:39205 FIREFLY_WS_URL=ws://127.0.0.1:39205/ RUST_LOG=info cargo test --features firefly-client/test-hooks
    ```
+   `test-hooks` compiles in the test-only environment overrides (`FIREFLY_WT_CERT_SHA256`,
+   `FIREFLY_WT_INSECURE`, `WT_HOST`) so tests can trust a local server's certificate. Apps never
+   enable it, so release builds always verify WebTransport certificates.
 
 If `FIREFLY_BASE_URL` is not specified, server integration tests skip gracefully so offline CI/CD pipelines run standard unit tests quickly.
 

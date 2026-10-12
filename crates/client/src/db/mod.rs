@@ -18,6 +18,9 @@ pub mod migrations;
 pub mod search;
 pub mod stores;
 
+/// Write transactions must start with `begin_with("BEGIN IMMEDIATE")`: a deferred transaction
+/// that reads before writing fails at once with `database is locked` (SQLITE_BUSY_SNAPSHOT) when
+/// another connection commits in between, without waiting for `busy_timeout`.
 pub async fn setup_pool(url: &str, max_connections: u32) -> Result<sqlx::SqlitePool, sqlx::Error> {
     let opts = SqliteConnectOptions::from_str(url)?
         .journal_mode(SqliteJournalMode::Wal)

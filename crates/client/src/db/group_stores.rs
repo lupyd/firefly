@@ -58,7 +58,7 @@ impl GroupStateStore {
         epoch_updates: HashMap<u64, Vec<u8>>,
     ) -> anyhow::Result<()> {
         log::info!("store insert: group_state id={}", hex::encode(group_id));
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         sqlx::query("INSERT OR REPLACE INTO group_states (id, state) VALUES (?, ?)")
             .bind(group_id)

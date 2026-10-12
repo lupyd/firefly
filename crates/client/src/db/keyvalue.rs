@@ -61,7 +61,7 @@ impl KeyValueStore {
         &self,
         last_received_message_id: u64,
     ) -> anyhow::Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query(
             r#"
             SELECT value FROM key_value_store WHERE key = ?

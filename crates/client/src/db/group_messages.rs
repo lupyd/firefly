@@ -142,7 +142,7 @@ impl GroupMessagesStore {
         if let Ok(inner) = firefly_protos::deserialize_proto::<firefly_protos::firefly::GroupMessageInner>(message) {
             if let firefly_protos::firefly::mod_GroupMessageInner::OneOfmessage::pinUpdate(update) = inner.message {
                 anyhow::ensure!(message_type == firefly_protos::MESSAGE_TYPE_HIDDEN && update.message_id > 0 && update.message_id < id && inner.channelId == channel_id, "Invalid shared pin event");
-                let mut tx = self.pool.begin().await?;
+                let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
                 sqlx::query("INSERT INTO group_pin_updates(group_id,message_id,channel_id,event_id,pinned) VALUES(?,?,?,?,?) ON CONFLICT(group_id,message_id,channel_id) DO UPDATE SET event_id=excluded.event_id,pinned=excluded.pinned WHERE excluded.event_id>group_pin_updates.event_id")
                     .bind(group_id as i64).bind(update.message_id as i64).bind(channel_id as i64).bind(id as i64).bind(update.pinned).execute(&mut *tx).await?;
                 Self::apply_pin_state(&mut tx, group_id, update.message_id).await?;
@@ -194,7 +194,7 @@ impl GroupMessagesStore {
         .await?;
 
         {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
             Self::apply_pin_state(&mut tx, group_id, id).await?;
             tx.commit().await?;
         }
@@ -283,7 +283,7 @@ impl GroupMessagesStore {
     }
     pub async fn import_verified_history(&self, group: u64, chunk: u64, hash: &[u8], records: &[GroupMessage]) -> anyhow::Result<usize> {
         let _lock = self.pin_writes.lock().await;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut imported = 0;
         for r in records {
             anyhow::ensure!(r.group_id == group, "Foreign history record");
@@ -301,7 +301,7 @@ impl GroupMessagesStore {
     }
     pub async fn purge_imported_chunk(&self, group: u64, chunk: u64) -> anyhow::Result<usize> {
         let _lock = self.pin_writes.lock().await;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let deleted = sqlx::query(
             "DELETE FROM group_messages WHERE group_id = ? AND id IN (SELECT message_id FROM group_history_imports WHERE group_id = ? AND chunk_id = ?)"
         )
@@ -375,7 +375,7 @@ impl GroupMessagesStore {
             crate::history::validate_chunk_records(records,group_id,first.id,last.id,records.len() as u32)?;
         }
         self.import_verified_history(group_id,0,hash,records).await?;
-        let mut tx=self.pool.begin().await?;
+        let mut tx=self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("UPDATE group_messages SET message_type=message_type & ~1 WHERE group_id=? AND (message_type & 1)<>0").bind(group_id as i64).execute(&mut *tx).await?;
         // Snapshot state supersedes the unreleased per-message pin protocol.
         // Preserve it when the authenticated original later replaces an import.

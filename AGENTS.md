@@ -22,8 +22,10 @@ cargo check
 ### 3. Running Tests
 To run the project's tests, use the following command (requires the database to be running):
 ```bash
-EMULATOR_MODE=true RUST_LOG=info cargo test
+EMULATOR_MODE=true RUST_LOG=info cargo test --features firefly-client/test-hooks
 ```
+`test-hooks` enables the test-only environment overrides (local WebTransport certificates);
+release builds never include it.
 
 ## Database Query Conventions
 

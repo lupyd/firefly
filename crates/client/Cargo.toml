@@ -1,12 +1,17 @@
 [package]
 name = "firefly-client"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 name = "firefly_client"
 path = "src/lib.rs"
+
+[features]
+# Environment overrides for E2E/integration tests against local servers (see test_hook_env in
+# src/websocket.rs). Never enable for release builds.
+test-hooks = []
 
 [[bin]]
 name = "simulation-benchmark"

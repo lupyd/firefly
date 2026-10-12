@@ -56,7 +56,7 @@ impl ReceiptCoordinator {
         key: &str,
         value: &str,
     ) -> anyhow::Result<()> {
-        let mut tx = pool.begin().await?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("INSERT OR REPLACE INTO key_value_store (key, value) VALUES (?, ?)")
             .bind(key)
             .bind(value)
@@ -92,7 +92,7 @@ impl ReceiptCoordinator {
             let key: Option<String> = row.try_get("capability_key").ok();
             let val: Option<String> = row.try_get("capability_value").ok();
             if let (Some(k), Some(v)) = (key, val) {
-                let mut tx = pool.begin().await?;
+                let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
                 sqlx::query("INSERT OR REPLACE INTO key_value_store (key, value) VALUES (?, ?)")
                     .bind(&k)
                     .bind(&v)
