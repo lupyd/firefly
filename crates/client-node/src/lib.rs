@@ -183,6 +183,7 @@ struct WasmClientCallbacks {
     on_message_fn: Option<js_sys::Function>,
     on_group_message_fn: Option<js_sys::Function>,
     on_group_joined_fn: Option<js_sys::Function>,
+    on_group_members_changed_fn: Option<js_sys::Function>,
     on_call_signal_fn: Option<js_sys::Function>,
     on_group_meeting_signal_fn: Option<js_sys::Function>,
     on_read_user_messages_upto_fn: Option<js_sys::Function>,
@@ -242,6 +243,13 @@ impl FireflyWsClientCallback for WasmClientCallbacks {
     async fn on_group_joined(&self, group_id: u64) {
         if let Some(ref f) = self.on_group_joined_fn {
             let _ = f.call1(&JsValue::NULL, &JsValue::from_f64(group_id as f64));
+        }
+    }
+
+    async fn on_group_members_changed(&self, group_id: u64, added: Vec<String>, removed: Vec<String>) {
+        if let Some(ref f) = self.on_group_members_changed_fn {
+            let to_array = |names: Vec<String>| names.into_iter().map(JsValue::from).collect::<js_sys::Array>();
+            let _ = f.call3(&JsValue::NULL, &JsValue::from_f64(group_id as f64), &to_array(added), &to_array(removed));
         }
     }
 
@@ -794,6 +802,46 @@ impl GroupInfoStorage for JsGroupInfoStorage {
     }
 }
 
+/// Optional `signalStateStorage { load(), save(bytes) }` provider. The Signal stores live in
+/// memory; this keeps a snapshot of them so identity and sessions survive restarts.
+pub struct SignalStateStorage {
+    js_load: Option<js_sys::Function>,
+    js_save: Option<js_sys::Function>,
+}
+
+unsafe impl Send for SignalStateStorage {}
+unsafe impl Sync for SignalStateStorage {}
+
+impl SignalStateStorage {
+    async fn load(&self) -> Result<Option<Vec<u8>>, JsValue> {
+        let Some(ref f) = self.js_load else {
+            return Ok(None);
+        };
+        let res = call_js_async(f, &[]).await?;
+        if res.is_null() || res.is_undefined() {
+            return Ok(None);
+        }
+        let bytes = js_sys::Uint8Array::from(res).to_vec();
+        Ok(if bytes.is_empty() { None } else { Some(bytes) })
+    }
+
+    async fn save(&self, stores: &MemoryKeyStores) {
+        let Some(ref f) = self.js_save else {
+            return;
+        };
+        let result = match stores.export_snapshot().await {
+            Ok(bytes) => call_js_async(f, &[js_sys::Uint8Array::from(bytes.as_slice()).into()])
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("{:?}", e)),
+            Err(e) => Err(e.to_string()),
+        };
+        if let Err(e) = result {
+            web_sys::console::error_1(&JsValue::from_str(&format!("failed to save signal state: {}", e)));
+        }
+    }
+}
+
 pub struct JsKeyValueStorage {
     js_get: Option<js_sys::Function>,
     js_set: Option<js_sys::Function>,
@@ -1008,6 +1056,7 @@ impl FavouriteMessageStorage for JsFavouriteMessageStorage {
 #[wasm_bindgen]
 pub struct FireflyClientNode {
     key_stores: Arc<tokio::sync::RwLock<MemoryKeyStores>>,
+    signal_state: Arc<SignalStateStorage>,
     key_value_store: Arc<dyn KeyValueStorage>,
     group_messages_store: Arc<dyn GroupMessageStorage>,
     user_messages_store: Arc<dyn UserMessageStorage>,
@@ -1031,6 +1080,14 @@ pub struct FireflyClientNode {
     next_request_id: Arc<AtomicU32>,
 }
 
+async fn sync_group_members(
+    group: &firefly_client::group::FfiMlsGroup,
+    key_value_store: &Arc<dyn KeyValueStorage>,
+    callbacks: &Arc<WasmClientCallbacks>,
+) {
+    firefly_client::members::sync_group_members(group, key_value_store.as_ref(), callbacks.as_ref()).await;
+}
+
 async fn join_groups_helper(
     base_url: &str,
     token: &str,
@@ -1039,6 +1096,7 @@ async fn join_groups_helper(
     mls: &Arc<FfiMlsClient>,
     group_info_store: &Arc<dyn GroupInfoStorage>,
     group_messages_store: &Arc<dyn GroupMessageStorage>,
+    key_value_store: &Arc<dyn KeyValueStorage>,
     callbacks: &Arc<WasmClientCallbacks>,
 ) -> anyhow::Result<()> {
     let url = format!(
@@ -1078,6 +1136,7 @@ async fn join_groups_helper(
                 if let Ok(body) = serialize_proto(&update) {
                     let _ = HTTP_CLIENT.post(member_url).bearer_auth(token).body(body.to_vec()).send().await;
                 }
+                sync_group_members(&group, key_value_store, callbacks).await;
                 callbacks.on_group_joined(group_id).await;
             }
             Err(e) => {
@@ -1126,6 +1185,9 @@ impl FireflyClientNode {
             let on_group_joined_fn = js_sys::Reflect::get(&callbacks_obj, &"onGroupJoined".into())
                 .ok()
                 .and_then(|v| v.dyn_into::<js_sys::Function>().ok());
+            let on_group_members_changed_fn = js_sys::Reflect::get(&callbacks_obj, &"onGroupMembersChanged".into())
+                .ok()
+                .and_then(|v| v.dyn_into::<js_sys::Function>().ok());
             let on_call_signal_fn = js_sys::Reflect::get(&callbacks_obj, &"onCallSignal".into())
                 .ok()
                 .and_then(|v| v.dyn_into::<js_sys::Function>().ok());
@@ -1143,17 +1205,29 @@ impl FireflyClientNode {
                 on_message_fn,
                 on_group_message_fn,
                 on_group_joined_fn,
+                on_group_members_changed_fn,
                 on_call_signal_fn,
                 on_group_meeting_signal_fn,
                 on_read_user_messages_upto_fn,
                 get_access_token_fn,
             });
 
-            let key_stores = Arc::new(tokio::sync::RwLock::new(
-                MemoryKeyStores::new()
-                    .await
-                    .map_err(|e| JsValue::from_str(&e.to_string()))?,
-            ));
+            let signal_state_obj = ["storageProviders", "storage"]
+                .iter()
+                .find_map(|name| get_sub_obj(&callbacks_obj, &[name]))
+                .and_then(|s_obj| get_sub_obj(&s_obj, &["signalStateStorage"]));
+            let signal_state = Arc::new(SignalStateStorage {
+                js_load: signal_state_obj.as_ref().and_then(|o| get_js_fn(o, &["load"])),
+                js_save: signal_state_obj.as_ref().and_then(|o| get_js_fn(o, &["save"])),
+            });
+            // A snapshot that fails to load is an error: silently starting fresh would
+            // register a new device and orphan every existing session
+            let key_stores = match signal_state.load().await? {
+                Some(bytes) => MemoryKeyStores::from_snapshot(&bytes).await,
+                None => MemoryKeyStores::new().await,
+            }
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let key_stores = Arc::new(tokio::sync::RwLock::new(key_stores));
             let default_key_value = Arc::new(MemoryKeyValueStore::new());
             let default_group_messages = Arc::new(MemoryGroupMessageStore::new());
             let default_user_messages = Arc::new(MemoryUserMessageStore::new());
@@ -1269,6 +1343,7 @@ impl FireflyClientNode {
 
             let client = FireflyClientNode {
                 key_stores,
+                signal_state,
                 key_value_store,
                 group_messages_store,
                 user_messages_store,
@@ -1305,6 +1380,7 @@ impl FireflyClientNode {
     pub fn check_setup(&self) -> js_sys::Promise {
         let callbacks = self.callbacks.clone();
         let key_stores = self.key_stores.clone();
+        let signal_state = self.signal_state.clone();
         let base_url = self.firefly_base_url.clone();
         let mls_client_holder = self.mls_client.clone();
         let address_id_atomic = self.address_id.clone();
@@ -1397,6 +1473,10 @@ impl FireflyClientNode {
                 }
             }
 
+            // Keep the registered identity and the prekeys just published
+            signal_state.save(&ks).await;
+            drop(ks);
+
             // Initialize MLS client
             let mls = FfiMlsClient::initialize_with_stores(
                 device_id,
@@ -1453,6 +1533,7 @@ impl FireflyClientNode {
                 &mls,
                 &group_info_store,
                 &group_messages_store,
+                &key_value_store,
                 &callbacks,
             ).await;
 
@@ -1474,9 +1555,11 @@ impl FireflyClientNode {
         let is_initialized_atomic = self.is_initialized.clone();
         let _disposed_atomic = self.disposed.clone();
         let key_stores = self.key_stores.clone();
+        let signal_state = self.signal_state.clone();
         let user_messages_store = self.user_messages_store.clone();
         let group_messages_store = self.group_messages_store.clone();
         let group_info_store = self.group_info_store.clone();
+        let key_value_store = self.key_value_store.clone();
         let pending_requests = self.pending_requests.clone();
         let mls_holder = self.mls_client.clone();
 
@@ -1504,9 +1587,11 @@ impl FireflyClientNode {
 
             // Wire onmessage
             let key_stores_clone = key_stores.clone();
+            let signal_state_clone = signal_state.clone();
             let user_messages_store_clone = user_messages_store.clone();
             let group_messages_store_clone = group_messages_store.clone();
             let group_info_store_clone = group_info_store.clone();
+            let key_value_store_clone = key_value_store.clone();
             let callbacks_clone = callbacks.clone();
             let pending_requests_clone = pending_requests.clone();
             let mls_holder_clone = mls_holder.clone();
@@ -1520,9 +1605,11 @@ impl FireflyClientNode {
                     let bytes = u8_array.to_vec();
 
                     let ks = key_stores_clone.clone();
+                    let signal_state = signal_state_clone.clone();
                     let ums = user_messages_store_clone.clone();
                     let gms = group_messages_store_clone.clone();
                     let gis = group_info_store_clone.clone();
+                    let kvs = key_value_store_clone.clone();
                     let cb = callbacks_clone.clone();
                     let pr = pending_requests_clone.clone();
                     let mls = mls_holder_clone.clone();
@@ -1551,6 +1638,7 @@ impl FireflyClientNode {
                                         from_device_id,
                                     );
                                     if let Ok(decrypted) = ks_guard.decrypt(other_addr, um.text.to_vec(), um.type_pb as u8).await {
+                                        signal_state.save(&ks_guard).await;
                                         let message_type = deserialize_proto::<firefly::UserMessageInner>(&decrypted)
                                             .ok()
                                             .map(|inner| {
@@ -1577,7 +1665,12 @@ impl FireflyClientNode {
                                     if let Some(mls_guard) = mls.read().await.as_ref() {
                                         let grp_ident = gis.get(gm.groupId).await.map(|g| g.identifier).unwrap_or_default();
                                         if let Ok(group) = mls_guard.load_group(gm.groupId, grp_ident).await {
-                                            if let Ok(firefly_client::group::FireflyMlsReceivedMessage::Message(decrypted)) = group.process(gm.message.to_vec()).await {
+                                            let processed = group.process(gm.message.to_vec()).await;
+                                            if matches!(processed, Ok(firefly_client::group::FireflyMlsReceivedMessage::Commit)) {
+                                                let _ = group.save().await;
+                                                sync_group_members(&group, &kvs, &cb).await;
+                                            }
+                                            if let Ok(firefly_client::group::FireflyMlsReceivedMessage::Message(decrypted)) = processed {
                                                 let _ = group.save().await;
                                                 let inner_opt = deserialize_proto::<firefly::GroupMessageInner>(&decrypted.message).ok();
                                                 let channel_id = inner_opt.as_ref().map(|inner| inner.channelId).unwrap_or(0);
@@ -1609,7 +1702,12 @@ impl FireflyClientNode {
                                         for gm in msgs.messages {
                                             let grp_ident = gis.get(gm.groupId).await.map(|g| g.identifier).unwrap_or_default();
                                             if let Ok(group) = mls_guard.load_group(gm.groupId, grp_ident).await {
-                                                if let Ok(firefly_client::group::FireflyMlsReceivedMessage::Message(decrypted)) = group.process(gm.message.to_vec()).await {
+                                                let processed = group.process(gm.message.to_vec()).await;
+                                                if matches!(processed, Ok(firefly_client::group::FireflyMlsReceivedMessage::Commit)) {
+                                                    let _ = group.save().await;
+                                                    sync_group_members(&group, &kvs, &cb).await;
+                                                }
+                                                if let Ok(firefly_client::group::FireflyMlsReceivedMessage::Message(decrypted)) = processed {
                                                     let _ = group.save().await;
                                                     let inner_opt = deserialize_proto::<firefly::GroupMessageInner>(&decrypted.message).ok();
                                                     let channel_id = inner_opt.as_ref().map(|inner| inner.channelId).unwrap_or(0);
@@ -1664,6 +1762,7 @@ impl FireflyClientNode {
                                             if let Ok(body) = serialize_proto(&update) {
                                                 let _ = HTTP_CLIENT.post(member_url).bearer_auth(&cur_token).body(body.to_vec()).send().await;
                                             }
+                                            sync_group_members(&group, &kvs, &cb).await;
                                             cb.on_group_joined(group_id).await;
                                         }
                                     }
@@ -1675,6 +1774,7 @@ impl FireflyClientNode {
                                             if let Ok(group) = mls_guard.load_group(commit.groupId, grp_ident).await {
                                                 let _ = group.process(commit.commit.to_vec()).await;
                                                 let _ = group.save().await;
+                                                sync_group_members(&group, &kvs, &cb).await;
                                             }
                                         }
                                     }
@@ -1686,6 +1786,7 @@ impl FireflyClientNode {
                                             if let Ok(group) = mls_guard.load_group(request.group_id, grp_ident).await {
                                                 if let Ok(id) = group.add_member(request.username.to_string(), 0).await {
                                                     let _ = gms.update_cursor(id, request.group_id, group.epoch().await as u32).await;
+                                                    sync_group_members(&group, &kvs, &cb).await;
                                                 }
                                             }
                                         }
@@ -1714,6 +1815,7 @@ impl FireflyClientNode {
                                                 };
                                                 if let Ok(id) = res {
                                                     let _ = gms.update_cursor(id, request.group_id, group.epoch().await as u32).await;
+                                                    sync_group_members(&group, &kvs, &cb).await;
                                                 }
                                             }
                                         }
@@ -1796,7 +1898,10 @@ impl FireflyClientNode {
                     if let Ok(bytes) = resp.bytes().await {
                         if let Ok(groups) = deserialize_proto::<firefly::Groups<'_>>(&bytes) {
                             for g in groups.groups {
-                                let _ = group_info_store.set(g.id, g.name.to_string(), g.description.to_string(), Vec::new()).await;
+                                // The server only knows name and description; keep the MLS group
+                                // identifier we stored on join, or the group can't be loaded again
+                                let identifier = group_info_store.get(g.id).await.map(|info| info.identifier).unwrap_or_default();
+                                let _ = group_info_store.set(g.id, g.name.to_string(), g.description.to_string(), identifier).await;
                             }
                         }
                     }
@@ -1841,6 +1946,7 @@ impl FireflyClientNode {
     #[wasm_bindgen(js_name = encryptAndSend)]
     pub fn encrypt_and_send(&self, to: String, payload: Vec<u8>) -> js_sys::Promise {
         let key_stores = self.key_stores.clone();
+        let signal_state = self.signal_state.clone();
         let user_messages_store = self.user_messages_store.clone();
         let ws_holder = self.ws.clone();
         let callbacks = self.callbacks.clone();
@@ -1906,6 +2012,8 @@ impl FireflyClientNode {
                 .encrypt(other_addr, payload.clone())
                 .await
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            // Persist the advanced ratchet before the ciphertext leaves this client
+            signal_state.save(&ks).await;
 
             let msg_id = firefly_client::utils::get_current_timestamp_millis_since_epoch();
 
@@ -2078,6 +2186,8 @@ impl FireflyClientNode {
     pub fn add_group_member(&self, group_id: f64, username: String, role_id: u32) -> js_sys::Promise {
         let mls_holder = self.mls_client.clone();
         let group_info_store = self.group_info_store.clone();
+        let key_value_store = self.key_value_store.clone();
+        let callbacks = self.callbacks.clone();
 
         future_to_promise(async move {
             let gid = group_id as u64;
@@ -2094,6 +2204,7 @@ impl FireflyClientNode {
                 .add_member(username, role_id)
                 .await
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            sync_group_members(&group, &key_value_store, &callbacks).await;
 
             Ok(JsValue::NULL)
         })
@@ -2103,6 +2214,8 @@ impl FireflyClientNode {
     pub fn kick_group_member(&self, group_id: f64, username: String) -> js_sys::Promise {
         let mls_holder = self.mls_client.clone();
         let group_info_store = self.group_info_store.clone();
+        let key_value_store = self.key_value_store.clone();
+        let callbacks = self.callbacks.clone();
 
         future_to_promise(async move {
             let gid = group_id as u64;
@@ -2119,6 +2232,7 @@ impl FireflyClientNode {
                 .kick_member(username)
                 .await
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            sync_group_members(&group, &key_value_store, &callbacks).await;
 
             Ok(JsValue::NULL)
         })
@@ -2270,6 +2384,7 @@ impl FireflyClientNode {
         let mls_holder = self.mls_client.clone();
         let group_info_store = self.group_info_store.clone();
         let group_messages_store = self.group_messages_store.clone();
+        let key_value_store = self.key_value_store.clone();
 
         future_to_promise(async move {
             let token = callbacks
@@ -2286,6 +2401,7 @@ impl FireflyClientNode {
                     mls_guard,
                     &group_info_store,
                     &group_messages_store,
+                    &key_value_store,
                     &callbacks,
                 ).await;
             }

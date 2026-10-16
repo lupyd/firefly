@@ -7,6 +7,7 @@ import {
   FireflyClientNode,
   protos,
   initLogger,
+  UserPermission,
   MlsKeyPackageStorage,
   MlsGroupStateStorage,
   MlsPreSharedKeyStorage,
@@ -14,6 +15,7 @@ import {
   GroupMessageStorage,
   GroupInfoStorage,
   KeyValueStorage,
+  SignalStateStorage,
   StorageProviders,
   RawUserMessage,
   RawGroupMessage,
@@ -31,6 +33,7 @@ export type {
   GroupMessageStorage,
   GroupInfoStorage,
   KeyValueStorage,
+  SignalStateStorage,
   StorageProviders,
   RawUserMessage,
   RawGroupMessage,
@@ -73,8 +76,9 @@ function decodeJwt(token: string): any {
 }
 
 function openBrowser(url: string): void {
+  // On Windows `start` takes the first quoted argument as the window title, so pass an empty one
   const start = process.platform === 'darwin' ? 'open' :
-                process.platform === 'win32' ? 'start' :
+                process.platform === 'win32' ? 'start ""' :
                 'xdg-open';
   exec(`${start} "${url}"`, (err: any) => {
     if (err) {
@@ -96,6 +100,10 @@ export interface ClientConfig {
   dbFile?: string;
   storage?: StorageProviders;
   storageProviders?: StorageProviders;
+  // Sign in with email and password instead of the browser flow (defaults: BOT_EMAIL / BOT_PASSWORD).
+  // The password is only sent to the login server; it is never written to the session file.
+  email?: string;
+  password?: string;
 }
 
 export type BotConfig = ClientConfig;
@@ -126,6 +134,30 @@ export interface BotContext {
 
 export type CommandHandler = (ctx: ClientContext & BotContext) => Promise<void>;
 
+export interface MemberEventContext {
+  bot: FireflyClient;
+  groupId: number;
+  username: string;
+  // Posts in the group; channelId defaults to the group's first channel
+  sendToGroup: (text: string, channelId?: number) => Promise<void>;
+  // Sends a direct message to the member
+  sendDirect: (text: string) => Promise<void>;
+}
+
+export type MemberEventHandler = (ctx: MemberEventContext) => Promise<void> | void;
+
+export interface GroupMember {
+  username: string;
+  roleId: number;
+  permissions: number;
+}
+
+export interface GroupChannel {
+  id: number;
+  name: string;
+  type: number;
+}
+
 export class FireflyClient {
   private config: ClientConfig;
   private port: number;
@@ -145,6 +177,8 @@ export class FireflyClient {
   public commands: Map<string, CommandHandler>;
   public messageHandlers: Array<(ctx: ClientContext & BotContext) => Promise<void> | void>;
   public groupMessageHandlers: Array<(ctx: ClientContext & BotContext) => Promise<void> | void>;
+  public memberJoinHandlers: MemberEventHandler[];
+  public memberLeaveHandlers: MemberEventHandler[];
   public client: any;
   public session: {
     access_token: string | null;
@@ -161,8 +195,8 @@ export class FireflyClient {
     this.auth0Audience = options.auth0Audience || 'https://lupyd.com';
     this.redirectUri = `http://localhost:${this.port}/callback`;
 
-    this.apiBaseUrl = options.apiBaseUrl || 'https://firefly.lupyd.com';
-    this.wsUrl = options.wsUrl || 'wss://firefly.lupyd.com/';
+    this.apiBaseUrl = options.apiBaseUrl || process.env.FIREFLY_BASE_URL || 'https://firefly.lupyd.com';
+    this.wsUrl = options.wsUrl || process.env.FIREFLY_BASE_WS_URL || 'wss://firefly.lupyd.com/';
     this.emulatorMode = options.emulatorMode !== undefined ? options.emulatorMode : (process.env.EMULATOR_MODE === 'true');
     this.clientUsername = options.username || process.env.CLIENT_USERNAME || process.env.BOT_USERNAME || 'example_client';
 
@@ -172,6 +206,8 @@ export class FireflyClient {
     this.commands = new Map();
     this.messageHandlers = [];
     this.groupMessageHandlers = [];
+    this.memberJoinHandlers = [];
+    this.memberLeaveHandlers = [];
     this.client = null;
     this.session = {
       access_token: null,
@@ -195,6 +231,76 @@ export class FireflyClient {
   // Registers a general group message handler
   onGroupMessage(handler: (ctx: ClientContext & BotContext) => Promise<void> | void): void {
     this.groupMessageHandlers.push(handler);
+  }
+
+  // Registers a handler for members joining a group this client is in (never fired for itself)
+  onMemberJoin(handler: MemberEventHandler): void {
+    this.memberJoinHandlers.push(handler);
+  }
+
+  // Registers a handler for members leaving or being removed from a group this client is in
+  onMemberLeave(handler: MemberEventHandler): void {
+    this.memberLeaveHandlers.push(handler);
+  }
+
+  private async _getGroupExtension(groupId: number): Promise<protos.FireflyGroupExtension> {
+    if (!this.client) {
+      throw new Error('Client not initialized');
+    }
+    const bytes = await this.client.getGroupExtension(groupId);
+    return protos.FireflyGroupExtension.decode(new Uint8Array(bytes));
+  }
+
+  // Members of a group with their resolved group-level permissions
+  async getGroupMembers(groupId: number): Promise<GroupMember[]> {
+    const extension = await this._getGroupExtension(groupId);
+    return extension.members.map((member) => ({
+      username: member.username,
+      roleId: member.role,
+      permissions: extension.roles.find((role) => role.id === member.role)?.permissions ?? 0,
+    }));
+  }
+
+  async getGroupChannels(groupId: number): Promise<GroupChannel[]> {
+    const extension = await this._getGroupExtension(groupId);
+    return extension.channels.map((channel) => ({ id: channel.id, name: channel.name, type: channel.type }));
+  }
+
+  // Whether the user holds the given permission (ManageGroup by default, same as the Lupyd apps' admin check)
+  async isGroupAdmin(groupId: number, username: string, permission: number = UserPermission.ManageGroup): Promise<boolean> {
+    const member = (await this.getGroupMembers(groupId)).find((m) => m.username === username);
+    return member !== undefined && (member.permissions & permission) === permission;
+  }
+
+  private async _emitMemberEvents(groupId: number, added: string[], removed: string[]): Promise<void> {
+    const self = this.session.username;
+    const emit = async (handlers: MemberEventHandler[], username: string) => {
+      const ctx: MemberEventContext = {
+        bot: this,
+        groupId,
+        username,
+        sendToGroup: async (text: string, channelId?: number) => {
+          const target = channelId ?? (await this.getGroupChannels(groupId))[0]?.id ?? 0;
+          await this.sendGroupMessage(groupId, text, target);
+        },
+        sendDirect: async (text: string) => {
+          await this.sendUserMessage(username, text);
+        },
+      };
+      for (const handler of handlers) {
+        try {
+          await handler(ctx);
+        } catch (err) {
+          console.error('Error executing member event handler:', err);
+        }
+      }
+    };
+    for (const username of added) {
+      if (username !== self) await emit(this.memberJoinHandlers, username);
+    }
+    for (const username of removed) {
+      if (username !== self) await emit(this.memberLeaveHandlers, username);
+    }
   }
 
   // Fetch members' online status and last connected timestamp
@@ -531,6 +637,61 @@ export class FireflyClient {
     return response.json();
   }
 
+  // Email/password sign-in, the same grant the Lupyd apps use. Needs no browser or callback URL.
+  private async _loginWithPassword(email: string, password: string): Promise<void> {
+    const request = async (body: Record<string, string>) => {
+      const response = await fetch(`${this.auth0Domain}/oauth/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: email,
+          password,
+          audience: this.auth0Audience,
+          scope: 'openid profile email offline_access',
+          client_id: this.auth0ClientId,
+          ...body,
+        }),
+      });
+      return { ok: response.ok, status: response.status, text: await response.text() };
+    };
+
+    let result = await request({
+      grant_type: 'http://auth0.com/oauth/grant-type/password-realm',
+      realm: 'Username-Password-Authentication',
+    });
+    if (!result.ok && /unsupported_grant_type|grant_type is not supported|unauthorized_client/.test(result.text)) {
+      result = await request({ grant_type: 'password' });
+    }
+    if (!result.ok) {
+      let reason = result.text;
+      try {
+        const error = JSON.parse(result.text);
+        reason = error.error_description || error.error || reason;
+      } catch {}
+      throw new Error(`Sign-in with email and password failed (${result.status}): ${reason}`);
+    }
+
+    const tokenResponse = JSON.parse(result.text);
+    const claims = decodeJwt(tokenResponse.access_token);
+    this.session.access_token = tokenResponse.access_token;
+    this.session.refresh_token = tokenResponse.refresh_token ?? null;
+    this.session.expires_at = Date.now() + (tokenResponse.expires_in * 1000);
+    this.session.username = claims ? claims.uname : 'client';
+    this._saveSession();
+    console.log(`Successfully authenticated as user: ${this.session.username}`);
+  }
+
+  // Signs in again: with email and password when configured, otherwise in the browser
+  private async _signIn(): Promise<void> {
+    const email = this.config.email || process.env.BOT_EMAIL;
+    const password = this.config.password || process.env.BOT_PASSWORD;
+    if (email && password) {
+      await this._loginWithPassword(email, password);
+    } else {
+      await this._startOauthFlow();
+    }
+  }
+
   // Start Auth0 Flow
   private _startOauthFlow(): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -637,10 +798,10 @@ export class FireflyClient {
           console.log('Access token successfully refreshed.');
         } catch (err: any) {
           console.error('Failed to refresh token, starting new login flow:', err.message);
-          await this._startOauthFlow();
+          await this._signIn();
         }
       } else {
-        await this._startOauthFlow();
+        await this._signIn();
       }
     }
 
@@ -833,6 +994,11 @@ export class FireflyClient {
         } catch (err) {
           console.error('Failed to load groups on join:', err);
         }
+      },
+
+      onGroupMembersChanged: async (groupId: number, added: string[], removed: string[]) => {
+        console.log(`[Group Members Changed] group: ${groupId}, added: ${added.join(', ')}, removed: ${removed.join(', ')}`);
+        await this._emitMemberEvents(groupId, added, removed);
       },
 
       onCallSignal: () => {},

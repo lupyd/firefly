@@ -16,6 +16,8 @@ pub mod error;
 
 pub mod group;
 pub mod history;
+
+pub mod members;
 pub mod direct_backups;
 pub mod direct_pins;
 

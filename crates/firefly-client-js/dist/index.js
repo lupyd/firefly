@@ -76,8 +76,9 @@ function decodeJwt(token) {
     }
 }
 function openBrowser(url) {
+    // On Windows `start` takes the first quoted argument as the window title, so pass an empty one
     const start = process.platform === 'darwin' ? 'open' :
-        process.platform === 'win32' ? 'start' :
+        process.platform === 'win32' ? 'start ""' :
             'xdg-open';
     (0, child_process_1.exec)(`${start} "${url}"`, (err) => {
         if (err) {
@@ -101,6 +102,8 @@ class FireflyClient {
     commands;
     messageHandlers;
     groupMessageHandlers;
+    memberJoinHandlers;
+    memberLeaveHandlers;
     client;
     session;
     constructor(options = {}) {
@@ -110,8 +113,8 @@ class FireflyClient {
         this.auth0ClientId = options.auth0ClientId || 'GnfEyGY0JdD0Oige2HSpeErcaWLrvObm';
         this.auth0Audience = options.auth0Audience || 'https://lupyd.com';
         this.redirectUri = `http://localhost:${this.port}/callback`;
-        this.apiBaseUrl = options.apiBaseUrl || 'https://firefly.lupyd.com';
-        this.wsUrl = options.wsUrl || 'wss://firefly.lupyd.com/';
+        this.apiBaseUrl = options.apiBaseUrl || process.env.FIREFLY_BASE_URL || 'https://firefly.lupyd.com';
+        this.wsUrl = options.wsUrl || process.env.FIREFLY_BASE_WS_URL || 'wss://firefly.lupyd.com/';
         this.emulatorMode = options.emulatorMode !== undefined ? options.emulatorMode : (process.env.EMULATOR_MODE === 'true');
         this.clientUsername = options.username || process.env.CLIENT_USERNAME || process.env.BOT_USERNAME || 'example_client';
         this.sessionFile = options.sessionFile || path.resolve(process.cwd(), 'client-session.json');
@@ -119,6 +122,8 @@ class FireflyClient {
         this.commands = new Map();
         this.messageHandlers = [];
         this.groupMessageHandlers = [];
+        this.memberJoinHandlers = [];
+        this.memberLeaveHandlers = [];
         this.client = null;
         this.session = {
             access_token: null,
@@ -139,6 +144,72 @@ class FireflyClient {
     // Registers a general group message handler
     onGroupMessage(handler) {
         this.groupMessageHandlers.push(handler);
+    }
+    // Registers a handler for members joining a group this client is in (never fired for itself)
+    onMemberJoin(handler) {
+        this.memberJoinHandlers.push(handler);
+    }
+    // Registers a handler for members leaving or being removed from a group this client is in
+    onMemberLeave(handler) {
+        this.memberLeaveHandlers.push(handler);
+    }
+    async _getGroupExtension(groupId) {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+        const bytes = await this.client.getGroupExtension(groupId);
+        return firefly_client_node_1.protos.FireflyGroupExtension.decode(new Uint8Array(bytes));
+    }
+    // Members of a group with their resolved group-level permissions
+    async getGroupMembers(groupId) {
+        const extension = await this._getGroupExtension(groupId);
+        return extension.members.map((member) => ({
+            username: member.username,
+            roleId: member.role,
+            permissions: extension.roles.find((role) => role.id === member.role)?.permissions ?? 0,
+        }));
+    }
+    async getGroupChannels(groupId) {
+        const extension = await this._getGroupExtension(groupId);
+        return extension.channels.map((channel) => ({ id: channel.id, name: channel.name, type: channel.type }));
+    }
+    // Whether the user holds the given permission (ManageGroup by default, same as the Lupyd apps' admin check)
+    async isGroupAdmin(groupId, username, permission = firefly_client_node_1.UserPermission.ManageGroup) {
+        const member = (await this.getGroupMembers(groupId)).find((m) => m.username === username);
+        return member !== undefined && (member.permissions & permission) === permission;
+    }
+    async _emitMemberEvents(groupId, added, removed) {
+        const self = this.session.username;
+        const emit = async (handlers, username) => {
+            const ctx = {
+                bot: this,
+                groupId,
+                username,
+                sendToGroup: async (text, channelId) => {
+                    const target = channelId ?? (await this.getGroupChannels(groupId))[0]?.id ?? 0;
+                    await this.sendGroupMessage(groupId, text, target);
+                },
+                sendDirect: async (text) => {
+                    await this.sendUserMessage(username, text);
+                },
+            };
+            for (const handler of handlers) {
+                try {
+                    await handler(ctx);
+                }
+                catch (err) {
+                    console.error('Error executing member event handler:', err);
+                }
+            }
+        };
+        for (const username of added) {
+            if (username !== self)
+                await emit(this.memberJoinHandlers, username);
+        }
+        for (const username of removed) {
+            if (username !== self)
+                await emit(this.memberLeaveHandlers, username);
+        }
     }
     // Fetch members' online status and last connected timestamp
     async getGroupMembersOnlineStatus(groupId) {
@@ -428,6 +499,59 @@ class FireflyClient {
         }
         return response.json();
     }
+    // Email/password sign-in, the same grant the Lupyd apps use. Needs no browser or callback URL.
+    async _loginWithPassword(email, password) {
+        const request = async (body) => {
+            const response = await fetch(`${this.auth0Domain}/oauth/token`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    username: email,
+                    password,
+                    audience: this.auth0Audience,
+                    scope: 'openid profile email offline_access',
+                    client_id: this.auth0ClientId,
+                    ...body,
+                }),
+            });
+            return { ok: response.ok, status: response.status, text: await response.text() };
+        };
+        let result = await request({
+            grant_type: 'http://auth0.com/oauth/grant-type/password-realm',
+            realm: 'Username-Password-Authentication',
+        });
+        if (!result.ok && /unsupported_grant_type|grant_type is not supported|unauthorized_client/.test(result.text)) {
+            result = await request({ grant_type: 'password' });
+        }
+        if (!result.ok) {
+            let reason = result.text;
+            try {
+                const error = JSON.parse(result.text);
+                reason = error.error_description || error.error || reason;
+            }
+            catch { }
+            throw new Error(`Sign-in with email and password failed (${result.status}): ${reason}`);
+        }
+        const tokenResponse = JSON.parse(result.text);
+        const claims = decodeJwt(tokenResponse.access_token);
+        this.session.access_token = tokenResponse.access_token;
+        this.session.refresh_token = tokenResponse.refresh_token ?? null;
+        this.session.expires_at = Date.now() + (tokenResponse.expires_in * 1000);
+        this.session.username = claims ? claims.uname : 'client';
+        this._saveSession();
+        console.log(`Successfully authenticated as user: ${this.session.username}`);
+    }
+    // Signs in again: with email and password when configured, otherwise in the browser
+    async _signIn() {
+        const email = this.config.email || process.env.BOT_EMAIL;
+        const password = this.config.password || process.env.BOT_PASSWORD;
+        if (email && password) {
+            await this._loginWithPassword(email, password);
+        }
+        else {
+            await this._startOauthFlow();
+        }
+    }
     // Start Auth0 Flow
     _startOauthFlow() {
         return new Promise((resolve, reject) => {
@@ -523,11 +647,11 @@ class FireflyClient {
                 }
                 catch (err) {
                     console.error('Failed to refresh token, starting new login flow:', err.message);
-                    await this._startOauthFlow();
+                    await this._signIn();
                 }
             }
             else {
-                await this._startOauthFlow();
+                await this._signIn();
             }
         }
         return this.session.access_token;
@@ -710,6 +834,10 @@ class FireflyClient {
                 catch (err) {
                     console.error('Failed to load groups on join:', err);
                 }
+            },
+            onGroupMembersChanged: async (groupId, added, removed) => {
+                console.log(`[Group Members Changed] group: ${groupId}, added: ${added.join(', ')}, removed: ${removed.join(', ')}`);
+                await this._emitMemberEvents(groupId, added, removed);
             },
             onCallSignal: () => { },
             onGroupMeetingSignal: () => { },

@@ -1,0 +1,6 @@
+node_modules/
+# Bot sessions, crypto state and data must never be committed
+*.db
+*.db-shm
+*.db-wal
+*-session.json

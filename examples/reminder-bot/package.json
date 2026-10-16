@@ -1,0 +1,16 @@
+{
+  "name": "firefly-reminder-bot",
+  "version": "0.0.1",
+  "description": "Self-hosted reminder bot for Lupyd",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "firefly-client-js": "file:../../crates/firefly-client-js"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}
