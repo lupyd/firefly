@@ -3,7 +3,6 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use anyhow::Context;
 use firefly_protos::deserialize_proto;
 use mls_rs::{
     CipherSuite, ExtensionList, IdentityProvider,
@@ -345,11 +344,13 @@ fn get_uncapped_expiry_from_headers(headers: &HeaderMap) -> anyhow::Result<(u64,
         }
     }
 
-    let date = headers
-        .get(header::DATE)
-        .context("Date Header is missing")?
-        .to_str()?;
-    let response_created_at = httpdate::parse_http_date(date)?;
+    // Browsers hide `Date` from cross-origin responses (it is not CORS-safelisted, unlike
+    // Cache-Control/Expires/Last-Modified); the response was just received, so the local clock
+    // stands in for it.
+    let response_created_at = match headers.get(header::DATE) {
+        Some(date) => httpdate::parse_http_date(date.to_str()?)?,
+        None => crate::utils::now_system_time(),
+    };
 
     let expiry = response_created_at
         .duration_since(UNIX_EPOCH)?
@@ -597,5 +598,20 @@ impl IdentityProvider for FireflyIdentityProvider {
     #[doc = " Credential types that are supported by this provider."]
     fn supported_types(&self) -> Vec<CredentialType> {
         vec![FireflyCredential::credential_type()]
+    }
+}
+
+#[cfg(test)]
+mod expiry_tests {
+    use super::*;
+
+    #[test]
+    fn cross_origin_responses_without_date_use_the_local_clock() {
+        // What a browser exposes for a cross-origin JWKS response: no Date header.
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CACHE_CONTROL, "public, max-age=600".parse().unwrap());
+        let now = crate::utils::get_current_timestamp_in_secs();
+        let (expiry, _) = get_expiry_from_headers(&headers).unwrap();
+        assert!(expiry >= now + 590 && expiry <= now + 610, "expiry {expiry} not ~10 min after {now}");
     }
 }
