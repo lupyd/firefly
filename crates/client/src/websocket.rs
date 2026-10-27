@@ -19,17 +19,15 @@ use futures::{SinkExt, StreamExt};
 use libsignal_protocol::{DeviceId, PreKeyId, ProtocolAddress};
 use mls_rs::MlsMessage;
 use rand::RngCore;
-use sqlx::SqlitePool;
-use tokio::{
-    net::TcpStream,
-    sync::{RwLock, mpsc::Sender, oneshot},
-};
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use crate::sql::SqlitePool;
+use tokio::sync::{RwLock, mpsc::Sender, oneshot};
+use crate::transport::{Message, WsStream};
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 pub struct DangerNoCertVerifier;
 
+#[cfg(not(target_arch = "wasm32"))]
 impl rustls::client::danger::ServerCertVerifier for DangerNoCertVerifier {
     fn verify_server_cert(
         &self,
@@ -71,12 +69,14 @@ impl rustls::client::danger::ServerCertVerifier for DangerNoCertVerifier {
 
 /// Accepts only end-entity certificates whose SHA-256 digest is pinned, mirroring the browser
 /// `serverCertificateHashes` option. Used for self-signed local/test servers.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 pub struct PinnedCertVerifier {
     hashes: Vec<[u8; 32]>,
     provider: Arc<rustls::crypto::CryptoProvider>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
     fn verify_server_cert(
         &self,
@@ -141,16 +141,17 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
 /// (FIREFLY_WT_CERT_SHA256, FIREFLY_WT_INSECURE, WT_HOST). They are compiled in only with the
 /// `test-hooks` feature, so release apps always verify WebTransport certificates against the
 /// public roots, whatever the environment says.
-#[cfg(feature = "test-hooks")]
+#[cfg(all(feature = "test-hooks", not(target_arch = "wasm32")))]
 fn test_hook_env(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
 
-#[cfg(not(feature = "test-hooks"))]
+#[cfg(all(not(feature = "test-hooks"), not(target_arch = "wasm32")))]
 fn test_hook_env(_name: &str) -> Option<String> {
     None
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn wt_client_crypto() -> anyhow::Result<rustls::ClientConfig> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -198,10 +199,12 @@ fn wt_client_crypto() -> anyhow::Result<rustls::ClientConfig> {
     Ok(crypto)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn create_wt_client_endpoint() -> anyhow::Result<quinn::Endpoint> {
     create_wt_client_endpoint_for("0.0.0.0:0".parse()?)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn create_wt_client_endpoint_for(bind: std::net::SocketAddr) -> anyhow::Result<quinn::Endpoint> {
     let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(wt_client_crypto()?)?;
     let mut client_config = quinn::ClientConfig::new(Arc::new(quic_config));
@@ -233,17 +236,21 @@ impl ActiveTransport {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 const WT_BACKOFF_BASE: Duration = Duration::from_secs(60);
+#[cfg(not(target_arch = "wasm32"))]
 const WT_BACKOFF_MAX: Duration = Duration::from_secs(30 * 60);
 
 /// Remembers WebTransport failures so `Auto` does not pay the handshake timeout on every
 /// reconnect when UDP is blocked.
 #[derive(Default, Debug)]
+#[cfg(not(target_arch = "wasm32"))]
 struct WtBackoff {
     failures: u32,
     retry_after_ms: u64,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl WtBackoff {
     fn allowed(&self, now_ms: u64) -> bool {
         now_ms >= self.retry_after_ms
@@ -274,10 +281,12 @@ fn reconnect_delay(base: Duration, failures: u32) -> Duration {
 }
 
 enum EstablishedTransport {
-    WebSocket(WebSocketStream<MaybeTlsStream<TcpStream>>),
+    WebSocket(WsStream),
+    #[cfg(not(target_arch = "wasm32"))]
     WebTransport(web_transport_quinn::Session),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn wt_connect_timeout() -> Duration {
     std::env::var("FIREFLY_WT_CONNECT_TIMEOUT_MS")
         .ok()
@@ -335,7 +344,7 @@ use crate::{
         DEFAULT_CHUNK_SIZE, MAX_CHUNK_BYTES, history_chunk_url, validate_chunk_records,
     },
     storage::{FavouriteMessage, FavouriteMessageStorage},
-    logger::CURRENT_CLIENT,
+    rt::CURRENT_CLIENT,
     utils::{
         HTTP_CLIENT, deserialize_proto, get_current_timestamp_microseconds_since_epoch,
         get_current_timestamp_millis_since_epoch, get_current_timestamp_seconds_since_epoch, rng,
@@ -384,9 +393,10 @@ impl FireflyWsClientCallback for InternalSignalCallback {
 }
 
 pub struct Connection {
-    sender_task: tokio::task::JoinHandle<()>,
-    receiver_task: tokio::task::JoinHandle<()>,
+    sender_task: crate::rt::JoinHandle<()>,
+    receiver_task: crate::rt::JoinHandle<()>,
     sender: Sender<Bytes>,
+    #[cfg(not(target_arch = "wasm32"))]
     session: Option<web_transport_quinn::Session>,
     last_message_sent_ts_secs: Arc<AtomicU64>,
 }
@@ -396,7 +406,12 @@ const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 /// How often the WebSocket transport pings the server.
 const WS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 /// Silence after which the WebSocket connection is treated as dead (three missed pongs).
+#[cfg(not(target_arch = "wasm32"))]
 const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Browsers cannot send WebSocket pings, so an idle connection is legitimately silent there;
+/// the browser reports dead connections through `close` instead.
+#[cfg(target_arch = "wasm32")]
+const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(u32::MAX as u64 / 1000);
 /// Upper bound for opening a WebSocket connection (TCP + TLS + upgrade).
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -405,7 +420,7 @@ impl Connection {
         callbacks: Arc<dyn FireflyWsClientCallback>,
         key_stores: Arc<FfiKeyStores>,
         pending_requests: PendingRequests,
-        stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
+        stream: WsStream,
         on_connection_closed: oneshot::Sender<()>,
         key_value_store: KeyValueStore,
         firefly_mls_client: Arc<FfiMlsClient>,
@@ -425,11 +440,11 @@ impl Connection {
         let (mut ws_sender, mut ws_receiver) = stream.split();
         let sender2 = sender.clone();
         let id = callbacks.name().to_string();
-        let receiver_task = tokio::spawn(CURRENT_CLIENT.scope(id.clone(), async move {
+        let receiver_task = crate::rt::spawn(CURRENT_CLIENT.scope(id.clone(), async move {
             loop {
                 // The sender pings every WS_KEEPALIVE_INTERVAL and the server answers, so silence
                 // means the network is gone (e.g. packets dropped) even though TCP hasn't noticed.
-                let msg = match tokio::time::timeout(WS_IDLE_TIMEOUT, ws_receiver.next()).await {
+                let msg = match crate::rt::timeout(WS_IDLE_TIMEOUT, ws_receiver.next()).await {
                     Ok(Some(Ok(msg))) => msg,
                     Ok(Some(Err(err))) => {
                         log::info!("ws read failed: {}", err);
@@ -497,9 +512,8 @@ impl Connection {
         let sender_task = {
             let last_message_sent_ts_secs = last_message_sent_ts_secs.clone();
             let id = id.clone();
-            tokio::spawn(CURRENT_CLIENT.scope(id.clone(), async move {
-                let mut keepalive = tokio::time::interval(WS_KEEPALIVE_INTERVAL);
-                keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            crate::rt::spawn(CURRENT_CLIENT.scope(id.clone(), async move {
+                let mut keepalive = crate::rt::interval(WS_KEEPALIVE_INTERVAL);
                 keepalive.tick().await;
                 loop {
                     tokio::select! {
@@ -531,9 +545,9 @@ impl Connection {
             let last_message_sent_ts_secs = last_message_sent_ts_secs.clone();
 
             let id = id.clone();
-            tokio::spawn(CURRENT_CLIENT.scope(id, async move {
+            crate::rt::spawn(CURRENT_CLIENT.scope(id, async move {
                 loop {
-                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    crate::rt::sleep(Duration::from_secs(10)).await;
 
                     let now_secs = get_current_timestamp_seconds_since_epoch();
                     let last_sent_secs =
@@ -559,11 +573,13 @@ impl Connection {
             sender_task,
             receiver_task,
             sender,
+            #[cfg(not(target_arch = "wasm32"))]
             session: None,
             last_message_sent_ts_secs,
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new_webtransport(
         callbacks: Arc<dyn FireflyWsClientCallback>,
         key_stores: Arc<FfiKeyStores>,
@@ -590,7 +606,7 @@ impl Connection {
         let pending_requests_for_sender = pending_requests.clone();
 
         let session_recv = session.clone();
-        let receiver_task = tokio::spawn(CURRENT_CLIENT.scope(id.clone(), async move {
+        let receiver_task = crate::rt::spawn(CURRENT_CLIENT.scope(id.clone(), async move {
             while let Ok(mut uni_stream) = session_recv.accept_uni().await {
                 let callbacks = callbacks.clone();
                 let key_stores = key_stores.clone();
@@ -603,7 +619,7 @@ impl Connection {
                 let sender2 = sender2.clone();
                 let firefly_base_url = firefly_base_url.clone();
 
-                tokio::spawn(async move {
+                crate::rt::spawn(async move {
                     let mut len_buf = [0u8; 4];
                     while let Ok(()) = uni_stream.read_exact(&mut len_buf).await {
                         let len = u32::from_be_bytes(len_buf) as usize;
@@ -650,7 +666,7 @@ impl Connection {
         let last_message_sent_ts_secs =
             Arc::new(AtomicU64::new(get_current_timestamp_seconds_since_epoch()));
         let sender_last_sent = last_message_sent_ts_secs.clone();
-        let sender_task = tokio::spawn(CURRENT_CLIENT.scope(id.clone(), async move {
+        let sender_task = crate::rt::spawn(CURRENT_CLIENT.scope(id.clone(), async move {
             // Streams are opened sequentially, so their QUIC stream ids preserve the order the
             // messages were queued in; the server dispatches uni streams in id order.
             while let Some(msg) = receiver.recv().await {
@@ -665,7 +681,7 @@ impl Connection {
                             let _ = send_stream.write_all(&msg).await;
                             let _ = send_stream.finish();
                             let pending_requests = pending_requests_for_sender.clone();
-                            tokio::spawn(async move {
+                            crate::rt::spawn(async move {
                                 let mut len_buf = [0u8; 4];
                                 if recv_stream.read_exact(&mut len_buf).await.is_err() {
                                     return;
@@ -737,9 +753,13 @@ impl Connection {
     }
 
     pub fn is_webtransport(&self) -> bool {
-        self.session.is_some()
+        #[cfg(not(target_arch = "wasm32"))]
+        return self.session.is_some();
+        #[cfg(target_arch = "wasm32")]
+        return false;
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn session(&self) -> Option<web_transport_quinn::Session> {
         self.session.clone()
     }
@@ -749,6 +769,7 @@ impl Drop for Connection {
     fn drop(&mut self) {
         self.sender_task.abort();
         self.receiver_task.abort();
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(session) = &self.session {
             session.close(0u32.into(), b"connection dropped");
         }
@@ -801,6 +822,7 @@ pub struct FireflyWsClient {
 
     pending_requests: PendingRequests,
 
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     request_timeout: Duration,
     stop_reconnecting: AtomicBool,
 
@@ -822,7 +844,9 @@ pub struct FireflyWsClient {
     pub transport: TransportProtocol,
     firefly_base_wt_url: Option<String>,
     message_requests_store: MessageRequestsStore,
+    #[cfg(not(target_arch = "wasm32"))]
     wt_backoff: std::sync::Mutex<WtBackoff>,
+    #[cfg(not(target_arch = "wasm32"))]
     wt_endpoints: std::sync::Mutex<(Option<quinn::Endpoint>, Option<quinn::Endpoint>)>,
     active_transport: std::sync::RwLock<Option<ActiveTransport>>,
 }
@@ -978,7 +1002,9 @@ impl FireflyWsClient {
             last_connection_error: std::sync::Mutex::new(None),
             firefly_base_wt_url,
             message_requests_store,
+            #[cfg(not(target_arch = "wasm32"))]
             wt_backoff: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
             wt_endpoints: Default::default(),
             active_transport: Default::default(),
         })
@@ -1019,7 +1045,7 @@ impl FireflyWsClient {
             if self.addressId.load(std::sync::atomic::Ordering::Relaxed) != 0 {
                 break;
             }
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            crate::rt::sleep(Duration::from_secs(2)).await;
         }
 
         {
@@ -1054,7 +1080,7 @@ impl FireflyWsClient {
                         .stop_reconnecting
                         .load(std::sync::atomic::Ordering::Relaxed)
                     {
-                        tokio::time::sleep(reconnect_delay(self.retry_interval, consecutive_failures)).await;
+                        crate::rt::sleep(reconnect_delay(self.retry_interval, consecutive_failures)).await;
                     }
                 })
                 .await;
@@ -1067,8 +1093,11 @@ impl FireflyWsClient {
         Ok(())
     }
 
-    /// The WebTransport URL to try first, if any.
+    /// The WebTransport URL to try first, if any. Browsers only get the WebSocket transport.
     fn wt_candidate(&self) -> Option<String> {
+        if cfg!(target_arch = "wasm32") {
+            return None;
+        }
         if self.transport == TransportProtocol::WebSocket {
             return None;
         }
@@ -1113,6 +1142,7 @@ impl FireflyWsClient {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn wt_endpoint(&self, ipv6: bool) -> anyhow::Result<quinn::Endpoint> {
         let mut endpoints = self.wt_endpoints.lock().unwrap();
         let slot = if ipv6 { &mut endpoints.1 } else { &mut endpoints.0 };
@@ -1129,6 +1159,7 @@ impl FireflyWsClient {
         Ok(endpoint)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Opens a QUIC connection to the WebTransport host, trying IPv4 before IPv6.
     async fn connect_quic(&self, parsed_url: &reqwest::Url) -> anyhow::Result<quinn::Connection> {
         let host_str = parsed_url.host_str().unwrap_or("localhost").to_string();
@@ -1164,6 +1195,7 @@ impl FireflyWsClient {
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("QUIC connection failed")))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     async fn connect_wt(&self, base_wt: &str, query: &str) -> anyhow::Result<web_transport_quinn::Session> {
         let mut base_wt = base_wt.trim_end_matches('/').to_string();
         if let Some(exp_h) = test_hook_env("WT_HOST") {
@@ -1177,15 +1209,12 @@ impl FireflyWsClient {
         Ok(session)
     }
 
-    async fn connect_ws(
-        &self,
-        base_ws: &str,
-        query: &str,
-    ) -> anyhow::Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn connect_ws(&self, base_ws: &str, query: &str) -> anyhow::Result<WsStream> {
         let url = format!("{}/?{}", base_ws.trim_end_matches('/'), query);
         // On a network that drops packets the TCP handshake alone can take minutes to fail,
         // which would hold up reconnecting once the network is back.
-        let connected = tokio::time::timeout(WS_CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&url))
+        let connected = crate::rt::timeout(WS_CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&url))
             .await
             .map_err(|_| anyhow::anyhow!("websocket connect timed out after {:?}", WS_CONNECT_TIMEOUT))?;
         match connected {
@@ -1205,6 +1234,7 @@ impl FireflyWsClient {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn is_wt_auth_error(err: &anyhow::Error) -> bool {
         matches!(
             err.downcast_ref::<web_transport_quinn::ClientError>(),
@@ -1214,11 +1244,24 @@ impl FireflyWsClient {
         )
     }
 
+    /// The browser hides the upgrade response, so a rejected token surfaces only as a failed
+    /// connect; token refresh happens through `get_access_token` before each attempt.
+    #[cfg(target_arch = "wasm32")]
+    async fn connect_ws(&self, base_ws: &str, query: &str) -> anyhow::Result<WsStream> {
+        let url = format!("{}/?{}", base_ws.trim_end_matches('/'), query);
+        let stream = crate::rt::timeout(WS_CONNECT_TIMEOUT, crate::transport::connect(&url))
+            .await
+            .map_err(|_| anyhow::anyhow!("websocket connect timed out after {:?}", WS_CONNECT_TIMEOUT))??;
+        Ok(stream)
+    }
+
     /// WebTransport first, WebSocket as the fallback.
     async fn establish(&self, query: &str) -> anyhow::Result<EstablishedTransport> {
+        #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
         let wt_url = self.wt_candidate();
         let ws_url = self.ws_candidate();
 
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(wt_url) = wt_url {
             let now = get_current_timestamp_millis_since_epoch();
             let allowed = ws_url.is_none() || self.wt_backoff.lock().unwrap().allowed(now);
@@ -1228,7 +1271,7 @@ impl FireflyWsClient {
                 } else {
                     self.request_timeout.max(Duration::from_secs(15))
                 };
-                let result = match tokio::time::timeout(timeout, self.connect_wt(&wt_url, query)).await {
+                let result = match crate::rt::timeout(timeout, self.connect_wt(&wt_url, query)).await {
                     Ok(result) => result,
                     Err(_) => Err(anyhow::anyhow!("WebTransport handshake timed out after {:?}", timeout)),
                 };
@@ -1270,6 +1313,12 @@ impl FireflyWsClient {
 
     /// While on the WebSocket fallback, periodically checks whether UDP/QUIC is reachable again
     /// and returns once it is, so the caller can reconnect over WebTransport.
+    #[cfg(target_arch = "wasm32")]
+    async fn wait_for_wt_recovery(&self) {
+        futures::future::pending().await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     async fn wait_for_wt_recovery(&self) {
         let Some(wt_url) = self.wt_candidate() else {
             return futures::future::pending().await;
@@ -1281,7 +1330,7 @@ impl FireflyWsClient {
             return futures::future::pending().await;
         };
         loop {
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            crate::rt::sleep(Duration::from_secs(30)).await;
             let now = get_current_timestamp_millis_since_epoch();
             if !self.wt_backoff.lock().unwrap().allowed(now) {
                 continue;
@@ -1294,7 +1343,7 @@ impl FireflyWsClient {
             if idle < 30 {
                 continue;
             }
-            match tokio::time::timeout(wt_connect_timeout(), self.connect_quic(&parsed_url)).await {
+            match crate::rt::timeout(wt_connect_timeout(), self.connect_quic(&parsed_url)).await {
                 Ok(Ok(conn)) => {
                     conn.close(0u32.into(), b"probe");
                     self.wt_backoff.lock().unwrap().record_success();
@@ -1537,6 +1586,7 @@ impl FireflyWsClient {
         let established = self.establish(&query).await?;
         let active = match &established {
             EstablishedTransport::WebSocket(_) => ActiveTransport::WebSocket,
+            #[cfg(not(target_arch = "wasm32"))]
             EstablishedTransport::WebTransport(_) => ActiveTransport::WebTransport,
         };
 
@@ -1595,6 +1645,7 @@ impl FireflyWsClient {
                     self.firefly_base_url.clone(),
                     signal_tx,
                 ),
+                #[cfg(not(target_arch = "wasm32"))]
                 EstablishedTransport::WebTransport(session) => Connection::new_webtransport(
                     callbacks,
                     key_stores,
@@ -1665,11 +1716,13 @@ impl FireflyWsClient {
     }
 
     pub async fn request(&self, request: firefly::Request<'_>) -> anyhow::Result<Bytes> {
+        #[cfg(not(target_arch = "wasm32"))]
         let maybe_session = {
             let g = self.connection.read().await;
             g.as_ref().and_then(|c| c.session())
         };
 
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(session) = maybe_session {
             let (mut send_stream, mut recv_stream) = session
                 .open_bi()
@@ -1712,11 +1765,12 @@ impl FireflyWsClient {
 
             if let firefly::mod_ServerMessage::OneOfmessage::response(response) = server_msg.message {
                 let response_bytes = serialize_proto(&response)?;
-                Ok(Bytes::from(response_bytes))
+                return Ok(Bytes::from(response_bytes));
             } else {
-                Err(anyhow::anyhow!("unexpected message received on WT RPC bi-stream"))
+                return Err(anyhow::anyhow!("unexpected message received on WT RPC bi-stream"));
             }
-        } else {
+        }
+        {
             let (tx, rx) = oneshot::channel();
             let id = {
                 self.next_request_id
@@ -1970,7 +2024,7 @@ impl FireflyWsClient {
             {
                 Err(err) if attempt < 4 && format!("{err:#}").contains("database is locked") => {
                     log::warn!("encrypt for {} hit a locked database, retrying (attempt {})", address, attempt);
-                    tokio::time::sleep(delay).await;
+                    crate::rt::sleep(delay).await;
                     delay *= 3;
                 }
                 result => return result,
@@ -3062,7 +3116,7 @@ impl FireflyWsClient {
         let is_owner = group.is_owner().await.unwrap_or(false);
         if !is_owner {
             // Non-owners wait 1.5s to let the group owner prioritize handling the re-add
-            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            crate::rt::sleep(std::time::Duration::from_millis(1500)).await;
         }
 
         let claim_res = HTTP_CLIENT
@@ -4677,7 +4731,7 @@ impl FireflyWsClient {
         #[derive(serde::Deserialize)]
         struct Policy { group_id: u64, is_member: bool, settings: u32 }
         let token=self.callbacks.get_access_token().await.context("Authentication required")?;
-        let response=reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(10)).build()?
+        let response=crate::utils::no_redirect_client(Some(Duration::from_secs(10)))?
             .get(format!("{}/group/policy?id={}",self.firefly_base_url.trim_end_matches('/'),group_id)).bearer_auth(token).send().await?.error_for_status()?;
         let policy: Policy=serde_json::from_slice(&response.bytes().await?)?;
         Ok(policy.group_id==group_id && policy.is_member && policy.settings & 2 != 0)
@@ -4756,7 +4810,7 @@ impl FireflyWsClient {
                 if messages.len()>=DEFAULT_CHUNK_SIZE {messages.truncate(DEFAULT_CHUNK_SIZE);break;}
                 if exhausted {break;}
                 scan=end.saturating_add(1);
-                tokio::task::yield_now().await;
+                crate::rt::yield_now().await;
             }
             if messages.len()<DEFAULT_CHUNK_SIZE {return Ok(());}
             if !self.history_enabled(group_id).await? {return Ok(());}
@@ -4785,13 +4839,13 @@ impl FireflyWsClient {
                 cursor=chunk.end_msg_id;
             } else {
                 if !is_owner {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    crate::rt::sleep(std::time::Duration::from_millis(500)).await;
                 }
                 if !self.claim_group_history_request(group_id,0,start,end).await? {
                     let cb = self.callbacks.clone();
                     let u = self.callbacks.name().to_string();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    crate::rt::spawn(async move {
+                        crate::rt::sleep(std::time::Duration::from_secs(5)).await;
                         cb.on_group_history_signal(crate::callbacks::GroupHistorySignal {
                             group_id, signal_type: 6, request_id: 0, chunk_id: 0, username: u,
                         }).await;
@@ -4861,7 +4915,7 @@ impl FireflyWsClient {
         let bytes=self.request(reservation).await?;
         let reply=deserialize_proto::<firefly::Response>(&bytes)?;
         if let Some(error)=reply.error {anyhow::bail!("History upload reservation denied: {}",error.error);}
-        let response = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(30)).build()?
+        let response = crate::utils::no_redirect_client(Some(Duration::from_secs(30)))?
             .put(upload_url.clone())
             .bearer_auth(token)
             .header("Content-Type", "application/octet-stream")
@@ -5270,7 +5324,7 @@ async fn on_user_message(
             Ok(d) => break d,
             Err(err) if attempt < 4 && err.to_string().contains("database is locked") => {
                 log::warn!("decrypt from {} hit a locked database, retrying (attempt {})", address, attempt);
-                tokio::time::sleep(delay).await;
+                crate::rt::sleep(delay).await;
                 delay *= 3;
                 attempt += 1;
             }
@@ -5586,7 +5640,7 @@ async fn re_add_member_internal(
     let is_owner = group.is_owner().await.unwrap_or(false);
     if !is_owner {
         // Non-owners wait 1.5s to let the group owner prioritize handling the re-add
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        crate::rt::sleep(std::time::Duration::from_millis(1500)).await;
     }
 
     if let Some(token) = callbacks.get_access_token().await {
@@ -6019,7 +6073,7 @@ async fn on_server_message(
                 let snd = sender.clone();
                 let cb = callbacks.clone();
                 let base_url = firefly_base_url.to_string();
-                tokio::spawn(async move {
+                crate::rt::spawn(async move {
                     if let Err(err) = re_add_member_internal(
                         &req_owned,
                         0,
@@ -6054,7 +6108,7 @@ async fn on_server_message(
                 let pr = pending_requests.clone();
                 let snd = sender.clone();
                 let cb = callbacks.clone();
-                tokio::spawn(async move {
+                crate::rt::spawn(async move {
                     if let Err(err) = add_member_internal(
                         group_id,
                         username,
@@ -6947,6 +7001,13 @@ impl FfiFireflyWsClient {
 
     pub fn address_id(&self) -> u64 {
         self.inner.address_id()
+    }
+
+    /// The address this device registered with the server earlier, read from local storage;
+    /// 0 means connecting will register a brand new device (which may evict another one).
+    pub async fn registered_address_id(&self) -> anyhow::Result<u64> {
+        let identity = self.inner.key_stores.store().identity_store.get_full_identity_key_pair().await?;
+        Ok(identity.id as u64)
     }
 
     pub async fn get_device_id(&self) -> u32 {

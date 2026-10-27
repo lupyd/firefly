@@ -216,10 +216,7 @@ impl FireflyWsClient {
         id: &str,
     ) -> anyhow::Result<Option<(String, Vec<u8>)>> {
         // No bearer/cookie/key in this download request, even for the API origin.
-        let mut response = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(30))
-            .build()?
+        let response = crate::utils::no_redirect_client(Some(Duration::from_secs(30)))?
             .get(self.snapshot_url(g, kind, id))
             .send()
             .await?;
@@ -249,14 +246,7 @@ impl FireflyWsClient {
             response.content_length().is_none_or(|n| n <= max as u64),
             "Snapshot exceeds limit"
         );
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await? {
-            anyhow::ensure!(
-                bytes.len().saturating_add(chunk.len()) <= max,
-                "Snapshot exceeds limit"
-            );
-            bytes.extend_from_slice(&chunk);
-        }
+        let bytes = crate::utils::read_body_limited(response, max, "Snapshot exceeds limit").await?;
         Ok(Some((current, bytes)))
     }
     async fn validated_snapshot(
@@ -358,10 +348,7 @@ impl FireflyWsClient {
                 .get_access_token()
                 .await
                 .context("Not authenticated")?;
-            let response = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(30))
-                .build()?
+            let response = crate::utils::no_redirect_client(Some(Duration::from_secs(30)))?
                 .post(self.snapshot_url(g, kind, &secret.snapshot_id))
                 .bearer_auth(token)
                 .header("X-Snapshot-Id", secret.snapshot_id.as_ref())

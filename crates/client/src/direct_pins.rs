@@ -146,13 +146,7 @@ async fn body(response: reqwest::Response) -> anyhow::Result<Vec<u8>> {
         response.content_length().is_none_or(|n| n <= LIMIT as u64),
         "Pinned snapshot too large"
     );
-    let mut out = Vec::new();
-    let mut response = response;
-    while let Some(part) = response.chunk().await? {
-        anyhow::ensure!(out.len() + part.len() <= LIMIT, "Pinned snapshot too large");
-        out.extend_from_slice(&part);
-    }
-    Ok(out)
+    crate::utils::read_body_limited(response, LIMIT, "Pinned snapshot too large").await
 }
 
 pub async fn publish(
@@ -165,9 +159,7 @@ pub async fn publish(
         messages.iter().all(|m| m.other == other),
         "Pinned message conversation mismatch"
     );
-    let http = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+    let http = crate::utils::no_redirect_client(None)?;
     let url = format!("{}/direct-pins/{}", base.trim_end_matches('/'), peer(other)?);
     let expected = match http.get(&url).bearer_auth(token).send().await {
         Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => String::new(),
@@ -248,9 +240,7 @@ pub async fn apply(
         base.trim_end_matches('/'),
         peer(peer_username)?
     );
-    let response = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?
+    let response = crate::utils::no_redirect_client(None)?
         .get(url)
         .bearer_auth(token)
         .send()

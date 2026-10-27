@@ -18,35 +18,9 @@ pub use firefly_core::storage_provider::{
 // Common Data Models
 // ---------------------------------------------------------------------------
 
-#[cfg(not(target_arch = "wasm32"))]
 pub use crate::db::messages::UserMessage;
 
-#[cfg(target_arch = "wasm32")]
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct UserMessage {
-    pub id: u64,
-    pub other: String,
-    pub message: Vec<u8>,
-    pub sent_by_other: bool,
-    #[serde(default)]
-    pub message_type: u32,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 pub use crate::db::group_messages::GroupMessage;
-
-#[cfg(target_arch = "wasm32")]
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct GroupMessage {
-    pub id: u64,
-    pub group_id: u64,
-    pub by: String,
-    pub message: Vec<u8>,
-    pub channel_id: u32,
-    pub epoch: u32,
-    #[serde(default)]
-    pub message_type: u32,
-}
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GroupInfo {

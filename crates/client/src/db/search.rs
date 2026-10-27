@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use crate::sql::{Row, SqlitePool};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -257,7 +257,7 @@ impl SearchEngine {
                     LIMIT ? OFFSET ?
                 "#;
 
-                let rows = sqlx::query(sql)
+                let rows = crate::sql::query(sql)
                     .bind(&fts_query)
                     .bind(&fts_query)
                     .bind(limit as i64)
@@ -345,7 +345,7 @@ impl SearchEngine {
             )
         };
 
-        let mut query = sqlx::query(sql).bind(fts_query);
+        let mut query = crate::sql::query(sql).bind(fts_query);
         if bind_other {
             query = query.bind(other.unwrap());
         }
@@ -415,7 +415,7 @@ impl SearchEngine {
             "#
         );
 
-        let mut query = sqlx::query(&sql).bind(fts_query);
+        let mut query = crate::sql::query(&sql).bind(fts_query);
         if let Some(gid) = group_id {
             query = query.bind(gid as i64);
         }
@@ -453,7 +453,7 @@ mod tests {
     use super::*;
     use crate::db::messages::{MessagesStore, UserMessage};
     use crate::db::group_messages::GroupMessagesStore;
-    use sqlx::sqlite::SqlitePoolOptions;
+    use crate::sql::sqlite::SqlitePoolOptions;
 
     async fn setup_test_db() -> SqlitePool {
         SqlitePoolOptions::new()

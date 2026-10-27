@@ -20,10 +20,8 @@ use crate::storage::{
     GroupDepartureStorage, GroupInfoStorage, KeyValueGroupDepartureStore, KeyValueStorage,
 };
 
-#[cfg(not(target_arch = "wasm32"))]
-use sqlx::SqlitePool;
+use crate::sql::SqlitePool;
 
-#[cfg(not(target_arch = "wasm32"))]
 use crate::db::{
     group_stores::{
         GroupDepartureStore, GroupInfoStore, GroupKeyPackageStore, GroupPskStore, GroupStateStore,
@@ -64,7 +62,6 @@ impl FfiMlsClient {
         self.client.get_identity();
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub async fn initialize(
         device_id: u8,
         address_id: u64,

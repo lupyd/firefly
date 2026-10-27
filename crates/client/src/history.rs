@@ -336,14 +336,9 @@ pub async fn download_history_blob(base: &str, group_id: u64, url_or_path: &str)
         let url = history_chunk_url(base, url_or_path, group_id)?;
         // Encrypted chunks are public opaque blobs. Never send an account bearer
         // token or decryption key to the CDN, including on redirects.
-        let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(30)).build()?;
-        let mut response = client.get(url).send().await?;
+        let client = crate::utils::no_redirect_client(Some(std::time::Duration::from_secs(30)))?;
+        let response = client.get(url).send().await?;
         anyhow::ensure!(response.status().is_success(), "History download failed: {}", response.status());
         anyhow::ensure!(response.content_length().unwrap_or(0) <= MAX_CHUNK_BYTES as u64, "History blob too large");
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await? {
-            anyhow::ensure!(bytes.len() + chunk.len() <= MAX_CHUNK_BYTES, "History blob exceeds limit");
-            bytes.extend_from_slice(&chunk);
-        }
-        Ok(bytes)
+        crate::utils::read_body_limited(response, MAX_CHUNK_BYTES, "History blob exceeds limit").await
     }

@@ -1,4 +1,4 @@
-use sqlx::{SqlitePool, prelude::*};
+use crate::sql::{SqlitePool, prelude::*};
 
 use crate::db::setup_pool_from_path;
 
@@ -75,7 +75,7 @@ impl MessagesStore {
         before: i64,
         limit: i64,
     ) -> anyhow::Result<Vec<UserMessage>> {
-        let rows = sqlx::query(
+        let rows = crate::sql::query(
             "SELECT other, message, sent_by_other, id, message_type FROM user_messages WHERE other = ? AND id < ? ORDER BY id DESC LIMIT ?",
         )
         .bind(other)
@@ -100,7 +100,7 @@ impl MessagesStore {
     }
 
     pub async fn get_pinned_messages_of(&self, other: &str) -> anyhow::Result<Vec<UserMessage>> {
-        let rows = sqlx::query(
+        let rows = crate::sql::query(
             "SELECT other, message, sent_by_other, id, message_type FROM user_messages WHERE other = ? AND (message_type & 1) != 0 ORDER BY id ASC",
         )
         .bind(other)
@@ -148,7 +148,7 @@ impl MessagesStore {
                     ON m.other = s.other
                     AND m.id = s.last_id;"#;
 
-        let rows = sqlx::query(q).fetch_all(&self.pool).await?;
+        let rows = crate::sql::query(q).fetch_all(&self.pool).await?;
         let mut messages = Vec::<LastMessageAndUnreadCount>::with_capacity(rows.len());
 
         for row in rows {
@@ -173,7 +173,7 @@ impl MessagesStore {
 
     pub async fn insert_user_message(&self, row: UserMessage) -> anyhow::Result<()> {
         let text = searchable_user_message_text(&row.message, row.message_type);
-        sqlx::query(
+        crate::sql::query(
             "INSERT INTO user_messages (id, other, message, sent_by_other, message_type, text) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(row.id as i64)
@@ -190,7 +190,7 @@ impl MessagesStore {
 
     /// Peers this account sent at least one visible (non-hidden) message to.
     pub async fn peers_messaged_by_me(&self) -> anyhow::Result<Vec<String>> {
-        let rows = sqlx::query(
+        let rows = crate::sql::query(
             "SELECT DISTINCT other FROM user_messages WHERE sent_by_other = 0 AND (message_type & 2) = 0",
         )
         .fetch_all(&self.pool)
@@ -201,7 +201,7 @@ impl MessagesStore {
     }
 
     pub async fn has_user_message(&self, id: u64) -> anyhow::Result<bool> {
-        let row = sqlx::query("SELECT 1 FROM user_messages WHERE id = ? LIMIT 1")
+        let row = crate::sql::query("SELECT 1 FROM user_messages WHERE id = ? LIMIT 1")
             .bind(id as i64)
             .fetch_optional(&self.pool)
             .await?;
@@ -210,7 +210,7 @@ impl MessagesStore {
 
     pub async fn mark_as_read_until(&self, other: &str, id: i64) -> anyhow::Result<()> {
         let q = "INSERT OR REPLACE INTO last_seen_user_timestamps (other, id) VALUES (?, ?)";
-        sqlx::query(q)
+        crate::sql::query(q)
             .bind(other)
             .bind(id)
             .execute(&self.pool)
@@ -220,7 +220,7 @@ impl MessagesStore {
     }
 
     pub async fn delete_user_message(&self, other: &str, id: u64) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM user_messages WHERE other = ? AND id = ?")
+        crate::sql::query("DELETE FROM user_messages WHERE other = ? AND id = ?")
             .bind(other)
             .bind(id as i64)
             .execute(&self.pool)
@@ -229,11 +229,11 @@ impl MessagesStore {
     }
 
     pub async fn delete_user_conversation(&self, other: &str) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM user_messages WHERE other = ?")
+        crate::sql::query("DELETE FROM user_messages WHERE other = ?")
             .bind(other)
             .execute(&self.pool)
             .await?;
-        sqlx::query("DELETE FROM last_seen_user_timestamps WHERE other = ?")
+        crate::sql::query("DELETE FROM last_seen_user_timestamps WHERE other = ?")
             .bind(other)
             .execute(&self.pool)
             .await?;
@@ -247,7 +247,7 @@ impl MessagesStore {
         message: Vec<u8>,
     ) -> anyhow::Result<()> {
         let text = extract_user_message_text(&message);
-        sqlx::query("UPDATE user_messages SET message = ?1, text = CASE WHEN (message_type & 6) != 0 THEN '' ELSE ?2 END WHERE other = ?3 AND id = ?4")
+        crate::sql::query("UPDATE user_messages SET message = ?1, text = CASE WHEN (message_type & 6) != 0 THEN '' ELSE ?2 END WHERE other = ?3 AND id = ?4")
             .bind(message)
             .bind(text)
             .bind(other)
@@ -301,7 +301,7 @@ impl MessagesStore {
             )
         };
 
-        let mut q = sqlx::query(sql).bind(&fts_query);
+        let mut q = crate::sql::query(sql).bind(&fts_query);
         if has_other {
             q = q.bind(other.unwrap());
         }
@@ -335,7 +335,7 @@ impl MessagesStore {
         message_type: u32,
     ) -> anyhow::Result<()> {
         // Becoming hidden blanks the text so the FTS update trigger drops it from the index.
-        sqlx::query("UPDATE user_messages SET message_type = ?1, text = CASE WHEN (?1 & 6) != 0 THEN '' ELSE text END WHERE other = ?2 AND id = ?3")
+        crate::sql::query("UPDATE user_messages SET message_type = ?1, text = CASE WHEN (?1 & 6) != 0 THEN '' ELSE text END WHERE other = ?2 AND id = ?3")
             .bind(message_type as i64)
             .bind(other)
             .bind(id as i64)

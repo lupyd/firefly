@@ -5,9 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-tokio::task_local! {
-    pub static CURRENT_CLIENT: String;
-}
+pub use crate::rt::CURRENT_CLIENT;
 
 pub struct TeeLogger {
     android: android_logger::AndroidLogger,

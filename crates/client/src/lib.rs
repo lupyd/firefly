@@ -10,33 +10,29 @@ pub use libsignal_protocol;
 
 pub mod callbacks;
 
-#[cfg(not(target_arch = "wasm32"))]
 pub mod db;
 
 pub mod error;
 
 pub mod group;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod history;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod direct_backups;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod direct_pins;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod logger;
 
+pub mod rt;
 pub mod schema;
+pub mod sql;
 pub mod storage;
+pub mod transport;
 pub mod utils;
 
-#[cfg(not(target_arch = "wasm32"))]
 pub mod receipt_coordinator;
 
-#[cfg(not(target_arch = "wasm32"))]
 pub mod websocket;
 
-#[cfg(not(target_arch = "wasm32"))]
 pub use websocket::{
     ActiveTransport, FfiFireflyWsClient, FfiFireflyWtClient, FireflyWsClient, FireflyWtClient,
     TransportProtocol,
@@ -46,7 +42,6 @@ pub use storage::{
     FavouriteMessage, FavouriteMessageStorage, FavouriteSource, MemoryFavouriteMessageStore,
 };
 
-#[cfg(not(target_arch = "wasm32"))]
 pub use db::favourites::{FavoriteMessagesStore, FavouriteMessagesStore};
 
 #[derive(Debug)]
