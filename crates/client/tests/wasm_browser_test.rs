@@ -147,3 +147,12 @@ async fn client_constructs_on_opfs() {
     assert!(matches!(client.get_connection_state(), ConnectionState::Disconnected));
     client.dispose().await;
 }
+
+#[wasm_bindgen_test]
+async fn very_long_timeouts_do_not_fire_early() {
+    // setTimeout overflows above 2^31-1 ms and fires at once; rt clamps instead. The WebSocket
+    // idle timeout relies on this to mean "never".
+    let never = std::time::Duration::from_secs(u32::MAX as u64 / 1000);
+    let result = firefly_client::rt::timeout(never, firefly_client::rt::sleep(std::time::Duration::from_millis(20))).await;
+    assert!(result.is_ok(), "a ~49 day timeout fired before a 20 ms sleep");
+}

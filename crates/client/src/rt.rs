@@ -116,9 +116,13 @@ mod wasm {
         JoinHandle { abort, result }
     }
 
+    /// Longest delay `setTimeout` honours; longer ones overflow and fire immediately.
+    const MAX_TIMER_MILLIS: u128 = i32::MAX as u128;
+
     /// `Send` so shared async code awaiting it stays `Send` (wasm runs a single thread).
+    /// Durations beyond the browser's timer limit (~24.8 days) are clamped to it.
     pub fn sleep(duration: Duration) -> impl Future<Output = ()> + Send {
-        let millis = duration.as_millis().min(u32::MAX as u128) as u32;
+        let millis = duration.as_millis().min(MAX_TIMER_MILLIS) as u32;
         SendWrapper(gloo_timers::future::TimeoutFuture::new(millis))
     }
 
