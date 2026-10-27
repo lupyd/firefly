@@ -27,7 +27,7 @@ mod browser {
     use futures::{Sink, Stream};
     use tokio::sync::{mpsc, oneshot};
     use wasm_bindgen::{JsCast, closure::Closure};
-    use web_sys::{BinaryType, CloseEvent, ErrorEvent, MessageEvent, WebSocket};
+    use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket};
 
     /// Mirrors the tungstenite variants the connection loop handles.
     #[derive(Debug, Clone)]
@@ -54,7 +54,7 @@ mod browser {
     type Handlers = (
         Closure<dyn FnMut()>,
         Closure<dyn FnMut(MessageEvent)>,
-        Closure<dyn FnMut(ErrorEvent)>,
+        Closure<dyn FnMut(Event)>,
         Closure<dyn FnMut(CloseEvent)>,
     );
 
@@ -114,8 +114,10 @@ mod browser {
         let on_error = {
             let tx = tx.clone();
             let open_tx = open_tx.clone();
-            Closure::<dyn FnMut(ErrorEvent)>::new(move |event: ErrorEvent| {
-                let message = format!("websocket error: {}", event.message());
+            // A WebSocket `error` is a plain Event with no detail; the following `close` event
+            // carries the code.
+            Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+                let message = "websocket error".to_string();
                 match open_tx.lock().unwrap().take() {
                     Some(open_tx) => {
                         let _ = open_tx.send(Err(WsError(message)));
