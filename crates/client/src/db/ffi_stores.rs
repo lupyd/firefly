@@ -1,12 +1,19 @@
 use libsignal_protocol::ProtocolAddress;
-use sqlx::SqlitePool;
+use crate::sql::SqlitePool;
 
 use crate::{EncryptedMessage, FfiPreKeyBundle, db::stores::KeyStores};
 
+/// libsignal's store futures are not `Send`, so every Signal operation runs on one dedicated
+/// executor and is reached through `Command`s: a separate thread with its own runtime natively,
+/// a local task on the browser's single thread.
 pub struct FfiKeyStores {
-    sender: std::sync::mpsc::Sender<Command>,
+    sender: tokio::sync::mpsc::UnboundedSender<Command>,
+    #[cfg(not(target_arch = "wasm32"))]
     #[allow(unused)]
     handler: std::thread::JoinHandle<()>,
+    #[cfg(target_arch = "wasm32")]
+    #[allow(unused)]
+    handler: crate::rt::JoinHandle<()>,
 
     stores: KeyStores,
 }
@@ -55,67 +62,69 @@ impl FfiKeyStores {
     pub async fn new(pool: SqlitePool) -> anyhow::Result<Self> {
         let stores = KeyStores::new(pool).await?;
 
-        let (sender, receiver) = std::sync::mpsc::channel::<Command>();
-        let s = stores.clone();
-        let handler = std::thread::spawn(move || {
-            let mut stores = s.clone();
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async move {
-                while let Ok(cmd) = receiver.recv() {
-                    match cmd {
-                        Command::Decrypt {
-                            other,
-                            cipher_text,
-                            ty,
-                            reply,
-                        } => {
-                            if let Err(err) =
-                                reply.send(stores.decrypt(other, cipher_text, ty).await)
-                            {
-                                log::error!("Error sending reply: {:?}", err);
-                            }
-                        }
-                        Command::Encrypt {
-                            other,
-                            plain_text,
-                            reply,
-                        } => {
-                            if let Err(err) = reply.send(stores.encrypt(other, plain_text).await) {
-                                log::error!("Error sending reply: {:?}", err);
-                            }
-                        }
-
-                        Command::ProcessPreKeyBundle {
-                            other,
-                            pre_key_bundle,
-                            reply,
-                        } => {
-                            if let Err(err) = reply
-                                .send(stores.process_pre_key_bundle(other, pre_key_bundle).await)
-                            {
-                                log::error!("Error sending reply: {:?}", err);
-                            }
-                        }
-
-                        Command::GeneratePreKeyBundle { reply } => {
-                            if let Err(_) = reply.send(stores.generate_prekey_bundle().await) {
-                                log::error!("Error sending Generated Pre Key Bundle");
-                            }
-                        }
-
-                        Command::Exit => {
-                            break;
-                        }
-                    }
-                }
-            });
-        });
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<Command>();
+        #[cfg(not(target_arch = "wasm32"))]
+        let handler = {
+            let stores = stores.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(run_commands(stores, receiver));
+            })
+        };
+        #[cfg(target_arch = "wasm32")]
+        let handler = crate::rt::spawn(run_commands(stores.clone(), receiver));
 
         Ok(Self {
             sender,
             handler,
             stores,
         })
+    }
+}
+
+async fn run_commands(mut stores: KeyStores, mut receiver: tokio::sync::mpsc::UnboundedReceiver<Command>) {
+    while let Some(cmd) = receiver.recv().await {
+        match cmd {
+            Command::Decrypt {
+                other,
+                cipher_text,
+                ty,
+                reply,
+            } => {
+                if let Err(err) = reply.send(stores.decrypt(other, cipher_text, ty).await) {
+                    log::error!("Error sending reply: {:?}", err);
+                }
+            }
+            Command::Encrypt {
+                other,
+                plain_text,
+                reply,
+            } => {
+                if let Err(err) = reply.send(stores.encrypt(other, plain_text).await) {
+                    log::error!("Error sending reply: {:?}", err);
+                }
+            }
+
+            Command::ProcessPreKeyBundle {
+                other,
+                pre_key_bundle,
+                reply,
+            } => {
+                if let Err(err) = reply.send(stores.process_pre_key_bundle(other, pre_key_bundle).await) {
+                    log::error!("Error sending reply: {:?}", err);
+                }
+            }
+
+            Command::GeneratePreKeyBundle { reply } => {
+                if let Err(_) = reply.send(stores.generate_prekey_bundle().await) {
+                    log::error!("Error sending Generated Pre Key Bundle");
+                }
+            }
+
+            Command::Exit => {
+                break;
+            }
+        }
     }
 }
 

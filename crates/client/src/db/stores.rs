@@ -1,8 +1,7 @@
-use std::time::SystemTime;
 
 use libsignal_protocol::{kem::KeyType, *};
 use rand::RngCore;
-use sqlx::{SqlitePool, prelude::*};
+use crate::sql::{SqlitePool, prelude::*};
 
 use crate::{
     EncryptedMessage, FfiPreKeyBundle,
@@ -30,7 +29,7 @@ impl PreKeyDb {
         &self,
         prekey_id: PreKeyId,
     ) -> Result<PreKeyRecord, SignalProtocolError> {
-        let result = sqlx::query("SELECT record FROM pre_keys WHERE id = ?")
+        let result = crate::sql::query("SELECT record FROM pre_keys WHERE id = ?")
             .bind(u32::from(prekey_id))
             .fetch_one(&self.pool)
             .await
@@ -47,7 +46,7 @@ impl PreKeyDb {
         record: &PreKeyRecord,
     ) -> Result<(), SignalProtocolError> {
         log::info!("store insert: pre_key id={}", u32::from(prekey_id));
-        sqlx::query("INSERT OR REPLACE INTO pre_keys (id, record) VALUES (?, ?)")
+        crate::sql::query("INSERT OR REPLACE INTO pre_keys (id, record) VALUES (?, ?)")
             .bind(u32::from(prekey_id))
             .bind(record.serialize()?)
             .execute(&self.pool)
@@ -58,7 +57,7 @@ impl PreKeyDb {
 
     pub async fn remove_pre_key(&mut self, prekey_id: PreKeyId) -> Result<(), SignalProtocolError> {
         log::info!("store delete: pre_key id={}", u32::from(prekey_id));
-        let _ = sqlx::query("DELETE FROM pre_keys WHERE id = ?")
+        let _ = crate::sql::query("DELETE FROM pre_keys WHERE id = ?")
             .bind(u32::from(prekey_id))
             .execute(&self.pool)
             .await
@@ -105,7 +104,7 @@ impl SignedPreKeyDb {
         &self,
         signed_prekey_id: SignedPreKeyId,
     ) -> Result<SignedPreKeyRecord, SignalProtocolError> {
-        let result = sqlx::query("SELECT record FROM signed_pre_keys WHERE id = ?")
+        let result = crate::sql::query("SELECT record FROM signed_pre_keys WHERE id = ?")
             .bind(u32::from(signed_prekey_id))
             .fetch_one(&self.pool)
             .await
@@ -126,7 +125,7 @@ impl SignedPreKeyDb {
             u32::from(signed_prekey_id)
         );
         let record = record.serialize()?;
-        sqlx::query("INSERT OR REPLACE INTO signed_pre_keys (id, record) VALUES (?, ?)")
+        crate::sql::query("INSERT OR REPLACE INTO signed_pre_keys (id, record) VALUES (?, ?)")
             .bind(u32::from(signed_prekey_id))
             .bind(&record)
             .execute(&self.pool)
@@ -172,7 +171,7 @@ impl SessionDb {
         &self,
         address: &ProtocolAddress,
     ) -> Result<Option<SessionRecord>, SignalProtocolError> {
-        let result = sqlx::query("SELECT record FROM sessions WHERE address = ?")
+        let result = crate::sql::query("SELECT record FROM sessions WHERE address = ?")
             .bind(address.to_string())
             .fetch_optional(&self.pool)
             .await
@@ -200,7 +199,7 @@ impl SessionDb {
         record: &SessionRecord,
     ) -> Result<(), SignalProtocolError> {
         log::info!("store insert: session address={}", address);
-        sqlx::query("INSERT OR REPLACE INTO sessions (address, record) VALUES (?, ?)")
+        crate::sql::query("INSERT OR REPLACE INTO sessions (address, record) VALUES (?, ?)")
             .bind(address.to_string())
             .bind(record.serialize()?)
             .execute(&self.pool)
@@ -228,7 +227,7 @@ impl SessionStore for SessionDb {
     }
 }
 
-#[derive(sqlx::FromRow)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(sqlx::FromRow))]
 pub struct IdentityKeyPairRow {
     pub id: i64,
     pub keypair: IdentityKeyPair,
@@ -267,7 +266,7 @@ impl IdentityDb {
                 .transaction(|txn| {
                     Box::pin(async move {
                         
-                        let row = sqlx::query("SELECT keypair FROM identity_keypair")
+                        let row = crate::sql::query("SELECT keypair FROM identity_keypair")
                             .fetch_optional(&mut **txn)
                             .await?;
 
@@ -277,7 +276,7 @@ impl IdentityDb {
                             let registration_id = rng.next_u32() % 32000;
                             let device_id = 1 + (rng.next_u32() % 126) as u8;
 
-                            sqlx::query("INSERT INTO identity_keypair (id, keypair, registration_id, device_id, username) VALUES (?, ?, ?, ?, ?)")
+                            crate::sql::query("INSERT INTO identity_keypair (id, keypair, registration_id, device_id, username) VALUES (?, ?, ?, ?, ?)")
                                 .bind(0)
                                 .bind(keypair.serialize())
                                 .bind(registration_id)
@@ -290,7 +289,7 @@ impl IdentityDb {
 
 
 
-                        Ok::<_, sqlx::Error>(())
+                        Ok::<_, crate::sql::Error>(())
                     })
                 })
                 .await?;
@@ -312,7 +311,7 @@ impl IdentityDb {
             device_id
         );
         let mut db = self.pool.acquire().await?;
-        sqlx::query("UPDATE identity_keypair SET id = ?, username = ?, device_id = ?")
+        crate::sql::query("UPDATE identity_keypair SET id = ?, username = ?, device_id = ?")
             .bind(id)
             .bind(username)
             .bind(device_id)
@@ -320,7 +319,7 @@ impl IdentityDb {
             .await?;
 
         log::info!("store delete: identity_keypair id!={}", id);
-        sqlx::query("DELETE FROM identity_keypair WHERE id <> ?")
+        crate::sql::query("DELETE FROM identity_keypair WHERE id <> ?")
             .bind(id)
             .execute(&mut *db)
             .await?;
@@ -334,14 +333,14 @@ impl IdentityDb {
             username
         );
         let mut db = self.pool.acquire().await?;
-        sqlx::query("UPDATE identity_keypair SET id = ?, username = ?")
+        crate::sql::query("UPDATE identity_keypair SET id = ?, username = ?")
             .bind(id)
             .bind(username)
             .execute(&mut *db)
             .await?;
 
         log::info!("store delete: identity_keypair id!={}", id);
-        sqlx::query("DELETE FROM identity_keypair WHERE id <> ?")
+        crate::sql::query("DELETE FROM identity_keypair WHERE id <> ?")
             .bind(id)
             .execute(&mut *db)
             .await?;
@@ -349,7 +348,7 @@ impl IdentityDb {
     }
 
     pub async fn get_full_identity_key_pair(&self) -> anyhow::Result<IdentityKeyPairRow> {
-        let row = sqlx::query(
+        let row = crate::sql::query(
             "SELECT id, keypair, registration_id, device_id, username FROM identity_keypair",
         )
         .fetch_one(&self.pool)
@@ -399,13 +398,13 @@ impl IdentityDb {
             .await
             .map_err(|err| SignalProtocolError::FfiBindingError(err.to_string()))?;
 
-        let existing = sqlx::query("SELECT identity_key FROM identities WHERE address = ?")
+        let existing = crate::sql::query("SELECT identity_key FROM identities WHERE address = ?")
             .bind(address.to_string())
             .fetch_optional(&mut *tx)
             .await
             .map_err(|err| SignalProtocolError::FfiBindingError(err.to_string()))?;
 
-        sqlx::query("INSERT OR REPLACE INTO identities (address, identity_key) VALUES (?, ?)")
+        crate::sql::query("INSERT OR REPLACE INTO identities (address, identity_key) VALUES (?, ?)")
             .bind(address.to_string())
             .bind(identity.serialize())
             .execute(&mut *tx)
@@ -432,7 +431,7 @@ impl IdentityDb {
         &self,
         address: &ProtocolAddress,
     ) -> Result<Option<IdentityKey>, SignalProtocolError> {
-        let result = sqlx::query("SELECT identity_key FROM identities WHERE address = ?")
+        let result = crate::sql::query("SELECT identity_key FROM identities WHERE address = ?")
             .bind(address.to_string())
             .fetch_optional(&self.pool)
             .await
@@ -519,7 +518,7 @@ impl KyberPreKeyDb {
         &self,
         kyber_prekey_id: KyberPreKeyId,
     ) -> Result<KyberPreKeyRecord, SignalProtocolError> {
-        let result = sqlx::query("SELECT record FROM kyber_pre_keys WHERE id = ?")
+        let result = crate::sql::query("SELECT record FROM kyber_pre_keys WHERE id = ?")
             .bind(u32::from(kyber_prekey_id))
             .fetch_one(&self.pool)
             .await
@@ -539,7 +538,7 @@ impl KyberPreKeyDb {
             "store insert: kyber_pre_key id={}",
             u32::from(kyber_prekey_id)
         );
-        sqlx::query("INSERT OR REPLACE INTO kyber_pre_keys (id, record) VALUES (?, ?)")
+        crate::sql::query("INSERT OR REPLACE INTO kyber_pre_keys (id, record) VALUES (?, ?)")
             .bind(u32::from(kyber_prekey_id))
             .bind(record.serialize()?)
             .execute(&self.pool)
@@ -558,7 +557,7 @@ impl KyberPreKeyDb {
         //     "store delete: kyber_pre_key id={}",
         //     u32::from(kyber_prekey_id)
         // );
-        // sqlx::query("DELETE FROM kyber_pre_keys WHERE id = ?")
+        // crate::sql::query("DELETE FROM kyber_pre_keys WHERE id = ?")
         //     .bind(u32::from(kyber_prekey_id))
         //     .execute(&self.pool)
         //     .await
@@ -696,7 +695,7 @@ impl KeyStores {
             &local_address,
             &mut self.session_store,
             &mut self.identity_store,
-            SystemTime::now(),
+            utils::now_system_time(),
             &mut rng,
         )
         .await?;
@@ -746,7 +745,7 @@ impl KeyStores {
             &mut self.session_store,
             &mut self.identity_store,
             &bundle,
-            SystemTime::now(),
+            utils::now_system_time(),
             &mut utils::rng(),
         )
         .await?;

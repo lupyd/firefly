@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use sqlx::{Row, SqlitePool};
+use crate::sql::{Row, SqlitePool};
 
 use crate::db::group_messages::{extract_group_message_text, GroupMessage};
 use crate::db::group_stores::GroupInfoStore;
@@ -137,7 +137,7 @@ impl FavouriteMessagesStore {
         self.add(fav).await
     }
 
-    fn row_to_favourite(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<FavouriteMessage> {
+    fn row_to_favourite(row: &crate::sql::sqlite::SqliteRow) -> anyhow::Result<FavouriteMessage> {
         let source_str: String = row.try_get("source")?;
         let source = if source_str == "user" {
             FavouriteSource::User
@@ -186,7 +186,7 @@ impl FavouriteMessageStorage for FavouriteMessagesStore {
         RETURNING id
         "#;
 
-        let row = sqlx::query(sql)
+        let row = crate::sql::query(sql)
             .bind(source_str)
             .bind(favourite.message_id as i64)
             .bind(favourite.other)
@@ -206,7 +206,7 @@ impl FavouriteMessageStorage for FavouriteMessagesStore {
     }
 
     async fn remove_user_favourite(&self, other: &str, message_id: u64) -> anyhow::Result<bool> {
-        let res = sqlx::query(
+        let res = crate::sql::query(
             "DELETE FROM favourite_messages WHERE source = 'user' AND other = ? AND message_id = ?",
         )
         .bind(other)
@@ -218,7 +218,7 @@ impl FavouriteMessageStorage for FavouriteMessagesStore {
     }
 
     async fn remove_group_favourite(&self, group_id: u64, message_id: u64) -> anyhow::Result<bool> {
-        let res = sqlx::query(
+        let res = crate::sql::query(
             "DELETE FROM favourite_messages WHERE source = 'group' AND group_id = ? AND message_id = ?",
         )
         .bind(group_id as i64)
@@ -230,7 +230,7 @@ impl FavouriteMessageStorage for FavouriteMessagesStore {
     }
 
     async fn remove_by_id(&self, favourite_id: u64) -> anyhow::Result<bool> {
-        let res = sqlx::query("DELETE FROM favourite_messages WHERE id = ?")
+        let res = crate::sql::query("DELETE FROM favourite_messages WHERE id = ?")
             .bind(favourite_id as i64)
             .execute(&self.pool)
             .await?;
@@ -239,7 +239,7 @@ impl FavouriteMessageStorage for FavouriteMessagesStore {
     }
 
     async fn is_user_favourite(&self, other: &str, message_id: u64) -> anyhow::Result<bool> {
-        let row = sqlx::query(
+        let row = crate::sql::query(
             "SELECT 1 FROM favourite_messages WHERE source = 'user' AND other = ? AND message_id = ? LIMIT 1",
         )
         .bind(other)
@@ -251,7 +251,7 @@ impl FavouriteMessageStorage for FavouriteMessagesStore {
     }
 
     async fn is_group_favourite(&self, group_id: u64, message_id: u64) -> anyhow::Result<bool> {
-        let row = sqlx::query(
+        let row = crate::sql::query(
             "SELECT 1 FROM favourite_messages WHERE source = 'group' AND group_id = ? AND message_id = ? LIMIT 1",
         )
         .bind(group_id as i64)
@@ -263,7 +263,7 @@ impl FavouriteMessageStorage for FavouriteMessagesStore {
     }
 
     async fn get_by_id(&self, favourite_id: u64) -> anyhow::Result<Option<FavouriteMessage>> {
-        let row = sqlx::query("SELECT * FROM favourite_messages WHERE id = ?")
+        let row = crate::sql::query("SELECT * FROM favourite_messages WHERE id = ?")
             .bind(favourite_id as i64)
             .fetch_optional(&self.pool)
             .await?;
@@ -278,7 +278,7 @@ impl FavouriteMessageStorage for FavouriteMessagesStore {
     }
 
     async fn get_all(&self, limit: u32, offset: u32) -> anyhow::Result<Vec<FavouriteMessage>> {
-        let rows = sqlx::query(
+        let rows = crate::sql::query(
             "SELECT * FROM favourite_messages ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
         )
         .bind(limit as i64)
@@ -312,7 +312,7 @@ impl FavouriteMessageStorage for FavouriteMessagesStore {
             )
         };
 
-        let mut q = sqlx::query(sql);
+        let mut q = crate::sql::query(sql);
         if has_other {
             q = q.bind(other.unwrap());
         }
@@ -347,7 +347,7 @@ impl FavouriteMessageStorage for FavouriteMessagesStore {
             "SELECT * FROM favourite_messages WHERE {where_clause} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
         );
 
-        let mut q = sqlx::query(&sql);
+        let mut q = crate::sql::query(&sql);
         if let Some(gid) = group_id {
             q = q.bind(gid as i64);
         }
@@ -366,7 +366,7 @@ impl FavouriteMessageStorage for FavouriteMessagesStore {
     }
 
     async fn clear_all(&self) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM favourite_messages")
+        crate::sql::query("DELETE FROM favourite_messages")
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -376,7 +376,7 @@ impl FavouriteMessageStorage for FavouriteMessagesStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::sqlite::SqlitePoolOptions;
+    use crate::sql::sqlite::SqlitePoolOptions;
 
     async fn setup_test_db() -> SqlitePool {
         SqlitePoolOptions::new()

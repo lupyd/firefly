@@ -18,10 +18,8 @@ use firefly_core::storage_provider::{
 };
 use crate::storage::{GroupInfoStorage, KeyValueStorage};
 
-#[cfg(not(target_arch = "wasm32"))]
-use sqlx::SqlitePool;
+use crate::sql::SqlitePool;
 
-#[cfg(not(target_arch = "wasm32"))]
 use crate::db::{
     group_stores::{GroupInfoStore, GroupKeyPackageStore, GroupPskStore, GroupStateStore},
     keyvalue::KeyValueStore,
@@ -59,7 +57,6 @@ impl FfiMlsClient {
         self.client.get_identity();
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub async fn initialize(
         device_id: u8,
         address_id: u64,

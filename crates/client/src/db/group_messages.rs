@@ -1,5 +1,5 @@
-use sqlx::SqlitePool;
-use sqlx::prelude::*;
+use crate::sql::SqlitePool;
+use crate::sql::prelude::*;
 use std::sync::Arc;
 
 struct MessageReadAccess {
@@ -7,7 +7,8 @@ struct MessageReadAccess {
     groups: super::group_stores::GroupInfoStore,
 }
 
-#[derive(Clone, Debug, sqlx::FromRow, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(sqlx::FromRow))]
 pub struct GroupMessage {
     pub id: u64,
     pub group_id: u64,
@@ -17,6 +18,23 @@ pub struct GroupMessage {
     pub epoch: u32,
     #[serde(default)]
     pub message_type: u32,
+}
+
+/// Mirrors the native `sqlx::FromRow` derive, which reads each field by column name.
+#[cfg(target_arch = "wasm32")]
+impl crate::sql::FromRow for GroupMessage {
+    fn from_row(row: &crate::sql::sqlite::SqliteRow) -> Result<Self, crate::sql::Error> {
+        use crate::sql::Row;
+        Ok(Self {
+            id: row.try_get("id")?,
+            group_id: row.try_get("group_id")?,
+            by: row.try_get("by")?,
+            message: row.try_get("message")?,
+            channel_id: row.try_get("channel_id")?,
+            epoch: row.try_get("epoch")?,
+            message_type: row.try_get("message_type")?,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -143,7 +161,7 @@ impl GroupMessagesStore {
             if let firefly_protos::firefly::mod_GroupMessageInner::OneOfmessage::pinUpdate(update) = inner.message {
                 anyhow::ensure!(message_type == firefly_protos::MESSAGE_TYPE_HIDDEN && update.message_id > 0 && update.message_id < id && inner.channelId == channel_id, "Invalid shared pin event");
                 let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-                sqlx::query("INSERT INTO group_pin_updates(group_id,message_id,channel_id,event_id,pinned) VALUES(?,?,?,?,?) ON CONFLICT(group_id,message_id,channel_id) DO UPDATE SET event_id=excluded.event_id,pinned=excluded.pinned WHERE excluded.event_id>group_pin_updates.event_id")
+                crate::sql::query("INSERT INTO group_pin_updates(group_id,message_id,channel_id,event_id,pinned) VALUES(?,?,?,?,?) ON CONFLICT(group_id,message_id,channel_id) DO UPDATE SET event_id=excluded.event_id,pinned=excluded.pinned WHERE excluded.event_id>group_pin_updates.event_id")
                     .bind(group_id as i64).bind(update.message_id as i64).bind(channel_id as i64).bind(id as i64).bind(update.pinned).execute(&mut *tx).await?;
                 Self::apply_pin_state(&mut tx, group_id, update.message_id).await?;
                 tx.commit().await?;
@@ -169,7 +187,7 @@ impl GroupMessagesStore {
             message_type
         );
         let text = extract_group_message_text(message);
-        sqlx::query(
+        crate::sql::query(
             r#"
         INSERT INTO group_messages (id, group_id, by, message, channel_id, epoch, message_type, text)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -200,7 +218,7 @@ impl GroupMessagesStore {
         }
 
         // A subsequently authenticated live receipt is independent evidence.
-        sqlx::query("DELETE FROM group_history_imports WHERE group_id=? AND message_id=?").bind(group_id as i64).bind(id as i64).execute(&self.pool).await?;
+        crate::sql::query("DELETE FROM group_history_imports WHERE group_id=? AND message_id=?").bind(group_id as i64).bind(id as i64).execute(&self.pool).await?;
 
         // All insertion paths, including background re-adds and replayed/older
         // ciphertext, converge on the same highest-id pinned copy.
@@ -222,7 +240,7 @@ impl GroupMessagesStore {
         start_before: u64,
         limit: u32,
     ) -> anyhow::Result<Vec<GroupMessage>> {
-        let rows = sqlx::query(
+        let rows = crate::sql::query(
             r#"
         SELECT id, by, message, channel_id, group_id, epoch, message_type
         FROM group_messages
@@ -245,14 +263,14 @@ impl GroupMessagesStore {
     }
 
 
-    async fn apply_pin_state(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, group: u64, message: u64) -> anyhow::Result<()> {
-        sqlx::query("UPDATE group_messages SET message_type=(message_type & ~1) | (SELECT pinned FROM group_pin_updates p WHERE p.group_id=group_messages.group_id AND p.message_id=group_messages.id AND p.channel_id=group_messages.channel_id) WHERE group_id=? AND id=? AND (message_type & 2)=0 AND EXISTS(SELECT 1 FROM group_pin_updates p WHERE p.group_id=group_messages.group_id AND p.message_id=group_messages.id AND p.channel_id=group_messages.channel_id)")
+    async fn apply_pin_state(tx: &mut crate::sql::Transaction<'_, crate::sql::Sqlite>, group: u64, message: u64) -> anyhow::Result<()> {
+        crate::sql::query("UPDATE group_messages SET message_type=(message_type & ~1) | (SELECT pinned FROM group_pin_updates p WHERE p.group_id=group_messages.group_id AND p.message_id=group_messages.id AND p.channel_id=group_messages.channel_id) WHERE group_id=? AND id=? AND (message_type & 2)=0 AND EXISTS(SELECT 1 FROM group_pin_updates p WHERE p.group_id=group_messages.group_id AND p.message_id=group_messages.id AND p.channel_id=group_messages.channel_id)")
             .bind(group as i64).bind(message as i64).execute(&mut **tx).await?;
         Ok(())
     }
 
     pub async fn get_message(&self, group: u64, id: u64) -> anyhow::Result<Option<GroupMessage>> {
-        let row=sqlx::query("SELECT id,by,message,channel_id,group_id,epoch,message_type FROM group_messages WHERE group_id=? AND id=?")
+        let row=crate::sql::query("SELECT id,by,message,channel_id,group_id,epoch,message_type FROM group_messages WHERE group_id=? AND id=?")
             .bind(group as i64).bind(id as i64).fetch_optional(&self.pool).await?;
         let Some(row)=row else {return Ok(None)};
         Ok(self.visible_messages(vec![GroupMessage::from_row(&row)?]).await?.pop())
@@ -261,19 +279,19 @@ impl GroupMessagesStore {
     pub async fn get_channel_page(&self, group_id: u64, channel_id: u32, before: u64, limit: u32) -> anyhow::Result<Vec<GroupMessage>> {
         anyhow::ensure!(limit > 0 && limit <= 101, "Invalid page size");
         if !self.can_see_channel(group_id, channel_id).await? { return Ok(vec![]); }
-        let rows = sqlx::query("SELECT id,by,message,channel_id,group_id,epoch,message_type FROM group_messages WHERE group_id=? AND channel_id=? AND id<? AND (message_type & ?) = 0 ORDER BY id DESC LIMIT ?")
+        let rows = crate::sql::query("SELECT id,by,message,channel_id,group_id,epoch,message_type FROM group_messages WHERE group_id=? AND channel_id=? AND id<? AND (message_type & ?) = 0 ORDER BY id DESC LIMIT ?")
             .bind(group_id as i64).bind(channel_id as i64).bind(before as i64).bind(firefly_protos::MESSAGE_TYPE_HIDDEN as i64).bind(limit as i64).fetch_all(&self.pool).await?;
         self.visible_messages(rows.iter().map(GroupMessage::from_row).collect::<Result<Vec<_>,_>>()?).await
     }
     pub async fn authenticated_history_range(&self, group: u64, start: u64, end: u64, limit: u32) -> anyhow::Result<Vec<GroupMessage>> {
-        let rows = sqlx::query("SELECT m.id,m.by,m.message,m.channel_id,m.group_id,m.epoch,m.message_type FROM group_messages m WHERE m.group_id=? AND m.id>=? AND m.id<=? AND m.by!='' AND (m.message_type & ?) = 0 AND NOT EXISTS (SELECT 1 FROM group_history_imports h WHERE h.group_id=m.group_id AND h.message_id=m.id) ORDER BY m.id LIMIT ?")
+        let rows = crate::sql::query("SELECT m.id,m.by,m.message,m.channel_id,m.group_id,m.epoch,m.message_type FROM group_messages m WHERE m.group_id=? AND m.id>=? AND m.id<=? AND m.by!='' AND (m.message_type & ?) = 0 AND NOT EXISTS (SELECT 1 FROM group_history_imports h WHERE h.group_id=m.group_id AND h.message_id=m.id) ORDER BY m.id LIMIT ?")
             .bind(group as i64).bind(start as i64).bind(end as i64).bind(firefly_protos::MESSAGE_TYPE_HIDDEN as i64).bind(limit as i64).fetch_all(&self.pool).await?;
         rows.iter().map(GroupMessage::from_row).collect::<Result<Vec<_>,_>>().map_err(Into::into)
     }
     /// Only independently received messages may substantiate a peer vote.
     pub async fn authenticated_history_ids(&self, group: u64, ids: &[u64]) -> anyhow::Result<Vec<GroupMessage>> {
         anyhow::ensure!(!ids.is_empty() && ids.len() <= crate::history::DEFAULT_CHUNK_SIZE, "Invalid history evidence count");
-        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new("SELECT m.id,m.by,m.message,m.channel_id,m.group_id,m.epoch,m.message_type FROM group_messages m WHERE m.group_id=");
+        let mut query = crate::sql::QueryBuilder::<crate::sql::Sqlite>::new("SELECT m.id,m.by,m.message,m.channel_id,m.group_id,m.epoch,m.message_type FROM group_messages m WHERE m.group_id=");
         query.push_bind(group as i64).push(" AND m.by!='' AND NOT EXISTS (SELECT 1 FROM group_history_imports h WHERE h.group_id=m.group_id AND h.message_id=m.id) AND m.id IN (");
         let mut values = query.separated(",");
         for id in ids { values.push_bind(*id as i64); }
@@ -287,22 +305,22 @@ impl GroupMessagesStore {
         let mut imported = 0;
         for r in records {
             anyhow::ensure!(r.group_id == group, "Foreign history record");
-            let changed = sqlx::query("INSERT INTO group_messages(id,group_id,by,message,channel_id,epoch,message_type,text) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(group_id,id) DO UPDATE SET by=excluded.by,message=excluded.message,channel_id=excluded.channel_id,epoch=excluded.epoch,message_type=excluded.message_type,text=excluded.text WHERE EXISTS(SELECT 1 FROM group_history_imports h WHERE h.group_id=group_messages.group_id AND h.message_id=group_messages.id AND h.chunk_id<>0) AND ?<>0")
+            let changed = crate::sql::query("INSERT INTO group_messages(id,group_id,by,message,channel_id,epoch,message_type,text) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(group_id,id) DO UPDATE SET by=excluded.by,message=excluded.message,channel_id=excluded.channel_id,epoch=excluded.epoch,message_type=excluded.message_type,text=excluded.text WHERE EXISTS(SELECT 1 FROM group_history_imports h WHERE h.group_id=group_messages.group_id AND h.message_id=group_messages.id AND h.chunk_id<>0) AND ?<>0")
                 .bind(r.id as i64).bind(group as i64).bind(&r.by).bind(&r.message).bind(r.channel_id as i64).bind(r.epoch as i64).bind(r.message_type as i64).bind(extract_group_message_text(&r.message)).bind(chunk as i64).execute(&mut *tx).await?.rows_affected();
             if changed > 0 {
-                sqlx::query("INSERT INTO group_history_imports(group_id,message_id,chunk_id) VALUES(?,?,?) ON CONFLICT(group_id,message_id) DO UPDATE SET chunk_id=excluded.chunk_id").bind(group as i64).bind(r.id as i64).bind(chunk as i64).execute(&mut *tx).await?;
+                crate::sql::query("INSERT INTO group_history_imports(group_id,message_id,chunk_id) VALUES(?,?,?) ON CONFLICT(group_id,message_id) DO UPDATE SET chunk_id=excluded.chunk_id").bind(group as i64).bind(r.id as i64).bind(chunk as i64).execute(&mut *tx).await?;
                 imported += 1;
             }
         }
         for record in records { Self::apply_pin_state(&mut tx, group, record.id).await?; }
-        sqlx::query("INSERT OR IGNORE INTO group_history_imported_chunks(group_id,chunk_id,hash) VALUES(?,?,?)").bind(group as i64).bind(chunk as i64).bind(hash).execute(&mut *tx).await?;
+        crate::sql::query("INSERT OR IGNORE INTO group_history_imported_chunks(group_id,chunk_id,hash) VALUES(?,?,?)").bind(group as i64).bind(chunk as i64).bind(hash).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(imported)
     }
     pub async fn purge_imported_chunk(&self, group: u64, chunk: u64) -> anyhow::Result<usize> {
         let _lock = self.pin_writes.lock().await;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let deleted = sqlx::query(
+        let deleted = crate::sql::query(
             "DELETE FROM group_messages WHERE group_id = ? AND id IN (SELECT message_id FROM group_history_imports WHERE group_id = ? AND chunk_id = ?)"
         )
         .bind(group as i64)
@@ -312,13 +330,13 @@ impl GroupMessagesStore {
         .await?
         .rows_affected() as usize;
 
-        sqlx::query("DELETE FROM group_history_imports WHERE group_id = ? AND chunk_id = ?")
+        crate::sql::query("DELETE FROM group_history_imports WHERE group_id = ? AND chunk_id = ?")
             .bind(group as i64)
             .bind(chunk as i64)
             .execute(&mut *tx)
             .await?;
 
-        sqlx::query("DELETE FROM group_history_imported_chunks WHERE group_id = ? AND chunk_id = ?")
+        crate::sql::query("DELETE FROM group_history_imported_chunks WHERE group_id = ? AND chunk_id = ?")
             .bind(group as i64)
             .bind(chunk as i64)
             .execute(&mut *tx)
@@ -333,7 +351,7 @@ impl GroupMessagesStore {
         start_id: u64,
         end_id: u64,
     ) -> anyhow::Result<Vec<GroupMessage>> {
-        let rows = sqlx::query(
+        let rows = crate::sql::query(
             r#"
             SELECT id, by, message, channel_id, group_id, epoch, message_type
             FROM group_messages
@@ -358,7 +376,7 @@ impl GroupMessagesStore {
     /// from authenticated receipts and can never become independent vote evidence.
     /// Adder-trusted recent snapshots may be reshared, but never used as votes.
     pub async fn snapshot_history_range(&self,group:u64,start:u64,end:u64)->anyhow::Result<Vec<GroupMessage>> {
-        let rows=sqlx::query_as::<_,GroupMessage>("SELECT id,group_id,by,message,channel_id,epoch,message_type FROM group_messages WHERE group_id=? AND id>=? AND id<=? AND (message_type & 2)=0 AND by<>'' ORDER BY id LIMIT 5000")
+        let rows=crate::sql::query_as::<_,GroupMessage>("SELECT id,group_id,by,message,channel_id,epoch,message_type FROM group_messages WHERE group_id=? AND id>=? AND id<=? AND (message_type & 2)=0 AND by<>'' ORDER BY id LIMIT 5000")
             .bind(group as i64).bind(start as i64).bind(end as i64).fetch_all(&self.pool).await?;
         self.visible_messages(rows).await
     }
@@ -376,13 +394,13 @@ impl GroupMessagesStore {
         }
         self.import_verified_history(group_id,0,hash,records).await?;
         let mut tx=self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("UPDATE group_messages SET message_type=message_type & ~1 WHERE group_id=? AND (message_type & 1)<>0").bind(group_id as i64).execute(&mut *tx).await?;
+        crate::sql::query("UPDATE group_messages SET message_type=message_type & ~1 WHERE group_id=? AND (message_type & 1)<>0").bind(group_id as i64).execute(&mut *tx).await?;
         // Snapshot state supersedes the unreleased per-message pin protocol.
         // Preserve it when the authenticated original later replaces an import.
-        sqlx::query("UPDATE group_pin_updates SET pinned=0,event_id=9223372036854775807 WHERE group_id=?").bind(group_id as i64).execute(&mut *tx).await?;
+        crate::sql::query("UPDATE group_pin_updates SET pinned=0,event_id=9223372036854775807 WHERE group_id=?").bind(group_id as i64).execute(&mut *tx).await?;
         for record in records {
-            sqlx::query("INSERT INTO group_pin_updates(group_id,message_id,channel_id,event_id,pinned) VALUES(?,?,?,9223372036854775807,1) ON CONFLICT(group_id,message_id,channel_id) DO UPDATE SET pinned=1,event_id=excluded.event_id").bind(group_id as i64).bind(record.id as i64).bind(record.channel_id as i64).execute(&mut *tx).await?;
-            sqlx::query("UPDATE group_messages SET message_type=message_type | 1 WHERE group_id=? AND id=?").bind(group_id as i64).bind(record.id as i64).execute(&mut *tx).await?;
+            crate::sql::query("INSERT INTO group_pin_updates(group_id,message_id,channel_id,event_id,pinned) VALUES(?,?,?,9223372036854775807,1) ON CONFLICT(group_id,message_id,channel_id) DO UPDATE SET pinned=1,event_id=excluded.event_id").bind(group_id as i64).bind(record.id as i64).bind(record.channel_id as i64).execute(&mut *tx).await?;
+            crate::sql::query("UPDATE group_messages SET message_type=message_type | 1 WHERE group_id=? AND id=?").bind(group_id as i64).bind(record.id as i64).execute(&mut *tx).await?;
         }
         tx.commit().await?;
         Ok(())
@@ -429,7 +447,7 @@ impl GroupMessagesStore {
         "#
         );
 
-        let mut q = sqlx::query(&sql).bind(&fts_query);
+        let mut q = crate::sql::query(&sql).bind(&fts_query);
         if let Some(gid) = group_id {
             q = q.bind(gid as i64);
         }
@@ -495,7 +513,7 @@ impl GroupMessagesStore {
     }
 
     async fn pinned_messages_unfiltered_for_group(&self, group_id: u64) -> anyhow::Result<Vec<GroupMessage>> {
-        let rows = sqlx::query(
+        let rows = crate::sql::query(
             r#"
         SELECT id, by, message, channel_id, group_id, epoch, message_type
         FROM group_messages
@@ -523,7 +541,7 @@ impl GroupMessagesStore {
     }
 
     async fn update_message_type_unlocked(&self, group_id: u64, id: u64, message_type: u32) -> anyhow::Result<()> {
-        sqlx::query("UPDATE group_messages SET message_type = ? WHERE group_id = ? AND id = ?")
+        crate::sql::query("UPDATE group_messages SET message_type = ? WHERE group_id = ? AND id = ?")
             .bind(message_type as i64)
             .bind(group_id as i64)
             .bind(id as i64)
@@ -533,7 +551,7 @@ impl GroupMessagesStore {
     }
 
     pub async fn get_all_last_messages(&self) -> anyhow::Result<Vec<GroupMessage>> {
-        let rows = sqlx::query(
+        let rows = crate::sql::query(
             r#"
 SELECT gm.group_id, gm.id, gm.by, gm.message, gm.channel_id, gm.epoch, gm.message_type
 FROM group_messages gm
@@ -558,7 +576,7 @@ AND gm.id = last.max_id;
     }
 
     pub async fn get_last_message_of_group(&self, group_id: u64) -> anyhow::Result<GroupMessage> {
-        let row = sqlx::query("SELECT group_id, id, by, message, channel_id, epoch, message_type FROM group_messages WHERE group_id = ? ORDER BY id DESC LIMIT 1").bind(group_id as i64).fetch_one(&self.pool).await?;
+        let row = crate::sql::query("SELECT group_id, id, by, message, channel_id, epoch, message_type FROM group_messages WHERE group_id = ? ORDER BY id DESC LIMIT 1").bind(group_id as i64).fetch_one(&self.pool).await?;
         self.visible_messages(vec![GroupMessage::from_row(&row)?])
             .await?
             .into_iter()
@@ -568,7 +586,7 @@ AND gm.id = last.max_id;
 
     pub async fn delete_by_group_id(&self, group_id: u64) -> anyhow::Result<()> {
         log::info!("store delete_by_group_id: group_id={}", group_id);
-        sqlx::query("DELETE FROM group_messages WHERE group_id = ?")
+        crate::sql::query("DELETE FROM group_messages WHERE group_id = ?")
             .bind(group_id as i64)
             .execute(&self.pool)
             .await?;
@@ -580,7 +598,7 @@ AND gm.id = last.max_id;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::SqlitePool;
+    use crate::sql::SqlitePool;
 
     async fn setup_test_db() -> SqlitePool {
         SqlitePool::connect(":memory:").await.unwrap()

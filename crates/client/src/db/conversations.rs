@@ -1,5 +1,5 @@
-use sqlx::SqlitePool;
-use sqlx::prelude::*;
+use crate::sql::SqlitePool;
+use crate::sql::prelude::*;
 
 #[derive(Default)]
 pub struct ConversationSettings {
@@ -38,7 +38,7 @@ impl ConversationStore {
         &self,
         username: &str,
     ) -> anyhow::Result<Option<ConversationSettings>> {
-        let row = sqlx::query(
+        let row = crate::sql::query(
             r#"
             SELECT settings
             FROM conversations
@@ -62,7 +62,7 @@ impl ConversationStore {
         username: &str,
         settings: ConversationSettings,
     ) -> anyhow::Result<()> {
-        sqlx::query(
+        crate::sql::query(
             r#"
             INSERT OR REPLACE INTO conversations (username, settings)
             VALUES (?, ?)

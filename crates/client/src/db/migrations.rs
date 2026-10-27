@@ -12,7 +12,7 @@
 //!    freezing startup when tables contain tens of thousands of messages.
 //! 5. **Concurrency Safety**: Migration execution is serialized in-process via `MIGRATION_LOCK`.
 
-use sqlx::{Executor, Row, SqlitePool};
+use crate::sql::{Executor, Row, SqlitePool};
 use std::collections::HashSet;
 
 use crate::db::group_messages::extract_group_message_text;
@@ -22,7 +22,7 @@ use crate::utils::get_current_timestamp_millis_since_epoch;
 static MIGRATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub async fn table_exists(pool: &SqlitePool, table: &str) -> anyhow::Result<bool> {
-    let row = sqlx::query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+    let row = crate::sql::query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
         .bind(table)
         .fetch_optional(pool)
         .await?;
@@ -31,7 +31,7 @@ pub async fn table_exists(pool: &SqlitePool, table: &str) -> anyhow::Result<bool
 
 pub async fn get_table_columns(pool: &SqlitePool, table: &str) -> anyhow::Result<HashSet<String>> {
     let query = format!("PRAGMA table_info({})", table);
-    let rows = sqlx::query(&query).fetch_all(pool).await?;
+    let rows = crate::sql::query(&query).fetch_all(pool).await?;
     let mut cols = HashSet::new();
     for row in rows {
         let name: String = row.try_get("name")?;
@@ -96,7 +96,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
 
     // Fast path: If snapshot_inbox_v5 is already applied, return immediately without any table scans.
     let already_applied: Option<i64> =
-        sqlx::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 5")
+        crate::sql::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 5")
             .fetch_optional(&mut *conn)
             .await?;
     if already_applied.is_some() {
@@ -104,7 +104,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     }
 
     let v1_applied: Option<i64> =
-        sqlx::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 1")
+        crate::sql::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 1")
             .fetch_optional(&mut *conn)
             .await?;
     drop(conn);
@@ -210,7 +210,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         // 6. Backfill user_messages text in batches
         let mut had_unmigrated_users = false;
         loop {
-            let batch = sqlx::query("SELECT rowid, message FROM user_messages WHERE text = '' AND length(message) > 0 LIMIT 500")
+            let batch = crate::sql::query("SELECT rowid, message FROM user_messages WHERE text = '' AND length(message) > 0 LIMIT 500")
             .fetch_all(pool)
             .await?;
             if batch.is_empty() {
@@ -222,7 +222,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
                 let msg_bytes: Vec<u8> = row.try_get("message")?;
                 let text = extract_user_message_text(&msg_bytes);
                 let update_text = if text.is_empty() { " " } else { text.as_str() };
-                sqlx::query("UPDATE user_messages SET text = ? WHERE rowid = ?")
+                crate::sql::query("UPDATE user_messages SET text = ? WHERE rowid = ?")
                     .bind(update_text)
                     .bind(rowid)
                     .execute(pool)
@@ -233,7 +233,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         // 7. Backfill group_messages text in batches
         let mut had_unmigrated_groups = false;
         loop {
-            let batch = sqlx::query("SELECT rowid, message FROM group_messages WHERE text = '' AND length(message) > 0 LIMIT 500")
+            let batch = crate::sql::query("SELECT rowid, message FROM group_messages WHERE text = '' AND length(message) > 0 LIMIT 500")
             .fetch_all(pool)
             .await?;
             if batch.is_empty() {
@@ -245,7 +245,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
                 let msg_bytes: Vec<u8> = row.try_get("message")?;
                 let text = extract_group_message_text(&msg_bytes);
                 let update_text = if text.is_empty() { " " } else { text.as_str() };
-                sqlx::query("UPDATE group_messages SET text = ? WHERE rowid = ?")
+                crate::sql::query("UPDATE group_messages SET text = ? WHERE rowid = ?")
                     .bind(update_text)
                     .bind(rowid)
                     .execute(pool)
@@ -315,12 +315,12 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
 
         // 9. Synchronize FTS5 indexes if new data was migrated (O(1) existence checks, never full table scan)
         let fts_user_has_rows =
-            sqlx::query_scalar::<_, i64>("SELECT 1 FROM user_messages_fts LIMIT 1")
+            crate::sql::query_scalar::<_, i64>("SELECT 1 FROM user_messages_fts LIMIT 1")
                 .fetch_optional(pool)
                 .await?
                 .is_some();
         let user_msgs_have_text =
-            sqlx::query_scalar::<_, i64>("SELECT 1 FROM user_messages WHERE text != '' LIMIT 1")
+            crate::sql::query_scalar::<_, i64>("SELECT 1 FROM user_messages WHERE text != '' LIMIT 1")
                 .fetch_optional(pool)
                 .await?
                 .is_some();
@@ -331,12 +331,12 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         }
 
         let fts_grp_has_rows =
-            sqlx::query_scalar::<_, i64>("SELECT 1 FROM group_messages_fts LIMIT 1")
+            crate::sql::query_scalar::<_, i64>("SELECT 1 FROM group_messages_fts LIMIT 1")
                 .fetch_optional(pool)
                 .await?
                 .is_some();
         let grp_msgs_have_text =
-            sqlx::query_scalar::<_, i64>("SELECT 1 FROM group_messages WHERE text != '' LIMIT 1")
+            crate::sql::query_scalar::<_, i64>("SELECT 1 FROM group_messages WHERE text != '' LIMIT 1")
                 .fetch_optional(pool)
                 .await?
                 .is_some();
@@ -348,7 +348,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
 
         // Record migration 1 applied
         let now = get_current_timestamp_millis_since_epoch() as i64;
-        let _ = sqlx::query("INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (1, 'standard_v1', ?)")
+        let _ = crate::sql::query("INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (1, 'standard_v1', ?)")
             .bind(now)
             .execute(pool)
             .await;
@@ -356,7 +356,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
 
     // 10. Migration v2: Group History Chunks Keys and Disapprovals
     let v2_applied: Option<i64> =
-        sqlx::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 2")
+        crate::sql::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 2")
             .fetch_optional(pool)
             .await?;
     if v2_applied.is_none() {
@@ -387,7 +387,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
 
         let now = get_current_timestamp_millis_since_epoch() as i64;
-        let _ = sqlx::query("INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (2, 'history_chunks_v2', ?)")
+        let _ = crate::sql::query("INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (2, 'history_chunks_v2', ?)")
             .bind(now)
             .execute(pool)
             .await;

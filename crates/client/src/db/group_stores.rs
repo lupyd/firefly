@@ -5,9 +5,9 @@ use firefly_core::storage_provider::MlsGroupStateStorage;
 use firefly_core::storage_provider::MlsKeyPackageStorage;
 use firefly_core::storage_provider::MlsPreSharedKeyStorage;
 use crate::storage::GroupInfoStorage;
-use sqlx::Executor;
-use sqlx::SqlitePool;
-use sqlx::prelude::*;
+use crate::sql::Executor;
+use crate::sql::SqlitePool;
+use crate::sql::prelude::*;
 
 pub struct GroupStateStore {
     pool: SqlitePool,
@@ -42,7 +42,7 @@ impl GroupStateStore {
 
     pub async fn get_state(&self, id: &[u8]) -> anyhow::Result<Vec<u8>> {
         log::info!("store select: group_state id={}", hex::encode(id));
-        let row = sqlx::query("SELECT state FROM group_states WHERE id = ?")
+        let row = crate::sql::query("SELECT state FROM group_states WHERE id = ?")
             .bind(id)
             .fetch_one(&self.pool)
             .await?;
@@ -60,7 +60,7 @@ impl GroupStateStore {
         log::info!("store insert: group_state id={}", hex::encode(group_id));
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
-        sqlx::query("INSERT OR REPLACE INTO group_states (id, state) VALUES (?, ?)")
+        crate::sql::query("INSERT OR REPLACE INTO group_states (id, state) VALUES (?, ?)")
             .bind(group_id)
             .bind(state_data)
             .execute(&mut *tx)
@@ -72,7 +72,7 @@ impl GroupStateStore {
                 hex::encode(group_id),
                 epoch_id
             );
-            sqlx::query(
+            crate::sql::query(
                 "INSERT OR REPLACE INTO group_epoch_states (id, epoch, state) VALUES (?, ?, ?)",
             )
             .bind(group_id)
@@ -87,7 +87,7 @@ impl GroupStateStore {
                 hex::encode(group_id),
                 epoch_id
             );
-            sqlx::query(
+            crate::sql::query(
                 "INSERT OR REPLACE INTO group_epoch_states (id, epoch, state) VALUES (?, ?, ?)",
             )
             .bind(group_id)
@@ -108,7 +108,7 @@ impl GroupStateStore {
             hex::encode(id),
             epoch_id
         );
-        let row = sqlx::query("SELECT state FROM group_epoch_states WHERE id = ? AND epoch = ?")
+        let row = crate::sql::query("SELECT state FROM group_epoch_states WHERE id = ? AND epoch = ?")
             .bind(id)
             .bind(epoch_id as i64)
             .fetch_one(&self.pool)
@@ -119,7 +119,7 @@ impl GroupStateStore {
 
     pub async fn get_max_epoch_id(&self, group_id: &[u8]) -> anyhow::Result<Option<u64>> {
         log::info!("store select: group_max_epoch id={}", hex::encode(group_id));
-        let row = sqlx::query("SELECT MAX(epoch) FROM group_epoch_states WHERE id = ?")
+        let row = crate::sql::query("SELECT MAX(epoch) FROM group_epoch_states WHERE id = ?")
             .bind(group_id)
             .fetch_one(&self.pool)
             .await?;
@@ -198,7 +198,7 @@ impl SelfGroupKeyPackageStore {
 
     pub async fn set(&self, id: i32, key_package_data: &[u8]) -> anyhow::Result<()> {
         log::info!("store insert: self_group_key_package id={}", id);
-        sqlx::query(
+        crate::sql::query(
             r#"
                 INSERT OR REPLACE INTO self_group_key_packages (id, key_package)
                 VALUES (?, ?)
@@ -214,7 +214,7 @@ impl SelfGroupKeyPackageStore {
 
     pub async fn get(&self, id: i32) -> anyhow::Result<Vec<u8>> {
         log::info!("store select: self_group_key_package id={}", id);
-        let row = sqlx::query(
+        let row = crate::sql::query(
             r#"
                 SELECT key_package FROM self_group_key_packages
                 WHERE id = ?
@@ -231,7 +231,7 @@ impl SelfGroupKeyPackageStore {
 
     pub async fn delete(&self, id: i32) -> anyhow::Result<()> {
         log::info!("store delete: self_group_key_package id={}", id);
-        sqlx::query(
+        crate::sql::query(
             r#"
                 DELETE FROM self_group_key_packages
                 WHERE id = ?
@@ -251,7 +251,7 @@ impl SelfGroupKeyPackageStore {
                 "DELETE FROM self_group_key_packages WHERE id IN ({})",
                 placeholders
             );
-            let mut q = sqlx::query(&query);
+            let mut q = crate::sql::query(&query);
             for id in chunk {
                 q = q.bind(id);
             }
@@ -282,7 +282,7 @@ impl GroupKeyPackageStore {
     }
 
     pub async fn contains(&self, id: &[u8]) -> bool {
-        sqlx::query(
+        crate::sql::query(
             r#"
                 SELECT 1 FROM group_key_packages
                 WHERE id = ?
@@ -301,7 +301,7 @@ impl GroupKeyPackageStore {
 impl MlsKeyPackageStorage for GroupKeyPackageStore {
     async fn insert(&self, id: Vec<u8>, key_package_data: Vec<u8>) -> bool {
         log::info!("store insert: group_key_package id={}", hex::encode(&id));
-        sqlx::query(
+        crate::sql::query(
             r#"
                 INSERT INTO group_key_packages (id, key_package)
                 VALUES (?, ?)
@@ -316,7 +316,7 @@ impl MlsKeyPackageStorage for GroupKeyPackageStore {
 
     async fn delete(&self, id: Vec<u8>) -> bool {
         log::info!("store delete: group_key_package id={}", hex::encode(&id));
-        sqlx::query(
+        crate::sql::query(
             r#"
                 DELETE FROM group_key_packages
                 WHERE id = ?
@@ -330,7 +330,7 @@ impl MlsKeyPackageStorage for GroupKeyPackageStore {
 
     async fn get(&self, id: Vec<u8>) -> Option<Vec<u8>> {
         log::info!("store select: group_key_package id={}", hex::encode(&id));
-        let row = sqlx::query(
+        let row = crate::sql::query(
             r#"
                 SELECT key_package FROM group_key_packages
                 WHERE id = ?
@@ -373,7 +373,7 @@ impl GroupInfoStore {
 
     pub async fn get_all(&self) -> anyhow::Result<Vec<GroupInfo>> {
         log::info!("store select: group_infos all");
-        let rows = sqlx::query(
+        let rows = crate::sql::query(
             r#"
                 SELECT id, group_state_id, name, description FROM group_infos
                 "#,
@@ -403,7 +403,7 @@ impl GroupInfoStore {
 
     pub async fn get(&self, id: u64) -> anyhow::Result<GroupInfo> {
         log::info!("store select: group_info id={}", id);
-        let row = sqlx::query(
+        let row = crate::sql::query(
             r#"
                 SELECT id, group_state_id, name, description FROM group_infos WHERE id = ?
                 "#,
@@ -435,7 +435,7 @@ impl GroupInfoStore {
         group_state_id: Vec<u8>,
     ) -> anyhow::Result<()> {
         log::info!("store insert: group_info id={} name={}", id, name);
-        sqlx::query(
+        crate::sql::query(
             r#"
                 INSERT OR REPLACE INTO group_infos (id, name, description, group_state_id) VALUES (?, ?, ?, ?)
                 "#,
@@ -452,7 +452,7 @@ impl GroupInfoStore {
 
     pub async fn delete(&self, id: u64) -> anyhow::Result<()> {
         log::info!("store delete: group_info id={}", id);
-        sqlx::query("DELETE FROM group_infos WHERE id = ?")
+        crate::sql::query("DELETE FROM group_infos WHERE id = ?")
             .bind(id as i64)
             .execute(&self.pool)
             .await?;
@@ -486,7 +486,7 @@ impl GroupInfoStorage for GroupInfoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::SqlitePool;
+    use crate::sql::SqlitePool;
     use std::collections::HashMap;
 
     async fn setup_test_db() -> SqlitePool {

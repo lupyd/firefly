@@ -12,7 +12,7 @@ use firefly_protos::{
 };
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use sqlx::{Row, SqlitePool};
+use crate::sql::{Row, SqlitePool};
 use std::{
     collections::{HashMap, HashSet},
     io::Read,
@@ -286,9 +286,7 @@ impl Remote<'_> {
         op: Option<&firefly::DirectBackupRequest<'_>>,
         id: Option<&str>,
     ) -> anyhow::Result<Vec<u8>> {
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(90))
-            .build()?;
+        let http = crate::utils::http_client_with_timeout(std::time::Duration::from_secs(90))?;
         let url = format!("{}/backups/direct", self.url.trim_end_matches('/'));
         let req = if let Some(op) = op {
             http.post(url)
@@ -302,7 +300,7 @@ impl Remote<'_> {
                 req
             }
         };
-        let mut response = req.bearer_auth(self.token).send().await?;
+        let response = req.bearer_auth(self.token).send().await?;
         anyhow::ensure!(
             response.status().is_success(),
             "Backup server returned {}",
@@ -313,15 +311,7 @@ impl Remote<'_> {
         } else {
             2 * 1024 * 1024
         };
-        let mut bytes = Vec::new();
-        while let Some(part) = response.chunk().await? {
-            anyhow::ensure!(
-                bytes.len() + part.len() <= limit,
-                "Backup response too large"
-            );
-            bytes.extend_from_slice(&part);
-        }
-        Ok(bytes)
+        crate::utils::read_body_limited(response, limit, "Backup response too large").await
     }
     async fn upload_cdn(
         &self,
@@ -332,9 +322,7 @@ impl Remote<'_> {
         if self.cdn_url.is_empty() {
             return Ok(());
         }
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(90))
-            .build()?;
+        let http = crate::utils::http_client_with_timeout(std::time::Duration::from_secs(90))?;
         let url = format!("{}{}", self.cdn_url.trim_end_matches('/'), blob_path);
         let hex_hash: String = hash.iter().map(|b| format!("{b:02x}")).collect();
         let res = http
@@ -358,9 +346,7 @@ impl Remote<'_> {
         c: &Chunk,
     ) -> anyhow::Result<Vec<u8>> {
         if !self.cdn_url.is_empty() && !c.blob_path.is_empty() {
-            let http = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(90))
-                .build()?;
+            let http = crate::utils::http_client_with_timeout(std::time::Duration::from_secs(90))?;
             let url = format!("{}{}", self.cdn_url.trim_end_matches('/'), c.blob_path);
             let res = http
                 .get(url)
@@ -369,12 +355,7 @@ impl Remote<'_> {
                 .await?;
             if res.status().is_success() {
                 let limit = MAX_PLAIN + 65536;
-                let mut bytes = Vec::new();
-                let mut res = res;
-                while let Some(part) = res.chunk().await? {
-                    anyhow::ensure!(bytes.len() + part.len() <= limit, "Backup chunk too large");
-                    bytes.extend_from_slice(&part);
-                }
+                let bytes = crate::utils::read_body_limited(res, limit, "Backup chunk too large").await?;
                 if !c.ciphertext_hash.is_empty() {
                     let hash = Sha256::digest(&bytes);
                     anyhow::ensure!(hash.as_slice() == c.ciphertext_hash.as_ref(), "CDN chunk hash mismatch");
@@ -638,7 +619,7 @@ async fn local(pool: &SqlitePool) -> anyhow::Result<Vec<UserMessage>> {
     let mut cursor = -1i64;
     let mut budget = 0;
     loop {
-        let rows=sqlx::query("SELECT id,other,message,sent_by_other,message_type FROM user_messages WHERE id>? ORDER BY id LIMIT 500").bind(cursor).fetch_all(pool).await?;
+        let rows=crate::sql::query("SELECT id,other,message,sent_by_other,message_type FROM user_messages WHERE id>? ORDER BY id LIMIT 500").bind(cursor).fetch_all(pool).await?;
         if rows.is_empty() {
             break;
         }
@@ -674,7 +655,7 @@ fn reference_id(m: &UserMessage) -> Option<u64> {
 pub async fn import(pool: &SqlitePool, records: &[UserMessage]) -> anyhow::Result<usize> {
     // BEGIN IMMEDIATE prevents a concurrent incoming message from racing ID allocation.
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let total: i64 = sqlx::query_scalar(
+    let total: i64 = crate::sql::query_scalar(
         "SELECT COALESCE(SUM(length(message)+length(other)+64),0) FROM user_messages",
     )
     .fetch_one(&mut *tx)
@@ -683,7 +664,7 @@ pub async fn import(pool: &SqlitePool, records: &[UserMessage]) -> anyhow::Resul
         total >= 0 && total as usize <= MAX_ARCHIVE,
         "Local restore exceeds memory limit"
     );
-    let rows = sqlx::query("SELECT id,other,message,sent_by_other,message_type FROM user_messages")
+    let rows = crate::sql::query("SELECT id,other,message,sent_by_other,message_type FROM user_messages")
         .fetch_all(&mut *tx)
         .await?;
     let mut ids = HashSet::new();
@@ -730,7 +711,7 @@ pub async fn import(pool: &SqlitePool, records: &[UserMessage]) -> anyhow::Resul
             !ids.contains(&m.id),
             "Restore ID collision; no messages were imported. Reference-safe remapping required"
         );
-        sqlx::query("INSERT INTO user_messages(id,other,message,sent_by_other,message_type,text) VALUES(?,?,?,?,?,?)")
+        crate::sql::query("INSERT INTO user_messages(id,other,message,sent_by_other,message_type,text) VALUES(?,?,?,?,?,?)")
             .bind(m.id as i64).bind(&m.other).bind(&m.message).bind(m.sent_by_other).bind(i64::from(m.message_type)).bind(crate::db::messages::extract_user_message_text(&m.message)).execute(&mut *tx).await?;
         ids.insert(m.id);
         hashes.insert(hash, m.id);
@@ -869,7 +850,7 @@ mod tests {
             import(&pool, &[message(12, "hello"), message(7, "new")]).await?,
             0
         );
-        let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM user_messages ORDER BY id")
+        let ids: Vec<i64> = crate::sql::query_scalar("SELECT id FROM user_messages ORDER BY id")
             .fetch_all(&pool)
             .await?;
         assert_eq!(ids, vec![7, 99]);
@@ -884,7 +865,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user_messages")
+        let count: i64 = crate::sql::query_scalar("SELECT COUNT(*) FROM user_messages")
             .fetch_one(&pool)
             .await?;
         assert_eq!(count, 1);
@@ -913,7 +894,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user_messages")
+        let count: i64 = crate::sql::query_scalar("SELECT COUNT(*) FROM user_messages")
             .fetch_one(&pool)
             .await?;
         assert_eq!(count, 1);

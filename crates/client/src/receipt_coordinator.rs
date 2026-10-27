@@ -1,10 +1,10 @@
-use sqlx::{Row, SqlitePool};
+use crate::sql::{Row, SqlitePool};
 
 pub struct ReceiptCoordinator;
 
 impl ReceiptCoordinator {
     pub async fn init(pool: &SqlitePool) -> anyhow::Result<()> {
-        sqlx::query(
+        crate::sql::query(
             r#"
             CREATE TABLE IF NOT EXISTS key_value_store (
                 key TEXT PRIMARY KEY,
@@ -36,8 +36,8 @@ impl ReceiptCoordinator {
         value: &str,
     ) -> anyhow::Result<i64> {
         Self::init(pool).await?;
-        let now = chrono::Utc::now().timestamp_millis();
-        let res = sqlx::query(
+        let now = crate::utils::get_current_timestamp_millis_since_epoch() as i64;
+        let res = crate::sql::query(
             "INSERT INTO receipt_journal (group_id, epoch, capability_key, capability_value, state, created_at) VALUES (?, ?, ?, ?, 'staged', ?)"
         )
         .bind(group_id)
@@ -57,12 +57,12 @@ impl ReceiptCoordinator {
         value: &str,
     ) -> anyhow::Result<()> {
         let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("INSERT OR REPLACE INTO key_value_store (key, value) VALUES (?, ?)")
+        crate::sql::query("INSERT OR REPLACE INTO key_value_store (key, value) VALUES (?, ?)")
             .bind(key)
             .bind(value)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE receipt_journal SET state = 'committed' WHERE id = ?")
+        crate::sql::query("UPDATE receipt_journal SET state = 'committed' WHERE id = ?")
             .bind(journal_id)
             .execute(&mut *tx)
             .await?;
@@ -71,7 +71,7 @@ impl ReceiptCoordinator {
     }
 
     pub async fn recover(pool: &SqlitePool) -> anyhow::Result<usize> {
-        let table_exists: Option<i64> = sqlx::query_scalar(
+        let table_exists: Option<i64> = crate::sql::query_scalar(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipt_journal'"
         )
         .fetch_optional(pool)
@@ -80,7 +80,7 @@ impl ReceiptCoordinator {
             return Ok(0);
         }
 
-        let rows = sqlx::query(
+        let rows = crate::sql::query(
             "SELECT id, capability_key, capability_value FROM receipt_journal WHERE state = 'staged'"
         )
         .fetch_all(pool)
@@ -93,12 +93,12 @@ impl ReceiptCoordinator {
             let val: Option<String> = row.try_get("capability_value").ok();
             if let (Some(k), Some(v)) = (key, val) {
                 let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-                sqlx::query("INSERT OR REPLACE INTO key_value_store (key, value) VALUES (?, ?)")
+                crate::sql::query("INSERT OR REPLACE INTO key_value_store (key, value) VALUES (?, ?)")
                     .bind(&k)
                     .bind(&v)
                     .execute(&mut *tx)
                     .await?;
-                sqlx::query("UPDATE receipt_journal SET state = 'committed' WHERE id = ?")
+                crate::sql::query("UPDATE receipt_journal SET state = 'committed' WHERE id = ?")
                     .bind(id)
                     .execute(&mut *tx)
                     .await?;

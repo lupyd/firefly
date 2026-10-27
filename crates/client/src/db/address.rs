@@ -1,5 +1,5 @@
-use sqlx::{Pool, Sqlite};
-use sqlx::{SqlitePool, prelude::*};
+use crate::sql::{Pool, Sqlite};
+use crate::sql::{SqlitePool, prelude::*};
 
 #[derive(Clone)]
 pub struct AddressStore {
@@ -33,7 +33,7 @@ impl AddressStore {
         );
         let q = "INSERT INTO addresses (id, username, device_id) VALUES (?, ?, ?)";
 
-        sqlx::query(q)
+        crate::sql::query(q)
             .bind(id as i64)
             .bind(username)
             .bind(device_id)
@@ -46,7 +46,7 @@ impl AddressStore {
     pub async fn get(&self, username: &str) -> anyhow::Result<Vec<AddressIdAndDeviceId>> {
         let q = "SELECT id, device_id FROM addresses WHERE username = ?";
 
-        let rows = sqlx::query(q).bind(username).fetch_all(&self.pool).await?;
+        let rows = crate::sql::query(q).bind(username).fetch_all(&self.pool).await?;
 
         let mut addresses = Vec::with_capacity(rows.len());
 
@@ -72,7 +72,7 @@ impl AddressStore {
         );
         let q = "DELETE FROM addresses WHERE username = ? AND device_id = ?";
 
-        sqlx::query(q)
+        crate::sql::query(q)
             .bind(username)
             .bind(device_id)
             .execute(&self.pool)
@@ -85,7 +85,7 @@ impl AddressStore {
         log::info!("store delete: address id={}", id);
         let q = "DELETE FROM addresses WHERE id = ?";
 
-        sqlx::query(q).bind(id as i64).execute(&self.pool).await?;
+        crate::sql::query(q).bind(id as i64).execute(&self.pool).await?;
 
         Ok(())
     }
@@ -93,7 +93,7 @@ impl AddressStore {
     pub async fn get_by_id(&self, id: u64) -> anyhow::Result<Option<AddressIdAndDeviceId>> {
         let q = "SELECT username, device_id FROM addresses WHERE id = ?";
 
-        let row = sqlx::query(q)
+        let row = crate::sql::query(q)
             .bind(id as i64)
             .fetch_optional(&self.pool)
             .await?;

@@ -1,4 +1,4 @@
-use sqlx::{Row, SqlitePool};
+use crate::sql::{Row, SqlitePool};
 use crate::utils::get_current_timestamp_millis_since_epoch;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -25,21 +25,21 @@ impl HistoryKeysStore {
 
     pub async fn save_verified_key(&self, group: u64, start: u64, end: u64, hash: &[u8], key: &[u8], nonce: &[u8]) -> anyhow::Result<()> {
         anyhow::ensure!(group > 0 && start > 0 && end >= start && end <= i64::MAX as u64 && hash.len() == 32 && key.len() == 32 && nonce.len() == 12, "Invalid history key");
-        sqlx::query("INSERT OR IGNORE INTO group_history_keys_v3(group_id,start_msg_id,end_msg_id,hash,key,nonce) VALUES(?,?,?,?,?,?)")
+        crate::sql::query("INSERT OR IGNORE INTO group_history_keys_v3(group_id,start_msg_id,end_msg_id,hash,key,nonce) VALUES(?,?,?,?,?,?)")
             .bind(group as i64).bind(start as i64).bind(end as i64).bind(hash).bind(key).bind(nonce).execute(&self.pool).await?;
         Ok(())
     }
     pub async fn verified_material(&self, group: u64, start: u64, end: u64, hash: &[u8]) -> anyhow::Result<Option<(Vec<u8>,Vec<u8>)>> {
-        let row=sqlx::query("SELECT key,nonce FROM group_history_keys_v3 WHERE group_id=? AND start_msg_id=? AND end_msg_id=? AND hash=?")
+        let row=crate::sql::query("SELECT key,nonce FROM group_history_keys_v3 WHERE group_id=? AND start_msg_id=? AND end_msg_id=? AND hash=?")
             .bind(group as i64).bind(start as i64).bind(end as i64).bind(hash).fetch_optional(&self.pool).await?;
         row.map(|r| Ok((r.try_get(0)?,r.try_get(1)?))).transpose()
     }
     pub async fn verified_key(&self, group: u64, start: u64, end: u64, hash: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
-        Ok(sqlx::query_scalar("SELECT key FROM group_history_keys_v3 WHERE group_id=? AND start_msg_id=? AND end_msg_id=? AND hash=?")
+        Ok(crate::sql::query_scalar("SELECT key FROM group_history_keys_v3 WHERE group_id=? AND start_msg_id=? AND end_msg_id=? AND hash=?")
             .bind(group as i64).bind(start as i64).bind(end as i64).bind(hash).fetch_optional(&self.pool).await?)
     }
     pub async fn is_imported(&self, group: u64, chunk: u64, hash: &[u8]) -> anyhow::Result<bool> {
-        Ok(sqlx::query_scalar::<_,i64>("SELECT 1 FROM group_history_imported_chunks WHERE group_id=? AND chunk_id=? AND hash=?")
+        Ok(crate::sql::query_scalar::<_,i64>("SELECT 1 FROM group_history_imported_chunks WHERE group_id=? AND chunk_id=? AND hash=?")
             .bind(group as i64).bind(chunk as i64).bind(hash).fetch_optional(&self.pool).await?.is_some())
     }
     pub async fn save_chunk_key(
@@ -51,7 +51,7 @@ impl HistoryKeysStore {
         nonce: &[u8],
     ) -> anyhow::Result<()> {
         let now = get_current_timestamp_millis_since_epoch() as i64;
-        sqlx::query(
+        crate::sql::query(
             r#"
             INSERT INTO group_history_chunk_keys (group_id, start_msg_id, end_msg_id, key, nonce, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -78,7 +78,7 @@ impl HistoryKeysStore {
         start_msg_id: u64,
         end_msg_id: u64,
     ) -> anyhow::Result<Option<(Vec<u8>, Vec<u8>)>> {
-        let row = sqlx::query(
+        let row = crate::sql::query(
             r#"
             SELECT key, nonce FROM group_history_chunk_keys
             WHERE group_id = ? AND start_msg_id = ? AND end_msg_id = ?
@@ -101,7 +101,7 @@ impl HistoryKeysStore {
         &self,
         group_id: u64,
     ) -> anyhow::Result<Vec<GroupHistoryChunkKeyRecord>> {
-        let rows = sqlx::query(
+        let rows = crate::sql::query(
             r#"
             SELECT group_id, start_msg_id, end_msg_id, key, nonce, created_at
             FROM group_history_chunk_keys
@@ -142,7 +142,7 @@ impl HistoryKeysStore {
         reason: &str,
     ) -> anyhow::Result<()> {
         let now = get_current_timestamp_millis_since_epoch() as i64;
-        sqlx::query(
+        crate::sql::query(
             r#"
             INSERT INTO group_history_disapprovals (group_id, chunk_id, reason, disapproved_at)
             VALUES (?, ?, ?, ?)
@@ -166,7 +166,7 @@ impl HistoryKeysStore {
         group_id: u64,
         chunk_id: u64,
     ) -> anyhow::Result<bool> {
-        let row = sqlx::query(
+        let row = crate::sql::query(
             "SELECT 1 FROM group_history_disapprovals WHERE group_id = ? AND chunk_id = ? LIMIT 1"
         )
         .bind(group_id as i64)
