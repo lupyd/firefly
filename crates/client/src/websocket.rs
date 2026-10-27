@@ -6805,6 +6805,13 @@ impl FfiFireflyWsClient {
         self.inner.address_id()
     }
 
+    /// The address this device registered with the server earlier, read from local storage;
+    /// 0 means connecting will register a brand new device (which may evict another one).
+    pub async fn registered_address_id(&self) -> anyhow::Result<u64> {
+        let identity = self.inner.key_stores.store().identity_store.get_full_identity_key_pair().await?;
+        Ok(identity.id as u64)
+    }
+
     pub async fn get_device_id(&self) -> u32 {
         self.inner.get_device_id().await
     }
