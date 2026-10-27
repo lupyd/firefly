@@ -24,6 +24,11 @@ use firefly_core::storage_provider::{
 use firefly_client::utils::{deserialize_proto, serialize_proto, HTTP_CLIENT};
 use firefly_protos::firefly::{self};
 
+/// Percent-encodes a user/server-controlled value for interpolation into a URL query.
+fn encode_query_component(value: &str) -> String {
+    String::from(js_sys::encode_uri_component(value))
+}
+
 #[wasm_bindgen(js_name = initLogger)]
 pub fn init_logger(_file_path: String) {
     std::panic::set_hook(Box::new(|info| {
@@ -1347,7 +1352,11 @@ impl FireflyClientNode {
 
             if response.status().is_success() {
                 if let Ok(bytes) = response.bytes().await {
-                    if let Ok(resp_address) = deserialize_proto::<firefly::Address>(&bytes) {
+                    if let Ok(resp_address) = deserialize_proto::<firefly::Address>(&bytes)
+                        && u8::try_from(resp_address.deviceId)
+                            .ok()
+                            .is_some_and(|d| DeviceId::new(d).is_ok())
+                    {
                         address_id_atomic.store(resp_address.id, Ordering::Relaxed);
                         device_id_atomic.store(resp_address.deviceId, Ordering::Relaxed);
                         let _ = ks
@@ -1486,7 +1495,7 @@ impl FireflyClientNode {
 
             let ws_url = format!(
                 "{}?uid={}&device_id={}&last_synced_upto=0&token={}",
-                base_ws_url, address_id, device_id, token
+                base_ws_url, address_id, device_id, encode_query_component(&token)
             );
 
             let ws = WebSocket::new(&ws_url)
@@ -1524,10 +1533,22 @@ impl FireflyClientNode {
                         if let Ok(server_msg) = deserialize_proto::<firefly::ServerMessage<'_>>(&bytes) {
                             match server_msg.message {
                                 firefly::mod_ServerMessage::OneOfmessage::userMessage(um) => {
+                                    // fromDeviceId is server/peer supplied: validate it (and
+                                    // avoid `as u8` truncation) before taking the key-store lock.
+                                    let Some(from_device_id) = u8::try_from(um.fromDeviceId)
+                                        .ok()
+                                        .and_then(|d| DeviceId::new(d).ok())
+                                    else {
+                                        log::warn!(
+                                            "dropping user message {} from {}: invalid device id {}",
+                                            um.id, um.fromUsername, um.fromDeviceId
+                                        );
+                                        return;
+                                    };
                                     let mut ks_guard = ks.write().await;
                                     let other_addr = ProtocolAddress::new(
                                         um.fromUsername.to_string(),
-                                        DeviceId::new(um.fromDeviceId as u8).unwrap(),
+                                        from_device_id,
                                     );
                                     if let Ok(decrypted) = ks_guard.decrypt(other_addr, um.text.to_vec(), um.type_pb as u8).await {
                                         let message_type = deserialize_proto::<firefly::UserMessageInner>(&decrypted)
@@ -1675,7 +1696,23 @@ impl FireflyClientNode {
                                         for request in requests.requests {
                                             let grp_ident = gis.get(request.group_id).await.map(|g| g.identifier).unwrap_or_default();
                                             if let Ok(group) = mls_guard.load_group(request.group_id, grp_ident).await {
-                                                if let Ok(id) = group.add_member(request.username.to_string(), 0).await {
+                                                // The server is untrusted: only re-add current members or users this
+                                                // client saw leave through a stale-device cleanup (same gate as native).
+                                                let decision = group.re_add_decision(&request.username).await;
+                                                if !decision.is_allowed() {
+                                                    log::warn!(
+                                                        "refusing re-add of {} (address {}) into group {}: {:?}",
+                                                        request.username, request.address_id, request.group_id, decision
+                                                    );
+                                                    continue;
+                                                }
+                                                let res = match group.re_add_member(request.username.to_string(), request.address_id).await {
+                                                    Err(_) if decision == firefly_client::group::ReAddDecision::AllowedStaleDeparture => {
+                                                        group.add_member(request.username.to_string(), 0).await
+                                                    }
+                                                    res => res,
+                                                };
+                                                if let Ok(id) = res {
                                                     let _ = gms.update_cursor(id, request.group_id, group.epoch().await as u32).await;
                                                 }
                                             }
@@ -1820,15 +1857,35 @@ impl FireflyClientNode {
             let mut other_addresses = ks.address_store.get(&to).await.unwrap_or_default();
             if other_addresses.is_empty() {
                 let token = callbacks.get_access_token().await.unwrap_or_default();
-                let url = format!("{}/user/preKeyBundles?other={}", base_url, to);
+                let url = format!("{}/user/preKeyBundles?other={}", base_url, encode_query_component(&to));
                 if let Ok(resp) = HTTP_CLIENT.get(&url).bearer_auth(&token).send().await {
                     if resp.status().is_success() {
                         if let Ok(bytes) = resp.bytes().await {
                             if let Ok(entries) = deserialize_proto::<firefly::PreKeyBundleEntries>(&bytes) {
                                 for entry in entries.entries {
+                                    // Only accept bundles for the user we asked for; a
+                                    // malicious server must not be able to inject extra
+                                    // identities or devices under another name.
+                                    if entry.username != to.as_str() {
+                                        log::warn!(
+                                            "rejecting prekey bundle for {} (requested {})",
+                                            entry.username, to
+                                        );
+                                        continue;
+                                    }
+                                    let Some(entry_device_id) = u8::try_from(entry.device_id)
+                                        .ok()
+                                        .filter(|d| DeviceId::new(*d).is_ok())
+                                    else {
+                                        log::warn!(
+                                            "rejecting prekey bundle for {}: invalid device id {}",
+                                            to, entry.device_id
+                                        );
+                                        continue;
+                                    };
                                     if let Some(bundle) = entry.bundle {
                                         let _ = ks.process_pre_key_bundle(entry.username.to_string(), bundle.into()).await;
-                                        let _ = ks.address_store.add(entry.address, &entry.username, entry.device_id as u8).await;
+                                        let _ = ks.address_store.add(entry.address, &entry.username, entry_device_id).await;
                                     }
                                 }
                             }

@@ -475,7 +475,14 @@ export class FireflyClient {
   }
 
   private _saveSession(): void {
-    fs.writeFileSync(this.sessionFile, JSON.stringify(this.session, null, 2), 'utf8');
+    // The session holds access/refresh tokens: keep it owner-readable only.
+    fs.writeFileSync(this.sessionFile, JSON.stringify(this.session, null, 2), { encoding: 'utf8', mode: 0o600 });
+    // `mode` only applies on creation; tighten perms on a pre-existing file too.
+    try {
+      fs.chmodSync(this.sessionFile, 0o600);
+    } catch (e) {
+      console.error('Failed to restrict permissions on session file.');
+    }
   }
 
   // Exchange Code
@@ -583,7 +590,7 @@ export class FireflyClient {
         }
       });
 
-      server.listen(this.port, () => {
+      server.listen(this.port, '127.0.0.1', () => {
         const authUrl = `${this.auth0Domain}/authorize?` + new URLSearchParams({
           client_id: this.auth0ClientId,
           audience: this.auth0Audience,
@@ -751,7 +758,6 @@ export class FireflyClient {
       getAccessToken: () => {
         console.log(`[getAccessToken Callback] requested for ${this.session.username}`);
         const token = this.session.access_token;
-        console.log(`[getAccessToken Callback] returning token: ${token}`);
         return token;
       },
 
@@ -760,7 +766,6 @@ export class FireflyClient {
           console.error("onMessage error:", err);
           return;
         }
-        console.log("[onMessage] trigger check, msgJson:", msgJson);
         if (!msgJson) return;
         try {
           const msg = JSON.parse(msgJson);
@@ -768,15 +773,14 @@ export class FireflyClient {
           const sentByOther = msg.sentByOther ?? msg.sent_by_other;
           const message = msg.message;
 
-          console.log(`[onMessage] msg received from: ${other}, sentByOther: ${sentByOther}`);
+          console.log(`[onMessage] msg ${msg.id} received from: ${other}, sentByOther: ${sentByOther}`);
           if (!sentByOther) return; // skip outgoing
 
           const decoded = UserMessageInner.decode(new Uint8Array(message));
-          console.log('[onMessage] decoded inner message:', JSON.stringify(decoded, (k, v) => typeof v === 'bigint' ? v.toString() : v));
           const text = decoded.messagePayload?.text;
           if (!text) return;
 
-          console.log(`[Direct Message] From: ${other}, Content: "${text}"`);
+          console.log(`[Direct Message] id: ${msg.id}, From: ${other}, length: ${text.length}`);
           await this._handleMessage({
             text,
             sender: other,
@@ -794,7 +798,6 @@ export class FireflyClient {
           console.error("onGroupMessage error:", err);
           return;
         }
-        console.log("[onGroupMessage] trigger check, msgJson:", msgJson);
         if (!msgJson) return;
         try {
           const msg = JSON.parse(msgJson);
@@ -803,15 +806,14 @@ export class FireflyClient {
           const message = msg.message;
           const channelId = msg.channelId ?? msg.channel_id;
 
-          console.log(`[onGroupMessage] msg received from: ${by}, group: ${groupId}`);
+          console.log(`[onGroupMessage] msg ${msg.id} received from: ${by}, group: ${groupId}`);
           if (by === this.session.username) return; // skip outgoing
 
           const decoded = GroupMessageInner.decode(new Uint8Array(message));
-          console.log('[onGroupMessage] decoded inner message:', JSON.stringify(decoded, (k, v) => typeof v === 'bigint' ? v.toString() : v));
           const text = decoded.messagePayload?.text;
           if (!text) return;
 
-          console.log(`[Group Message] Group ID: ${groupId}, By: ${by}, Content: "${text}"`);
+          console.log(`[Group Message] id: ${msg.id}, Group ID: ${groupId}, By: ${by}, length: ${text.length}`);
           await this._handleMessage({
             text,
             sender: by,

@@ -329,7 +329,7 @@ use crate::{
         search::{SearchEngine, SearchResultItem, SearchScope},
         setup_pool_from_path,
     },
-    group::{FfiMlsClient, FfiMlsGroup},
+    group::{FfiMlsClient, FfiMlsGroup, ReAddDecision},
     history::{
         compute_unencrypted_hash, decrypt_and_unpack_chunk, pack_messages_into_chunk,
         DEFAULT_CHUNK_SIZE, MAX_CHUNK_BYTES, history_chunk_url, validate_chunk_records,
@@ -391,6 +391,8 @@ pub struct Connection {
     last_message_sent_ts_secs: Arc<AtomicU64>,
 }
 
+/// Upper bound for a length-prefixed WebTransport frame; the prefix is server-controlled.
+const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 /// How often the WebSocket transport pings the server.
 const WS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 /// Silence after which the WebSocket connection is treated as dead (three missed pongs).
@@ -605,6 +607,10 @@ impl Connection {
                     let mut len_buf = [0u8; 4];
                     while let Ok(()) = uni_stream.read_exact(&mut len_buf).await {
                         let len = u32::from_be_bytes(len_buf) as usize;
+                        if len > MAX_FRAME_LEN {
+                            log::error!("WT server frame of {} bytes exceeds the {} byte limit", len, MAX_FRAME_LEN);
+                            break;
+                        }
                         let mut payload = vec![0u8; len];
                         if uni_stream.read_exact(&mut payload).await.is_err() {
                             break;
@@ -665,6 +671,10 @@ impl Connection {
                                     return;
                                 }
                                 let len = u32::from_be_bytes(len_buf) as usize;
+                                if len > MAX_FRAME_LEN {
+                                    log::error!("WT response of {} bytes exceeds the {} byte limit", len, MAX_FRAME_LEN);
+                                    return;
+                                }
                                 let mut buf = vec![0u8; len];
                                 if recv_stream.read_exact(&mut buf).await.is_err() {
                                     return;
@@ -1684,6 +1694,13 @@ impl FireflyWsClient {
                 .await
                 .context("failed to read response length from WT stream")?;
             let len = u32::from_be_bytes(len_buf) as usize;
+            if len > MAX_FRAME_LEN {
+                return Err(anyhow::anyhow!(
+                    "WT response of {} bytes exceeds the {} byte limit",
+                    len,
+                    MAX_FRAME_LEN
+                ));
+            }
             let mut resp_buf = vec![0u8; len];
             recv_stream
                 .read_exact(&mut resp_buf)
@@ -2297,13 +2314,29 @@ impl FireflyWsClient {
             });
         }
 
-        self.get_and_process_pre_key_bundles_per_ids(&more_addresses_to_send_to, &token)
-            .await?;
+        // The server may only rotate us onto new devices of the recipient or of ourselves
+        // (self-sync copies); anything else would leak the plaintext to a third party.
+        let allowed_usernames = [to, self_username.as_str()];
+        self.get_and_process_pre_key_bundles_per_ids(
+            &more_addresses_to_send_to,
+            Some(&allowed_usernames[..]),
+            &token,
+        )
+        .await?;
 
         let mut upload_request = firefly::UploadUserMessage::default();
         for addressId in more_addresses_to_send_to {
             let address = store.address_store.get_by_id(addressId).await?;
             if let Some(address) = address {
+                if address.username != to && address.username != self_username {
+                    log::warn!(
+                        "ignoring server-requested address {} of {}: not {} or a sibling device",
+                        addressId,
+                        address.username,
+                        to
+                    );
+                    continue;
+                }
                 let is_self = address.username == self_username;
                 let protocol_address =
                     ProtocolAddress::new(address.username, DeviceId::new(address.device_id)?);
@@ -2384,7 +2417,34 @@ impl FireflyWsClient {
 
         let entries = deserialize_proto::<firefly::PreKeyBundleEntries>(&body)?.entries;
 
+        // The server is untrusted: it must not be able to slip another user's
+        // bundle (or address) into the set of devices we encrypt `to`'s messages for.
+        self.process_pre_key_bundle_entries(entries, |entry| entry.username == to)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Processes server-supplied pre key bundles, registering an address only when its
+    /// bundle passed `accept` and was processed into a session. Returns the added address ids.
+    async fn process_pre_key_bundle_entries(
+        &self,
+        entries: Vec<firefly::PreKeyBundleEntry<'_>>,
+        accept: impl Fn(&firefly::PreKeyBundleEntry<'_>) -> bool,
+    ) -> anyhow::Result<Vec<u64>> {
+        let mut added = Vec::with_capacity(entries.len());
         for entry in entries {
+            if !accept(&entry) {
+                log::warn!(
+                    "rejecting key_bundle {} {} {} {}: not requested",
+                    entry.id,
+                    entry.address,
+                    entry.username,
+                    entry.device_id
+                );
+                continue;
+            }
+
             let Some(bundle) = entry.bundle else {
                 log::warn!(
                     "failed to process key_bundle {} {} {} {}: no bundle",
@@ -2396,6 +2456,18 @@ impl FireflyWsClient {
 
                 continue;
             };
+
+            if bundle.deviceId != entry.device_id {
+                log::warn!(
+                    "rejecting key_bundle {} {} {} {}: bundle is for device {}",
+                    entry.id,
+                    entry.address,
+                    entry.username,
+                    entry.device_id,
+                    bundle.deviceId
+                );
+                continue;
+            }
 
             if let Err(err) = self
                 .key_stores
@@ -2409,6 +2481,7 @@ impl FireflyWsClient {
                     entry.username,
                     entry.device_id
                 );
+                continue;
             }
 
             self.key_stores
@@ -2416,9 +2489,10 @@ impl FireflyWsClient {
                 .address_store
                 .add(entry.address, &entry.username, entry.device_id as u8)
                 .await?;
+            added.push(entry.address);
         }
 
-        Ok(())
+        Ok(added)
     }
 
     async fn sync_all_group_messages(&self) -> anyhow::Result<()> {
@@ -2517,11 +2591,14 @@ impl FireflyWsClient {
         Ok(())
     }
 
+    /// Fetches and processes bundles for `ids`, keeping only entries for one of
+    /// `allowed_usernames` (when given). Returns the address ids that were added.
     pub async fn get_and_process_pre_key_bundles_per_ids(
         &self,
         ids: &[u64],
+        allowed_usernames: Option<&[&str]>,
         token: &str,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<u64>> {
         let mut url = String::with_capacity(256);
 
         url.push_str(&self.firefly_base_url);
@@ -2543,40 +2620,11 @@ impl FireflyWsClient {
 
         let entries = deserialize_proto::<firefly::PreKeyBundleEntries>(&body)?.entries;
 
-        for entry in entries {
-            let Some(bundle) = entry.bundle else {
-                log::warn!(
-                    "failed to process key_bundle {} {} {} {}: no bundle",
-                    entry.id,
-                    entry.address,
-                    entry.username,
-                    entry.device_id
-                );
-
-                continue;
-            };
-
-            if let Err(err) = self
-                .key_stores
-                .process_pre_key_bundle(entry.username.to_string(), bundle.into())
-                .await
-            {
-                log::warn!(
-                    "failed to process key_bundle {} {} {} {}: {err}",
-                    entry.id,
-                    entry.address,
-                    entry.username,
-                    entry.device_id
-                );
-            }
-            self.key_stores
-                .store()
-                .address_store
-                .add(entry.address, &entry.username, entry.device_id as u8)
-                .await?;
-        }
-
-        Ok(())
+        self.process_pre_key_bundle_entries(entries, |entry| {
+            ids.contains(&entry.address)
+                && allowed_usernames.map_or(true, |names| names.iter().any(|n| *n == entry.username))
+        })
+        .await
     }
 
     async fn check_key_packages(
@@ -3003,6 +3051,13 @@ impl FireflyWsClient {
         let group = firefly_mls_client
             .load_group(groupId, group_info.identifier.clone())
             .await?;
+
+        if !authorize_server_re_add(&group, request, &self.firefly_base_url, Some(token), addressId)
+            .await
+            .is_allowed()
+        {
+            return Ok(());
+        }
 
         let is_owner = group.is_owner().await.unwrap_or(false);
         if !is_owner {
@@ -3496,10 +3551,13 @@ impl FireflyWsClient {
             .firefly_mls_client
             .get()
             .context("firefly_mls_client is not initialized")?;
-        let group = firefly_mls_client
-            .join_group(groupId, invite.welcomeMessage.to_vec())
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
+        let group = join_group_bound(
+            firefly_mls_client,
+            &self.group_info_store,
+            groupId,
+            invite.welcomeMessage.to_vec(),
+        )
+        .await?;
 
         log::info!("joined group: {}", invite.groupId);
         group.save().await.map_err(|e| anyhow::anyhow!(e))?;
@@ -4251,6 +4309,18 @@ impl FireflyWsClient {
             anyhow::bail!("Failed to delete group [{}]: {}", status, body);
         }
 
+        // Drop all local key material and plaintext for the group, not just its info row, so a
+        // seized device can't decrypt or read anything from a deleted group.
+        let identifier = self
+            .group_info_store
+            .get(groupId)
+            .await
+            .map(|info| info.identifier)
+            .unwrap_or_default();
+        crate::db::group_stores::GroupStateStore::new(self.pool.clone())
+            .await?
+            .purge_group_local_state_with_id(groupId, &identifier)
+            .await?;
         self.group_info_store.delete(groupId).await?;
         self.group_messages_store
             .delete_by_group_id(groupId)
@@ -4583,8 +4653,11 @@ impl FireflyWsClient {
                 1 | 5 => { self.verify_published_chunks(signal.group_id).await?; }
                 2 => {
                     if signal.chunk_id != 0 {
+                        // Disapprovals are relayed by the server without MLS authentication, so
+                        // they may only stop future imports (which the server could withhold
+                        // anyway). Already imported chunks were verified against MLS-distributed
+                        // keys and hashes, so a relayed signal must not purge them.
                         let _ = self.history_keys_store.record_disapproval(signal.group_id, signal.chunk_id, "Disapproved by peer").await;
-                        let _ = self.group_messages_store.purge_imported_chunk(signal.group_id, signal.chunk_id).await;
                     }
                     self.key_value_store.set(&format!("history_export_cursor:{}", signal.group_id), "0").await?;
                     self.archive_ready_history(signal.group_id).await?;
@@ -5039,8 +5112,12 @@ async fn on_group_message(
             }
 
             if let Some(firefly::GroupMessageInner{message:firefly::mod_GroupMessageInner::OneOfmessage::syncBundle(bundle),..})=inner.as_ref() {
-                group_snapshots::accept_bundle(key_value_store,history_keys_store,groupId,bundle).await?;
-                callbacks.on_group_history_signal(crate::callbacks::GroupHistorySignal{group_id:groupId,signal_type:8,request_id:0,chunk_id:0,username:encrypted_group_message.sender.clone()}).await;
+                // MLS already consumed this message, so a rejected bundle must not abort
+                // before the cursor advances (that would stall group sync forever).
+                match group_snapshots::accept_bundle(key_value_store,history_keys_store,groupId,bundle).await {
+                    Ok(_) => callbacks.on_group_history_signal(crate::callbacks::GroupHistorySignal{group_id:groupId,signal_type:8,request_id:0,chunk_id:0,username:encrypted_group_message.sender.clone()}).await,
+                    Err(err) => log::warn!("rejected sync bundle in group {} message {} from {}: {}", groupId, msg.id, encrypted_group_message.sender, err),
+                }
             }
             let channelId = inner.as_ref().map(|i| i.channelId).unwrap_or(0);
             let message_type = inner.as_ref().map(|i| {
@@ -5215,7 +5292,9 @@ async fn on_user_message(
     }
 
     let my_username = callbacks.name();
-    let is_self_msg = msg.settings == 1 || from == my_username;
+    // `settings` is an unauthenticated wire field chosen by the uploader, so only the
+    // Signal-authenticated sender decides whether this came from one of our own devices.
+    let is_self_msg = from == my_username;
 
     let mut is_dummy = false;
     let mut other_username = from.into_owned();
@@ -5264,7 +5343,20 @@ async fn on_user_message(
                             callbacks.on_direct_backup_key_sync(owned_sync).await;
                         }
                     }
+                } else {
+                    log::warn!(
+                        "ignoring selfMessage from {} device {}: not one of our own devices",
+                        msg.fromUsername,
+                        fromDeviceId
+                    );
+                    is_dummy = true;
                 }
+            }
+            firefly::mod_UserMessageInner::OneOfmessage::backupKeySync(_) => {
+                if !is_self_msg {
+                    log::warn!("ignoring backupKeySync from {}: not one of our own devices", msg.fromUsername);
+                }
+                is_dummy = true;
             }
             _ => {
                 if is_self_msg {
@@ -5279,10 +5371,12 @@ async fn on_user_message(
     if let Ok(inner) = deserialize_proto::<firefly::UserMessageInner>(&final_message) {
         if let firefly::mod_UserMessageInner::OneOfmessage::directPinSnapshot(secret) = inner.message {
             is_dummy = true;
-            let conversation_peer = if sent_by_other {
-                other_username.clone()
-            } else {
+            // `secret.other` is only trusted from our own devices; a peer can only
+            // publish a snapshot for its own conversation with us.
+            let conversation_peer = if is_self_msg {
                 secret.other.to_string()
+            } else {
+                other_username.clone()
             };
             callbacks
                 .on_direct_pin_snapshot(
@@ -5415,6 +5509,46 @@ async fn on_user_message(
     Ok(())
 }
 
+/// Shared authorization gate for re-adds the (untrusted) server asks us to perform, used by both
+/// the polled `/group/reAdds` path and the pushed `groupReAddRequests` path. See
+/// [`FfiMlsGroup::re_add_decision`]. On an explicit refusal (the user was kicked or left) the
+/// request is deleted on the server; with no local record it is left for another member's client.
+async fn authorize_server_re_add(
+    group: &FfiMlsGroup,
+    request: &firefly::GroupReAddRequest<'_>,
+    firefly_base_url: &str,
+    token: Option<&str>,
+    my_address_id: u64,
+) -> ReAddDecision {
+    let decision = group.re_add_decision(&request.username).await;
+    match decision {
+        ReAddDecision::Refused => {
+            log::warn!(
+                "[re_add] Refusing and deleting reAdd request for {} (address {}) in group {}: last departure was not a stale-device cleanup",
+                request.username, request.address_id, request.group_id
+            );
+            if let Some(token) = token {
+                let _ = HTTP_CLIENT
+                    .delete(format!(
+                        "{}/group/reAdd?groupId={}&address={}&myAddress={}",
+                        firefly_base_url, request.group_id, request.address_id, my_address_id,
+                    ))
+                    .bearer_auth(token)
+                    .send()
+                    .await;
+            }
+        }
+        ReAddDecision::NoRecord => {
+            log::warn!(
+                "[re_add] Skipping reAdd request for {} (address {}) in group {}: not a member and no recorded stale departure",
+                request.username, request.address_id, request.group_id
+            );
+        }
+        ReAddDecision::AllowedMember | ReAddDecision::AllowedStaleDeparture => {}
+    }
+    decision
+}
+
 async fn re_add_member_internal(
     request: &firefly::GroupReAddRequest<'_>,
     role_id: u32,
@@ -5436,6 +5570,18 @@ async fn re_add_member_internal(
         .load_group(group_id, group_info.identifier)
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
+
+    let decision = authorize_server_re_add(
+        &group,
+        request,
+        firefly_base_url,
+        callbacks.get_access_token().await.as_deref(),
+        my_address_id,
+    )
+    .await;
+    if !decision.is_allowed() {
+        return Ok(());
+    }
 
     let is_owner = group.is_owner().await.unwrap_or(false);
     if !is_owner {
@@ -5468,14 +5614,17 @@ async fn re_add_member_internal(
         .await;
 
     let id = match res {
-        Ok(id) => id,
-        Err(err) => {
+        // The full add (every device, plus a role assignment) is only a fallback for a user who
+        // passed the gate through a recorded stale departure, i.e. has no device left. For a
+        // current member it would add unrequested devices and could reset their role.
+        Err(err) if decision == ReAddDecision::AllowedStaleDeparture => {
             log::warn!(
                 "[re_add_member_internal] group.re_add_member failed, trying group.add_member: {:?}",
                 err
             );
             group.add_member(request.username.to_string(), role_id).await?
         }
+        res => res?,
     };
 
     group_message_store
@@ -5585,6 +5734,52 @@ async fn replenish_key_packages_standalone(
     Ok(())
 }
 
+/// Joins `group_id` from a Welcome, refusing it when that (server-chosen) id is already
+/// bound locally to a different MLS group: otherwise a Welcome for an attacker's group
+/// would silently replace an existing conversation under the same id.
+async fn join_group_bound(
+    firefly_mls_client: &FfiMlsClient,
+    group_info_store: &GroupInfoStore,
+    group_id: u64,
+    welcome_message: Vec<u8>,
+) -> anyhow::Result<Arc<FfiMlsGroup>> {
+    let previous = firefly_mls_client.loaded_group(group_id);
+    let existing_identifier = match group_info_store
+        .get_all()
+        .await?
+        .into_iter()
+        .find(|info| info.id == group_id)
+    {
+        Some(info) => Some(info.identifier),
+        None => match &previous {
+            Some(group) => Some(group.group_identifier().await?),
+            None => None,
+        },
+    };
+
+    let group = firefly_mls_client
+        .join_group(group_id, welcome_message)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    if let Some(existing_identifier) = existing_identifier {
+        let joined_identifier = group.group_identifier().await?;
+        if joined_identifier != existing_identifier {
+            firefly_mls_client.restore_loaded_group(group_id, previous);
+            log::error!(
+                "refusing invite for group {}: Welcome is for a different MLS group than the local one",
+                group_id
+            );
+            return Err(anyhow::anyhow!(
+                "group id {} is already bound to a different MLS group",
+                group_id
+            ));
+        }
+    }
+
+    Ok(group)
+}
+
 async fn join_group_internal(
     invite: &firefly::GroupInvite<'_>,
     token: &str,
@@ -5597,10 +5792,13 @@ async fn join_group_internal(
     callbacks: &Arc<dyn FireflyWsClientCallback>,
 ) -> anyhow::Result<()> {
     let group_id = invite.groupId;
-    let group = firefly_mls_client
-        .join_group(group_id, invite.welcomeMessage.to_vec())
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let group = join_group_bound(
+        firefly_mls_client,
+        group_info_store,
+        group_id,
+        invite.welcomeMessage.to_vec(),
+    )
+    .await?;
 
     log::info!("joined group from invite: {}", invite.groupId);
     group.save().await.map_err(|e| anyhow::anyhow!(e))?;

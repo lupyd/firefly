@@ -17,7 +17,10 @@ lazy_static::lazy_static! {
 }
 
 lazy_static::lazy_static! {
-    pub static ref EMULATOR_MODE: bool = std::env::var("EMULATOR_MODE").unwrap_or_default() == "true";
+    /// Only honoured with the `test-hooks` feature so release builds can never skip credential
+    /// expiry checks via the environment.
+    pub static ref EMULATOR_MODE: bool =
+        cfg!(feature = "test-hooks") && std::env::var("EMULATOR_MODE").unwrap_or_default() == "true";
 }
 
 const BEARER_WORD: &str = "Bearer ";

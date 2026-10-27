@@ -135,7 +135,7 @@ if [ "$1" = "--cmd" ] || [ "$1" = "--run" ]; then
     shift
     "$@"
 elif [ "$#" -eq 0 ]; then
-    cargo test
+    cargo test --features firefly-client/test-hooks
 else
-    cargo test "$@"
+    cargo test --features firefly-client/test-hooks "$@"
 fi

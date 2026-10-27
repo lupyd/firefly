@@ -15,9 +15,16 @@
 use sqlx::{Executor, Row, SqlitePool};
 use std::collections::HashSet;
 
-use crate::db::group_messages::extract_group_message_text;
-use crate::db::messages::extract_user_message_text;
+use crate::db::group_messages::searchable_group_message_text;
+use crate::db::messages::searchable_user_message_text;
 use crate::utils::get_current_timestamp_millis_since_epoch;
+
+/// Highest migration version defined in `run_migrations`. Bump this whenever a migration is
+/// appended, otherwise the fast path will skip the new migration on already-upgraded databases.
+pub const LATEST_MIGRATION_VERSION: i64 = 8;
+
+/// Rows per batch for data backfills (keeps memory and lock hold times bounded).
+const MIGRATION_BATCH_SIZE: i64 = 500;
 
 static MIGRATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -94,12 +101,18 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     )
     .await?;
 
-    // Fast path: If snapshot_inbox_v5 is already applied, return immediately without any table scans.
-    let already_applied: Option<i64> =
-        sqlx::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 5")
-            .fetch_optional(&mut *conn)
-            .await?;
-    if already_applied.is_some() {
+    // Fast path: return immediately when every migration 1..=LATEST is recorded. This is a
+    // primary-key range lookup on the tiny bookkeeping table (at most LATEST rows), never a scan
+    // of message/FTS tables. Requiring every version (not just the latest) means a migration
+    // left unrecorded — e.g. v1 after a failed FTS rebuild, or one interrupted mid-DDL — is
+    // retried on the next startup even if later migrations were recorded.
+    let applied_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM _schema_migrations WHERE version BETWEEN 1 AND ?",
+    )
+    .bind(LATEST_MIGRATION_VERSION)
+    .fetch_one(&mut *conn)
+    .await?;
+    if applied_count == LATEST_MIGRATION_VERSION {
         return Ok(());
     }
 
@@ -210,7 +223,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         // 6. Backfill user_messages text in batches
         let mut had_unmigrated_users = false;
         loop {
-            let batch = sqlx::query("SELECT rowid, message FROM user_messages WHERE text = '' AND length(message) > 0 LIMIT 500")
+            let batch = sqlx::query("SELECT rowid, message, message_type FROM user_messages WHERE text = '' AND length(message) > 0 LIMIT 500")
             .fetch_all(pool)
             .await?;
             if batch.is_empty() {
@@ -220,7 +233,9 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
             for row in batch {
                 let rowid: i64 = row.try_get("rowid")?;
                 let msg_bytes: Vec<u8> = row.try_get("message")?;
-                let text = extract_user_message_text(&msg_bytes);
+                let message_type: i64 = row.try_get("message_type")?;
+                // Hidden rows get " " (non-empty so the loop terminates) instead of their payload.
+                let text = searchable_user_message_text(&msg_bytes, message_type as u32);
                 let update_text = if text.is_empty() { " " } else { text.as_str() };
                 sqlx::query("UPDATE user_messages SET text = ? WHERE rowid = ?")
                     .bind(update_text)
@@ -233,7 +248,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         // 7. Backfill group_messages text in batches
         let mut had_unmigrated_groups = false;
         loop {
-            let batch = sqlx::query("SELECT rowid, message FROM group_messages WHERE text = '' AND length(message) > 0 LIMIT 500")
+            let batch = sqlx::query("SELECT rowid, message, message_type FROM group_messages WHERE text = '' AND length(message) > 0 LIMIT 500")
             .fetch_all(pool)
             .await?;
             if batch.is_empty() {
@@ -243,7 +258,9 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
             for row in batch {
                 let rowid: i64 = row.try_get("rowid")?;
                 let msg_bytes: Vec<u8> = row.try_get("message")?;
-                let text = extract_group_message_text(&msg_bytes);
+                let message_type: i64 = row.try_get("message_type")?;
+                // Hidden rows get " " (non-empty so the loop terminates) instead of their payload.
+                let text = searchable_group_message_text(&msg_bytes, message_type as u32);
                 let update_text = if text.is_empty() { " " } else { text.as_str() };
                 sqlx::query("UPDATE group_messages SET text = ? WHERE rowid = ?")
                     .bind(update_text)
@@ -324,10 +341,15 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
                 .fetch_optional(pool)
                 .await?
                 .is_some();
+        let mut fts_rebuilds_ok = true;
         if had_unmigrated_users || (!fts_user_has_rows && user_msgs_have_text) {
-            let _ = pool
+            if let Err(e) = pool
                 .execute("INSERT INTO user_messages_fts(user_messages_fts) VALUES('rebuild')")
-                .await;
+                .await
+            {
+                log::error!("user_messages_fts rebuild failed, v1 will be retried: {e}");
+                fts_rebuilds_ok = false;
+            }
         }
 
         let fts_grp_has_rows =
@@ -341,17 +363,24 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
                 .await?
                 .is_some();
         if had_unmigrated_groups || (!fts_grp_has_rows && grp_msgs_have_text) {
-            let _ = pool
+            if let Err(e) = pool
                 .execute("INSERT INTO group_messages_fts(group_messages_fts) VALUES('rebuild')")
-                .await;
+                .await
+            {
+                log::error!("group_messages_fts rebuild failed, v1 will be retried: {e}");
+                fts_rebuilds_ok = false;
+            }
         }
 
-        // Record migration 1 applied
-        let now = get_current_timestamp_millis_since_epoch() as i64;
-        let _ = sqlx::query("INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (1, 'standard_v1', ?)")
-            .bind(now)
-            .execute(pool)
-            .await;
+        // Record migration 1 applied only if the FTS indexes are consistent; otherwise leave it
+        // unrecorded so the (idempotent) v1 steps run again on the next startup.
+        if fts_rebuilds_ok {
+            let now = get_current_timestamp_millis_since_epoch() as i64;
+            sqlx::query("INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (1, 'standard_v1', ?)")
+                .bind(now)
+                .execute(pool)
+                .await?;
+        }
     }
 
     // 10. Migration v2: Group History Chunks Keys and Disapprovals
@@ -387,10 +416,10 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
 
         let now = get_current_timestamp_millis_since_epoch() as i64;
-        let _ = sqlx::query("INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (2, 'history_chunks_v2', ?)")
+        sqlx::query("INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (2, 'history_chunks_v2', ?)")
             .bind(now)
             .execute(pool)
-            .await;
+            .await?;
     }
 
     pool.execute(r#"
@@ -441,5 +470,75 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         CREATE INDEX IF NOT EXISTS receipt_journal_staged ON receipt_journal (state);
         INSERT OR IGNORE INTO _schema_migrations(version,name,applied_at) VALUES(6,'receipt_journal_v6',0);
     "#).await?;
+
+    // Migration v7: hidden messages (e.g. group history keys, whose payload is raw key material)
+    // must never be stored as searchable text. Blank `text` for existing hidden rows in bounded
+    // batches; the AFTER UPDATE triggers remove the old text from the FTS indexes.
+    let v7_applied: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 7")
+            .fetch_optional(pool)
+            .await?;
+    if v7_applied.is_none() {
+        for table in ["user_messages", "group_messages"] {
+            // FTS5 'secure-delete' (SQLite >= 3.42, persisted in the FTS config) makes trigger
+            // deletes remove the old tokens from the index b-tree instead of only tombstoning them.
+            if let Err(e) = pool
+                .execute(
+                    format!("INSERT INTO {table}_fts({table}_fts, rank) VALUES('secure-delete', 1)")
+                        .as_str(),
+                )
+                .await
+            {
+                log::warn!("could not enable FTS5 secure-delete on {table}_fts: {e}");
+            }
+            let sql = format!(
+                "UPDATE {table} SET text = '' WHERE rowid IN \
+                 (SELECT rowid FROM {table} WHERE (message_type & ?) != 0 AND text != '' LIMIT ?)"
+            );
+            loop {
+                let updated = sqlx::query(&sql)
+                    .bind(crate::db::search::UNSEARCHABLE_MESSAGE_TYPE_MASK as i64)
+                    .bind(MIGRATION_BATCH_SIZE)
+                    .execute(pool)
+                    .await?
+                    .rows_affected();
+                if updated == 0 {
+                    break;
+                }
+            }
+        }
+        let now = get_current_timestamp_millis_since_epoch() as i64;
+        sqlx::query("INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (7, 'purge_hidden_text_v7', ?)")
+            .bind(now)
+            .execute(pool)
+            .await?;
+    }
+
+    // Migration v8: users who departed a group, recorded from MLS-authenticated commits. Only a
+    // stale departure (every removed device's credential expired) permits an automatic re-add of
+    // a user who is no longer in the roster; the server's re-add requests are untrusted.
+    let v8_applied: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 8")
+            .fetch_optional(pool)
+            .await?;
+    if v8_applied.is_none() {
+        pool.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS group_departed_members (
+                group_id INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                re_addable INTEGER NOT NULL,
+                epoch INTEGER NOT NULL,
+                PRIMARY KEY (group_id, username)
+            );
+            "#,
+        )
+        .await?;
+        let now = get_current_timestamp_millis_since_epoch() as i64;
+        sqlx::query("INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (8, 'group_departed_members_v8', ?)")
+            .bind(now)
+            .execute(pool)
+            .await?;
+    }
     Ok(())
 }

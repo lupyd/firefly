@@ -18,6 +18,9 @@ pub mod migrations;
 pub mod search;
 pub mod stores;
 
+#[cfg(test)]
+mod security_tests;
+
 /// Write transactions must start with `begin_with("BEGIN IMMEDIATE")`: a deferred transaction
 /// that reads before writing fails at once with `database is locked` (SQLITE_BUSY_SNAPSHOT) when
 /// another connection commits in between, without waiting for `busy_timeout`.
@@ -25,7 +28,10 @@ pub async fn setup_pool(url: &str, max_connections: u32) -> Result<sqlx::SqliteP
     let opts = SqliteConnectOptions::from_str(url)?
         .journal_mode(SqliteJournalMode::Wal)
         .foreign_keys(true)
-        .busy_timeout(std::time::Duration::from_secs(10));
+        .busy_timeout(std::time::Duration::from_secs(10))
+        // Overwrite deleted content with zeros so removed key material (epoch secrets, history
+        // keys, sessions) does not linger in free pages / the WAL.
+        .pragma("secure_delete", "ON");
 
     let pool = SqlitePoolOptions::new()
         .max_connections(max_connections)

@@ -13,6 +13,8 @@ use crate::{
     sorted_search::SortedSearch,
 };
 
+pub const OWNER_ROLE_ID: u32 = 1;
+
 #[derive(MlsSize, MlsDecode, MlsEncode, Default, Debug)]
 pub struct FireflyGroupExtension {
     inner: Vec<u8>,
@@ -142,6 +144,11 @@ impl<'a> FireflyGroupExtensionWrapper<'a> {
         Some(perms & !(crate::config::UserPermission::NullPermission as u32))
     }
 
+    /// The group creator holds `OWNER_ROLE_ID`; only owners may rewrite the group context directly.
+    pub fn is_owner(&self, username: &str) -> bool {
+        self.get_role_of_user(username) == Some(OWNER_ROLE_ID)
+    }
+
     pub fn get_role_of_user(&self, username: &str) -> Option<u32> {
         let members = &self.inner.members;
 
@@ -252,8 +259,9 @@ impl<'a> FireflyGroupExtensionWrapper<'a> {
         let idx = channels.search_by_key(&channel_id, |x| x.id).ok()?;
         let channel = &mut channels[idx];
 
+        // role 0 inside a channel is that channel's default, never the group-wide default
         if role_id == 0 {
-            self.update_default_permissions(permissions);
+            channel.default_permissions = permissions;
             return Some(());
         }
 

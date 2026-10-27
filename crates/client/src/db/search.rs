@@ -37,6 +37,19 @@ pub struct SearchResultItem {
     pub score: f64,
 }
 
+/// Message types whose stored text must never be indexed or returned by search:
+/// hidden control messages (e.g. shared group history keys, whose payload is raw key material).
+pub const UNSEARCHABLE_MESSAGE_TYPE_MASK: u32 =
+    firefly_protos::MESSAGE_TYPE_HIDDEN | firefly_protos::MESSAGE_TYPE_HISTORY_KEYS;
+
+// Search SQL inlines this mask as the literal `6`.
+const _: () = assert!(UNSEARCHABLE_MESSAGE_TYPE_MASK == 6);
+
+/// Returns true when a message of this type may have its plaintext stored in `text` / FTS.
+pub fn is_searchable_message_type(message_type: u32) -> bool {
+    message_type & UNSEARCHABLE_MESSAGE_TYPE_MASK == 0
+}
+
 /// Safely sanitizes an arbitrary user search string for SQLite FTS5 MATCH syntax.
 /// Converts user tokens into quoted prefix expressions so special punctuation
 /// (such as punctuation, colons, brackets, or operators) cannot trigger syntax errors.
@@ -220,7 +233,7 @@ impl SearchEngine {
                         fts.rank AS rank_score
                     FROM user_messages_fts fts
                     JOIN user_messages um ON um.rowid = fts.rowid
-                    WHERE user_messages_fts MATCH ?
+                    WHERE user_messages_fts MATCH ? AND (um.message_type & 6) = 0
 
                     UNION ALL
 
@@ -238,7 +251,7 @@ impl SearchEngine {
                         fts.rank AS rank_score
                     FROM group_messages_fts fts
                     JOIN group_messages gm ON gm.rowid = fts.rowid
-                    WHERE group_messages_fts MATCH ?
+                    WHERE group_messages_fts MATCH ? AND (gm.message_type & 6) = 0
 
                     ORDER BY rank_score ASC
                     LIMIT ? OFFSET ?
@@ -306,7 +319,7 @@ impl SearchEngine {
                     fts.rank AS rank_score
                 FROM user_messages_fts fts
                 JOIN user_messages um ON um.rowid = fts.rowid
-                WHERE user_messages_fts MATCH ? AND um.other = ?
+                WHERE user_messages_fts MATCH ? AND (um.message_type & 6) = 0 AND um.other = ?
                 ORDER BY rank_score ASC
                 LIMIT ? OFFSET ?
                 "#,
@@ -324,7 +337,7 @@ impl SearchEngine {
                     fts.rank AS rank_score
                 FROM user_messages_fts fts
                 JOIN user_messages um ON um.rowid = fts.rowid
-                WHERE user_messages_fts MATCH ?
+                WHERE user_messages_fts MATCH ? AND (um.message_type & 6) = 0
                 ORDER BY rank_score ASC
                 LIMIT ? OFFSET ?
                 "#,
@@ -370,7 +383,10 @@ impl SearchEngine {
         limit: u32,
         offset: u32,
     ) -> anyhow::Result<Vec<SearchResultItem>> {
-        let mut conditions = vec!["group_messages_fts MATCH ?".to_string()];
+        let mut conditions = vec![
+            "group_messages_fts MATCH ?".to_string(),
+            "(gm.message_type & 6) = 0".to_string(),
+        ];
         if group_id.is_some() {
             conditions.push("gm.group_id = ?".to_string());
         }

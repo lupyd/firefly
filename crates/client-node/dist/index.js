@@ -51,8 +51,10 @@ var UserPermission;
 })(UserPermission || (exports.UserPermission = UserPermission = {}));
 exports.DEFAULT_GROUP_PERMISSIONS = UserPermission.SeeMessage | UserPermission.AddMessage;
 const initLogger = (filePath) => {
-    if (typeof wasmPkg.init_logger === 'function') {
-        wasmPkg.init_logger(filePath);
+    // The wasm export is `initLogger` (js_name); keep `init_logger` as a fallback for older builds.
+    const init = wasmPkg.initLogger ?? wasmPkg.init_logger;
+    if (typeof init === 'function') {
+        init(filePath);
     }
 };
 exports.initLogger = initLogger;

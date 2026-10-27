@@ -66,6 +66,25 @@ pub fn verify_signed_token<'a, 'b>(
     }
 }
 
+/// The server signs the caller's MLS signature public key into `AuthToken.credential` (`/sign`).
+/// Tokens are public (every leaf node and KeyPackage carries one), so without this check anyone
+/// could pair another user's token with their own signature key and impersonate them.
+fn ensure_credential_bound_to_key(
+    auth_token: &AuthToken,
+    signing_identity: &SigningIdentity,
+) -> Result<(), FireflyError> {
+    if auth_token.credential.as_ref() != signing_identity.signature_key.as_bytes() {
+        log::error!(
+            "credential for '{}' is not bound to the presented signature key",
+            auth_token.username
+        );
+        return Err(FireflyError::Custom(
+            "credential not bound to signature key".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub const CIPHERSUITE: CipherSuite = CipherSuite::P256_AES128;
 
 #[derive(Debug, thiserror::Error)]
@@ -286,7 +305,16 @@ pub struct FireflyIdentityProvider {
     keys_string: Arc<RwLock<(String, u64)>>, // jwks body + expiration time in seconds
 }
 
+/// Upper bound on how long fetched JWKS are trusted, whatever the server's cache headers say.
+const MAX_JWKS_CACHE_SECS: u64 = 24 * 60 * 60;
+
 fn get_expiry_from_headers(headers: &HeaderMap) -> anyhow::Result<(u64, String)> {
+    let (expiry, last_modified) = get_uncapped_expiry_from_headers(headers)?;
+    let cap = get_current_timestamp_in_secs().saturating_add(MAX_JWKS_CACHE_SECS);
+    Ok((expiry.min(cap), last_modified))
+}
+
+fn get_uncapped_expiry_from_headers(headers: &HeaderMap) -> anyhow::Result<(u64, String)> {
     let last_modified = match headers.get(header::LAST_MODIFIED) {
         Some(val) => val.to_str()?.to_string(),
         None => httpdate::HttpDate::from(crate::utils::now_system_time()).to_string(),
@@ -323,7 +351,10 @@ fn get_expiry_from_headers(headers: &HeaderMap) -> anyhow::Result<(u64, String)>
         .to_str()?;
     let response_created_at = httpdate::parse_http_date(date)?;
 
-    let expiry = response_created_at.duration_since(UNIX_EPOCH)?.as_secs() + cache_duration;
+    let expiry = response_created_at
+        .duration_since(UNIX_EPOCH)?
+        .as_secs()
+        .saturating_add(cache_duration);
 
     Ok((expiry, last_modified))
 }
@@ -468,10 +499,14 @@ impl IdentityProvider for FireflyIdentityProvider {
         let credential = FireflyCredential::from_signing_identity(signing_identity)?;
 
         let signed_token: SignedToken = credential.signed_token()?;
-        if let Err(e) = self.verify(&signed_token).await {
-            log::error!("validate_member failed: verify failed: {}", e);
-            return Err(FireflyError::Anyhow(e));
-        }
+        let auth_token = match self.verify(&signed_token).await {
+            Ok(t) => t,
+            Err(e) => {
+                log::error!("validate_member failed: verify failed: {}", e);
+                return Err(FireflyError::Anyhow(e));
+            }
+        };
+        ensure_credential_bound_to_key(&auth_token, signing_identity)?;
 
         Ok(())
     }
@@ -491,7 +526,8 @@ impl IdentityProvider for FireflyIdentityProvider {
     ) -> Result<(), Self::Error> {
         let credential = FireflyCredential::from_signing_identity(signing_identity)?;
         let signed_token = credential.signed_token()?;
-        let _result = self.verify(&signed_token).await?;
+        let auth_token = self.verify(&signed_token).await?;
+        ensure_credential_bound_to_key(&auth_token, signing_identity)?;
 
         Ok(())
     }

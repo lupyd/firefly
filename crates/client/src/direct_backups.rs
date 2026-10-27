@@ -731,7 +731,7 @@ pub async fn import(pool: &SqlitePool, records: &[UserMessage]) -> anyhow::Resul
             "Restore ID collision; no messages were imported. Reference-safe remapping required"
         );
         sqlx::query("INSERT INTO user_messages(id,other,message,sent_by_other,message_type,text) VALUES(?,?,?,?,?,?)")
-            .bind(m.id as i64).bind(&m.other).bind(&m.message).bind(m.sent_by_other).bind(i64::from(m.message_type)).bind(crate::db::messages::extract_user_message_text(&m.message)).execute(&mut *tx).await?;
+            .bind(m.id as i64).bind(&m.other).bind(&m.message).bind(m.sent_by_other).bind(i64::from(m.message_type)).bind(crate::db::messages::searchable_user_message_text(&m.message, m.message_type)).execute(&mut *tx).await?;
         ids.insert(m.id);
         hashes.insert(hash, m.id);
         inserted += 1;

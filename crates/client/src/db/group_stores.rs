@@ -4,10 +4,15 @@ use zeroize::Zeroizing;
 use firefly_core::storage_provider::MlsGroupStateStorage;
 use firefly_core::storage_provider::MlsKeyPackageStorage;
 use firefly_core::storage_provider::MlsPreSharedKeyStorage;
-use crate::storage::GroupInfoStorage;
+use crate::storage::{GroupDepartureStorage, GroupInfoStorage};
 use sqlx::Executor;
 use sqlx::SqlitePool;
 use sqlx::prelude::*;
+
+/// Number of most recent prior-epoch records kept per group (mls-rs's own default
+/// `DEFAULT_EPOCH_RETENTION_LIMIT`). Older epoch secrets are deleted for forward secrecy at rest;
+/// application messages from non-current epochs are rejected, so they are never needed.
+pub const EPOCH_RETENTION: i64 = 3;
 
 pub struct GroupStateStore {
     pool: SqlitePool,
@@ -60,6 +65,10 @@ impl GroupStateStore {
         log::info!("store insert: group_state id={}", hex::encode(group_id));
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
+        // NOTE: with `foreign_keys = ON` (see `setup_pool`) REPLACE deletes the old row and the
+        // ON DELETE CASCADE drops every stored prior epoch, so only the epochs inserted below
+        // survive this write. The explicit EPOCH_RETENTION prune further down bounds retention
+        // even where foreign keys are off.
         sqlx::query("INSERT OR REPLACE INTO group_states (id, state) VALUES (?, ?)")
             .bind(group_id)
             .bind(state_data)
@@ -97,8 +106,156 @@ impl GroupStateStore {
             .await?;
         }
 
+        // Keep only the EPOCH_RETENTION newest prior epochs. The newest record is always kept, so
+        // `max_epoch_id` (which mls-rs uses to validate the next inserted epoch id) is unchanged.
+        let pruned = sqlx::query(
+            "DELETE FROM group_epoch_states WHERE id = ?1 AND epoch <= (SELECT MAX(epoch) FROM group_epoch_states WHERE id = ?1) - ?2",
+        )
+        .bind(group_id)
+        .bind(EPOCH_RETENTION)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if pruned > 0 {
+            log::info!(
+                "store delete: pruned {} old group_epoch_states id={}",
+                pruned,
+                hex::encode(group_id)
+            );
+        }
+
         tx.commit().await?;
 
+        Ok(())
+    }
+
+    /// Deletes every piece of local state for one group (MLS state and prior-epoch secrets,
+    /// history keys, messages + FTS entries, favourites, pins, snapshot/history bookkeeping and
+    /// group-scoped key-value entries) in a single transaction.
+    ///
+    /// `group_id` is the MLS group identifier (`group_states.id` / `group_infos.group_state_id`).
+    /// The numeric Firefly group id is resolved through `group_infos`; if that row is already
+    /// gone use [`Self::purge_group_local_state_with_id`] instead so message tables are purged too.
+    pub async fn purge_group_local_state(&self, group_id: &[u8]) -> anyhow::Result<()> {
+        self.purge_group_local_state_inner(None, group_id).await
+    }
+
+    /// Like [`Self::purge_group_local_state`], but with the numeric Firefly group id supplied by
+    /// the caller (still also purges any other numeric id mapped to `identifier` in `group_infos`).
+    pub async fn purge_group_local_state_with_id(
+        &self,
+        numeric_group_id: u64,
+        identifier: &[u8],
+    ) -> anyhow::Result<()> {
+        self.purge_group_local_state_inner(Some(numeric_group_id), identifier)
+            .await
+    }
+
+    async fn purge_group_local_state_inner(
+        &self,
+        numeric_group_id: Option<u64>,
+        identifier: &[u8],
+    ) -> anyhow::Result<()> {
+        log::info!(
+            "store delete: purge group local state id={} numeric={:?}",
+            hex::encode(identifier),
+            numeric_group_id
+        );
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+
+        let existing: std::collections::HashSet<String> =
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
+                .fetch_all(&mut *tx)
+                .await?
+                .into_iter()
+                .collect();
+        let has = |t: &str| existing.contains(t);
+
+        let mut numeric_ids: Vec<i64> = numeric_group_id.map(|g| g as i64).into_iter().collect();
+        if has("group_infos") {
+            let mapped: Vec<i64> =
+                sqlx::query_scalar("SELECT id FROM group_infos WHERE group_state_id = ?")
+                    .bind(identifier)
+                    .fetch_all(&mut *tx)
+                    .await?;
+            for id in mapped {
+                if !numeric_ids.contains(&id) {
+                    numeric_ids.push(id);
+                }
+            }
+        }
+
+        // Tables keyed by the MLS group identifier.
+        for (table, column) in [
+            ("group_epoch_states", "id"),
+            ("group_states", "id"),
+            ("receipt_journal", "group_id"),
+            ("group_infos", "group_state_id"),
+        ] {
+            if has(table) {
+                sqlx::query(&format!("DELETE FROM {table} WHERE {column} = ?"))
+                    .bind(identifier)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+
+        for gid in numeric_ids {
+            // Deleting group_messages fires the FTS delete trigger for each row.
+            for table in [
+                "group_messages",
+                "group_history_keys_v3",
+                "group_history_chunk_keys",
+                "group_history_disapprovals",
+                "group_history_imports",
+                "group_history_imported_chunks",
+                "group_pin_updates",
+                "group_snapshot_inbox",
+                "group_departed_members",
+                "group_infos",
+            ] {
+                if has(table) {
+                    let column = if table == "group_infos" { "id" } else { "group_id" };
+                    sqlx::query(&format!("DELETE FROM {table} WHERE {column} = ?"))
+                        .bind(gid)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+            }
+            if has("favourite_messages") {
+                sqlx::query("DELETE FROM favourite_messages WHERE source = 'group' AND group_id = ?")
+                    .bind(gid)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            if has("key_value_store") {
+                for key in [
+                    format!("snapshot-join-pending:{gid}"),
+                    format!("snapshot-join-completed:{gid}"),
+                    format!("history_export_cursor:{gid}"),
+                    format!("history_verify_cursor:{gid}"),
+                ] {
+                    sqlx::query("DELETE FROM key_value_store WHERE key = ?")
+                        .bind(key)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                // Prefix match without LIKE so `_` / `%` need no escaping.
+                for prefix in [
+                    format!("snapshot-secret:{gid}:"),
+                    format!("snapshot-outbox:{gid}:"),
+                    format!("snapshot-candidate:{gid}:"),
+                    format!("snapshot-archive:{gid}:"),
+                ] {
+                    sqlx::query("DELETE FROM key_value_store WHERE substr(key, 1, length(?1)) = ?1")
+                        .bind(prefix)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+            }
+        }
+
+        tx.commit().await?;
         Ok(())
     }
 
@@ -348,6 +505,57 @@ impl MlsKeyPackageStorage for GroupKeyPackageStore {
 }
 
 pub use crate::storage::GroupInfo;
+
+/// SQLite [`GroupDepartureStorage`] over `group_departed_members` (migration v8).
+#[derive(Clone)]
+pub struct GroupDepartureStore {
+    pool: SqlitePool,
+}
+
+impl GroupDepartureStore {
+    pub async fn new(pool: SqlitePool) -> anyhow::Result<Self> {
+        crate::db::migrations::run_migrations(&pool).await?;
+        Ok(Self { pool })
+    }
+}
+
+#[async_trait::async_trait]
+impl GroupDepartureStorage for GroupDepartureStore {
+    async fn record(&self, group_id: u64, departure: &firefly_core::Departure) -> anyhow::Result<()> {
+        log::info!(
+            "store upsert: group_departed_members group={} user={} re_addable={} epoch={}",
+            group_id, departure.username, departure.re_addable, departure.epoch
+        );
+        sqlx::query(
+            r#"
+            INSERT INTO group_departed_members (group_id, username, re_addable, epoch)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (group_id, username) DO UPDATE SET
+                re_addable = excluded.re_addable,
+                epoch = excluded.epoch
+            WHERE excluded.epoch >= group_departed_members.epoch
+            "#,
+        )
+        .bind(group_id as i64)
+        .bind(&departure.username)
+        .bind(departure.re_addable as i64)
+        .bind(departure.epoch as i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn lookup(&self, group_id: u64, username: &str) -> anyhow::Result<Option<bool>> {
+        let row: Option<i64> = sqlx::query_scalar(
+            "SELECT re_addable FROM group_departed_members WHERE group_id = ? AND username = ?",
+        )
+        .bind(group_id as i64)
+        .bind(username)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|v| v == 1))
+    }
+}
 
 #[derive(Clone)]
 pub struct GroupInfoStore {

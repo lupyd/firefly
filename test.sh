@@ -27,7 +27,7 @@ echo " Note: Run with --docker to spawn temporary containers"
 echo "=========================================="
 
 if [ "$#" -eq 0 ]; then
-    cargo test
+    cargo test --features firefly-client/test-hooks
 else
-    cargo test "$@"
+    cargo test --features firefly-client/test-hooks "$@"
 fi

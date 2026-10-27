@@ -257,6 +257,65 @@ impl MlsGroupStateStorage for MemoryMlsGroupStateStorage {
 // Group Info Store Trait & Memory Implementation
 // ---------------------------------------------------------------------------
 
+/// Records of users who departed a group, derived only from MLS-authenticated commits this client
+/// applied (never from the server). Gates automatic re-adds: see `FfiMlsGroup::may_auto_re_add`.
+#[async_trait::async_trait]
+pub trait GroupDepartureStorage: Send + Sync {
+    /// Upserts the departure; a departure at an equal or later epoch overrides an earlier one.
+    async fn record(&self, group_id: u64, departure: &firefly_core::Departure) -> anyhow::Result<()>;
+    /// The latest recorded departure of `username` from `group_id`: `Some(true)` if it was stale
+    /// (re-addable), `Some(false)` for a kick/leave, `None` if this client has no record.
+    async fn lookup(&self, group_id: u64, username: &str) -> anyhow::Result<Option<bool>>;
+
+    /// True only if the latest recorded departure of `username` from `group_id` was stale.
+    async fn is_re_addable(&self, group_id: u64, username: &str) -> anyhow::Result<bool> {
+        Ok(self.lookup(group_id, username).await? == Some(true))
+    }
+}
+
+/// [`GroupDepartureStorage`] on top of any [`KeyValueStorage`] (used where no SQLite pool exists,
+/// e.g. the wasm client). Value format: `"{re_addable as 0|1}:{epoch}"`.
+pub struct KeyValueGroupDepartureStore {
+    kv: Arc<dyn KeyValueStorage>,
+}
+
+impl KeyValueGroupDepartureStore {
+    pub fn new(kv: Arc<dyn KeyValueStorage>) -> Self {
+        Self { kv }
+    }
+
+    fn key(group_id: u64, username: &str) -> String {
+        format!("group-departure:{group_id}:{username}")
+    }
+
+    async fn load(&self, group_id: u64, username: &str) -> Option<(bool, u64)> {
+        let value = self.kv.get(&Self::key(group_id, username)).await.ok()?;
+        let (flag, epoch) = value.split_once(':')?;
+        Some((flag == "1", epoch.parse().ok()?))
+    }
+}
+
+#[async_trait::async_trait]
+impl GroupDepartureStorage for KeyValueGroupDepartureStore {
+    async fn record(&self, group_id: u64, departure: &firefly_core::Departure) -> anyhow::Result<()> {
+        if let Some((_, epoch)) = self.load(group_id, &departure.username).await {
+            if epoch > departure.epoch {
+                return Ok(());
+            }
+        }
+        self.kv
+            .set(
+                &Self::key(group_id, &departure.username),
+                &format!("{}:{}", departure.re_addable as u8, departure.epoch),
+            )
+            .await
+    }
+
+    async fn lookup(&self, group_id: u64, username: &str) -> anyhow::Result<Option<bool>> {
+        Ok(self.load(group_id, username).await.map(|(re_addable, _)| re_addable))
+    }
+}
+
 #[async_trait::async_trait]
 pub trait GroupInfoStorage: Send + Sync {
     async fn get_all(&self) -> anyhow::Result<Vec<GroupInfo>>;
@@ -1279,10 +1338,14 @@ impl MemoryIdentityDb {
         let key = address.to_string();
         let bytes = identity.serialize().to_vec();
         let mut guard = self.identities.write().await;
-        let existing = guard.insert(key, bytes);
-        Ok(IdentityChange::from_changed(existing.is_none()))
+        let existing = guard.insert(key, bytes.clone());
+        // Changed only when a previous identity existed and differs from the new one.
+        let changed = existing.is_some_and(|previous| previous != bytes);
+        Ok(IdentityChange::from_changed(changed))
     }
 
+    // TODO(security): accepts every identity, so identity key changes are accepted silently.
+    // Trust policy is pending a product decision (see db::stores::IdentityDb::is_trusted_identity).
     pub async fn is_trusted_identity(
         &self,
         _address: &ProtocolAddress,

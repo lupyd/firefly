@@ -10,7 +10,7 @@ pub struct TokenClaims {
 }
 
 pub fn get_claims_from_token(s: &str) -> anyhow::Result<TokenClaims> {
-    if std::env::var("EMULATOR_MODE").unwrap_or_default() == "true" {
+    if *firefly_core::utils::EMULATOR_MODE {
         return Ok(TokenClaims {
             uname: s.to_string(),
             perms: u64::MAX,

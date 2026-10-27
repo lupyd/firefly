@@ -7,11 +7,21 @@ lazy_static::lazy_static! {
     /// Without timeouts a request on a dead network (packets silently dropped) hangs for minutes,
     /// holding up everything waiting on it. The read timeout applies per read, so large
     /// downloads that keep making progress are unaffected.
-    pub static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .read_timeout(std::time::Duration::from_secs(30))
-        .build()
-        .unwrap_or_default();
+    pub static ref HTTP_CLIENT: reqwest::Client = {
+        // The browser fetch backend has no connect/read timeout knobs.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .read_timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_default()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            reqwest::Client::new()
+        }
+    };
 }
 
 pub use firefly_core::utils::now_system_time;

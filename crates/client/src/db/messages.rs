@@ -45,6 +45,16 @@ pub fn extract_user_message_text(message: &[u8]) -> String {
     String::from_utf8_lossy(message).to_string()
 }
 
+/// Text to persist in `user_messages.text` (and therefore the FTS index). Hidden
+/// messages never get their payload stored as searchable text.
+pub fn searchable_user_message_text(message: &[u8], message_type: u32) -> String {
+    if crate::db::search::is_searchable_message_type(message_type) {
+        extract_user_message_text(message)
+    } else {
+        String::new()
+    }
+}
+
 impl MessagesStore {
     pub async fn new(pool: SqlitePool) -> anyhow::Result<Self> {
         crate::db::migrations::run_migrations(&pool).await?;
@@ -162,7 +172,7 @@ impl MessagesStore {
     }
 
     pub async fn insert_user_message(&self, row: UserMessage) -> anyhow::Result<()> {
-        let text = extract_user_message_text(&row.message);
+        let text = searchable_user_message_text(&row.message, row.message_type);
         sqlx::query(
             "INSERT INTO user_messages (id, other, message, sent_by_other, message_type, text) VALUES (?, ?, ?, ?, ?, ?)",
         )
@@ -237,7 +247,7 @@ impl MessagesStore {
         message: Vec<u8>,
     ) -> anyhow::Result<()> {
         let text = extract_user_message_text(&message);
-        sqlx::query("UPDATE user_messages SET message = ?, text = ? WHERE other = ? AND id = ?")
+        sqlx::query("UPDATE user_messages SET message = ?1, text = CASE WHEN (message_type & 6) != 0 THEN '' ELSE ?2 END WHERE other = ?3 AND id = ?4")
             .bind(message)
             .bind(text)
             .bind(other)
@@ -268,7 +278,7 @@ impl MessagesStore {
                     fts.rank AS rank_score
                 FROM user_messages_fts fts
                 JOIN user_messages um ON um.rowid = fts.rowid
-                WHERE user_messages_fts MATCH ? AND um.other = ?
+                WHERE user_messages_fts MATCH ? AND (um.message_type & 6) = 0 AND um.other = ?
                 ORDER BY rank_score ASC
                 LIMIT ? OFFSET ?
                 "#,
@@ -283,7 +293,7 @@ impl MessagesStore {
                     fts.rank AS rank_score
                 FROM user_messages_fts fts
                 JOIN user_messages um ON um.rowid = fts.rowid
-                WHERE user_messages_fts MATCH ?
+                WHERE user_messages_fts MATCH ? AND (um.message_type & 6) = 0
                 ORDER BY rank_score ASC
                 LIMIT ? OFFSET ?
                 "#,
@@ -324,7 +334,8 @@ impl MessagesStore {
         id: u64,
         message_type: u32,
     ) -> anyhow::Result<()> {
-        sqlx::query("UPDATE user_messages SET message_type = ? WHERE other = ? AND id = ?")
+        // Becoming hidden blanks the text so the FTS update trigger drops it from the index.
+        sqlx::query("UPDATE user_messages SET message_type = ?1, text = CASE WHEN (?1 & 6) != 0 THEN '' ELSE text END WHERE other = ?2 AND id = ?3")
             .bind(message_type as i64)
             .bind(other)
             .bind(id as i64)

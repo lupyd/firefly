@@ -16,14 +16,18 @@ use mls_rs::identity::SigningIdentity;
 use firefly_core::storage_provider::{
     MlsGroupStateStorage, MlsKeyPackageStorage, MlsPreSharedKeyStorage,
 };
-use crate::storage::{GroupInfoStorage, KeyValueStorage};
+use crate::storage::{
+    GroupDepartureStorage, GroupInfoStorage, KeyValueGroupDepartureStore, KeyValueStorage,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 use sqlx::SqlitePool;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::db::{
-    group_stores::{GroupInfoStore, GroupKeyPackageStore, GroupPskStore, GroupStateStore},
+    group_stores::{
+        GroupDepartureStore, GroupInfoStore, GroupKeyPackageStore, GroupPskStore, GroupStateStore,
+    },
     keyvalue::KeyValueStore,
 };
 
@@ -49,6 +53,7 @@ pub struct FfiMlsClient {
     client: FireflyMlsClient,
     base_url: Arc<str>,
     group_info_state: Arc<dyn GroupInfoStorage>,
+    departure_store: Arc<dyn GroupDepartureStorage>,
 
     // figure out a better way to sync groups
     loaded_groups: std::sync::Mutex<HashMap<u64, Arc<FfiMlsGroup>>>,
@@ -137,11 +142,14 @@ impl FfiMlsClient {
 
         let group_info_state: Arc<dyn GroupInfoStorage> =
             Arc::new(GroupInfoStore::new(pool.clone()).await?);
+        let departure_store: Arc<dyn GroupDepartureStorage> =
+            Arc::new(GroupDepartureStore::new(pool.clone()).await?);
 
         Ok(Self {
             client,
             base_url,
             group_info_state,
+            departure_store,
             loaded_groups: Default::default(),
         })
     }
@@ -211,6 +219,9 @@ impl FfiMlsClient {
             identity
         };
 
+        let departure_store: Arc<dyn GroupDepartureStorage> =
+            Arc::new(KeyValueGroupDepartureStore::new(key_value_store.clone()));
+
         let client = FireflyMlsClient::load(
             base_url.to_string(),
             identity.into(),
@@ -226,6 +237,7 @@ impl FfiMlsClient {
             client,
             base_url,
             group_info_state,
+            departure_store,
             loaded_groups: Default::default(),
         })
     }
@@ -249,6 +261,7 @@ pub struct FfiMlsGroup {
     group: FireflyMlsGroup,
     #[allow(unused)]
     base_url: Arc<str>,
+    departure_store: Arc<dyn GroupDepartureStorage>,
 }
 
 impl FfiMlsClient {
@@ -298,6 +311,7 @@ impl FfiMlsClient {
         let group = FfiMlsGroup {
             group,
             base_url: self.base_url.clone(),
+            departure_store: self.departure_store.clone(),
         };
         let group = Arc::new(group);
         {
@@ -324,6 +338,7 @@ impl FfiMlsClient {
         let group = Arc::new(FfiMlsGroup {
             group,
             base_url: self.base_url.clone(),
+            departure_store: self.departure_store.clone(),
         });
         {
             self.loaded_groups
@@ -333,6 +348,20 @@ impl FfiMlsClient {
         }
 
         Ok(group)
+    }
+
+    /// The group currently cached for `group_id`, if any.
+    pub fn loaded_group(&self, group_id: u64) -> Option<Arc<FfiMlsGroup>> {
+        self.loaded_groups.lock().unwrap().get(&group_id).cloned()
+    }
+
+    /// Restores (or clears) the cached group for `group_id`, e.g. after refusing a Welcome.
+    pub fn restore_loaded_group(&self, group_id: u64, group: Option<Arc<FfiMlsGroup>>) {
+        let mut loaded = self.loaded_groups.lock().unwrap();
+        match group {
+            Some(group) => loaded.insert(group_id, group),
+            None => loaded.remove(&group_id),
+        };
     }
 
     pub async fn load_group(
@@ -348,6 +377,7 @@ impl FfiMlsClient {
         let group = Arc::new(FfiMlsGroup {
             group,
             base_url: self.base_url.clone(),
+            departure_store: self.departure_store.clone(),
         });
 
         self.loaded_groups
@@ -404,12 +434,61 @@ impl FfiMlsGroup {
         self.group.is_owner().await
     }
 
+    /// Persists the departures recorded by commits applied through this group since the last
+    /// call. Called after every operation that may apply a commit.
+    async fn persist_departures(&self) {
+        let group_id = self.group.group_id();
+        for departure in self.group.take_departures() {
+            if let Err(err) = self.departure_store.record(group_id, &departure).await {
+                // Losing a record only makes a later re-add of that user fail closed.
+                log::error!(
+                    "failed to record departure {:?} from group {}: {:?}",
+                    departure, group_id, err
+                );
+            }
+        }
+    }
+
+    /// Authorization gate for re-adds requested by the (untrusted) server. Allows `username`
+    /// only if they still have a device in the roster (reinstall / address rotation), or this
+    /// client saw them leave through a stale-device cleanup (every removed device's credential
+    /// had expired) with no later kick/leave. Fails closed when there is no record.
+    pub async fn re_add_decision(&self, username: &str) -> ReAddDecision {
+        self.persist_departures().await;
+        if self.group.has_member_user(username).await {
+            return ReAddDecision::AllowedMember;
+        }
+        match self
+            .departure_store
+            .lookup(self.group.group_id(), username)
+            .await
+        {
+            Ok(Some(true)) => ReAddDecision::AllowedStaleDeparture,
+            Ok(Some(false)) => ReAddDecision::Refused,
+            Ok(None) => ReAddDecision::NoRecord,
+            Err(err) => {
+                log::warn!("departure lookup failed for {}: {:?}", username, err);
+                ReAddDecision::NoRecord
+            }
+        }
+    }
+
+    pub async fn may_auto_re_add(&self, username: &str) -> bool {
+        self.re_add_decision(username).await.is_allowed()
+    }
+
+    /// Re-adds a single device of `username`. Callers acting on server-supplied requests must
+    /// gate this with [`Self::may_auto_re_add`].
     pub async fn re_add_member(&self, username: String, address: u64) -> anyhow::Result<u64> {
-        self.group.re_add_member(username, address).await
+        let res = self.group.re_add_member(username, address).await;
+        self.persist_departures().await;
+        res
     }
 
     pub async fn process(&self, message: Vec<u8>) -> anyhow::Result<FireflyMlsReceivedMessage> {
-        let result = self.group.process(&message).await?;
+        let result = self.group.process(&message).await;
+        self.persist_departures().await;
+        let result = result?;
         Ok(match result {
             firefly_core::FireflyMlsReceivedMessage::Message(msg) => {
                 if let Err(err) = self.group.save().await {
@@ -439,11 +518,15 @@ impl FfiMlsGroup {
     }
 
     pub async fn add_member(&self, username: String, role_id: u32) -> anyhow::Result<u64> {
-        self.group.add_member(username, role_id).await
+        let res = self.group.add_member(username, role_id).await;
+        self.persist_departures().await;
+        res
     }
 
     pub async fn kick_member(&self, username: String) -> anyhow::Result<u64> {
-        self.group.kick_member(&username).await
+        let res = self.group.kick_member(&username).await;
+        self.persist_departures().await;
+        res
     }
 
     pub async fn update_channel(
@@ -454,13 +537,15 @@ impl FfiMlsGroup {
         channel_ty: u8,
         default_permissions: u32,
     ) -> anyhow::Result<u64> {
-        self.group
+        let res = self.group
             .update_channel(id, delete, name, channel_ty, default_permissions)
-            .await
+            .await;
+        self.persist_departures().await;
+        res
     }
 
     pub async fn update_roles(&self, roles: Vec<UpdateRoleProposalFfi>) -> anyhow::Result<u64> {
-        self.group
+        let res = self.group
             .update_roles(roles.into_iter().map(|role| UpdateRoleProposal {
                 role_id: role.role_id,
                 name: role.name,
@@ -468,16 +553,20 @@ impl FfiMlsGroup {
                 delete: role.delete,
                 color: role.color,
             }))
-            .await
+            .await;
+        self.persist_departures().await;
+        res
     }
 
     pub async fn update_users(&self, users: Vec<UpdateUserProposalFfi>) -> anyhow::Result<u64> {
-        self.group
+        let res = self.group
             .update_users(users.into_iter().map(|user| UpdateUserProposal {
                 username: user.username,
                 role_id: user.role_id,
             }))
-            .await
+            .await;
+        self.persist_departures().await;
+        res
     }
 
     pub async fn update_roles_in_channel(
@@ -485,7 +574,7 @@ impl FfiMlsGroup {
         channel_id: u32,
         roles: Vec<UpdateRoleProposalFfi>,
     ) -> anyhow::Result<u64> {
-        self.group
+        let res = self.group
             .update_roles_in_channel(roles.into_iter().map(|x| UpdateRoleInChannelProposal {
                 channel_id,
                 role_proposal: UpdateRoleProposal {
@@ -496,7 +585,9 @@ impl FfiMlsGroup {
                     color: x.color,
                 },
             }))
-            .await
+            .await;
+        self.persist_departures().await;
+        res
     }
 
     pub async fn group_identifier(&self) -> anyhow::Result<Vec<u8>> {
@@ -518,6 +609,26 @@ impl FfiMlsGroup {
         key_length: usize,
     ) -> anyhow::Result<Vec<u8>> {
         self.group.export_secret(label, context, key_length).await
+    }
+}
+
+/// Outcome of [`FfiMlsGroup::re_add_decision`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReAddDecision {
+    /// The user still has at least one device in the roster.
+    AllowedMember,
+    /// The user's last recorded departure was a stale-device cleanup.
+    AllowedStaleDeparture,
+    /// The user's last recorded departure was a kick or voluntary leave.
+    Refused,
+    /// This client never saw the user depart (e.g. it joined later, or they were never a
+    /// member); another member's client may hold the record.
+    NoRecord,
+}
+
+impl ReAddDecision {
+    pub fn is_allowed(self) -> bool {
+        matches!(self, Self::AllowedMember | Self::AllowedStaleDeparture)
     }
 }
 

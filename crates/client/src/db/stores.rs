@@ -416,9 +416,23 @@ impl IdentityDb {
             .await
             .map_err(|err| SignalProtocolError::FfiBindingError(err.to_string()))?;
 
-        Ok(IdentityChange::from_changed(existing.is_none()))
+        // Changed only when a previous identity existed and differs from the new one; a first
+        // sighting (TOFU) is not a change.
+        let changed = match existing {
+            Some(row) => {
+                let previous: &[u8] = row
+                    .try_get(0)
+                    .map_err(|err| SignalProtocolError::FfiBindingError(err.to_string()))?;
+                previous != identity.serialize().as_ref()
+            }
+            None => false,
+        };
+        Ok(IdentityChange::from_changed(changed))
     }
 
+    // TODO(security): this accepts every identity, so a peer's identity key change (possible
+    // MITM) is accepted silently. Trust policy (block / warn / re-verify) is pending a product
+    // decision; `save_identity` now reports `ReplacedExisting` correctly for callers to act on.
     pub async fn is_trusted_identity(
         &self,
         _address: &ProtocolAddress,

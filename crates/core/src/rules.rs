@@ -13,7 +13,11 @@ use mls_rs::{
         proposal::{CustomProposal, MlsCustomProposal, Proposal, RemoveProposal},
     },
     identity::SigningIdentity,
-    mls_rules::{CommitDirection, CommitOptions, CommitSource, EncryptionOptions, ProposalBundle},
+    mls_rules::{
+        CommitDirection, CommitOptions, CommitSource, EncryptionOptions, ProposalBundle,
+        ProposalInfo, ProposalSource,
+    },
+    ExtensionList,
 };
 
 use crate::{
@@ -268,7 +272,7 @@ impl MlsRules for FireflyMlsRules {
     #[doc = " by the library."]
     async fn filter_proposals(
         &self,
-        _direction: CommitDirection,
+        direction: CommitDirection,
         source: CommitSource,
         current_roster: &Roster,
         current_context: &GroupContext,
@@ -300,218 +304,33 @@ impl MlsRules for FireflyMlsRules {
         let mut current_extension = current_extension_original.deserialize()?;
 
         for proposal in proposals.into_proposals() {
-            let Sender::Member(sender_idx) = proposal.sender else {
-                return Err("Sender has to be member".into());
-            };
+            let mut implied_removes = Vec::new();
+            let result = check_proposal(
+                &proposal,
+                current_roster,
+                &mut current_extension,
+                &mut members_removed,
+                &mut implied_removes,
+            );
 
-            let sender_member = current_roster.member_with_index(sender_idx)?;
-
-            let sender_username =
-                get_username_from_signing_identity(&sender_member.signing_identity)?;
-
-            let sender_role = current_extension
-                .get_role_of_user(&sender_username)
-                .unwrap_or_default();
-
-            let sender_permissions = if sender_role == 0 {
-                current_extension.default_permissions()
-            } else {
-                current_extension
-                    .get_permissions_from_role_id(sender_role)
-                    .ok_or(FireflyError::from("No Role with that index exists"))?
-            };
-
-            match &proposal.proposal {
-                Proposal::Add(proposal) => {
-                    let Ok(addee_identity) = get_auth_token_from_signing_identity(
-                        proposal.key_package().signing_identity(),
-                    ) else {
-                        return Err(("Invalid credential in add proposal").into());
-                    };
-
-                    if addee_identity.username != sender_username
-                        && !has_permission(sender_permissions, UserPermission::ManageMember as u32)
-                    {
-                        return Err(format!(
-                            "rejected proposal, adder {} don't have permission to manage user",
-                            sender_username,
-                        )
-                        .into());
-                    }
-                    let devices = get_devices_already_in(current_roster, &addee_identity.username);
-
-                    let device_count = devices.len();
-
-                    if let Some((member, old_device_with_same_address)) = devices
-                        .iter()
-                        .find(|(_, x)| x.address_id == addee_identity.address_id)
-                    {
-                        log::info!(
-                            "found old device with same address {:?}, removing index: {}",
-                            old_device_with_same_address,
-                            member.index
-                        );
+            match result {
+                Ok(updated) => {
+                    extension_updated |= updated;
+                    for index in implied_removes {
                         filtered_proposals.add(
-                            Proposal::Remove(RemoveProposal::removing(member.index)?),
+                            Proposal::Remove(RemoveProposal::removing(index)?),
                             Sender::Member(0),
                             mls_rs::mls_rules::ProposalSource::Local,
                         );
                     }
-
-                    if device_count >= MAX_DEVICES_ALLOWED && devices.len() > 1 {
-                        if let Some((old_member, old_token)) = devices
-                            .iter()
-                            .min_by_key(|(_, tok)| tok.valid_until)
-                        {
-                            log::info!(
-                                "MAX_DEVICES_ALLOWED reached. Auto-removing oldest device of user {} (index: {}, device_id: {})",
-                                addee_identity.username,
-                                old_member.index,
-                                old_token.device_id
-                            );
-                            filtered_proposals.add(
-                                Proposal::Remove(RemoveProposal::removing(old_member.index)?),
-                                Sender::Member(0),
-                                mls_rs::mls_rules::ProposalSource::Local,
-                            );
-                        }
-                    } else if device_count >= MAX_DEVICES_ALLOWED {
-                        return Err(
-                            format!("MAX_DEVICES_ALLOWED {MAX_DEVICES_ALLOWED} reached").into()
-                        );
-                    }
+                    filtered_proposals.add(proposal.proposal, proposal.sender, proposal.source);
                 }
-                Proposal::Remove(proposal) => {
-                    let member_to_remove =
-                        current_roster.member_with_index(proposal.to_remove())?;
-
-                    let auth_token =
-                        get_auth_token_from_signing_identity(&member_to_remove.signing_identity)?;
-
-                    if auth_token.username == sender_username {
-                        // User removing their own device (leaving or cleanup) is always allowed
-                    } else {
-                        // Check if this is an inactive/stale device that any member can clean up.
-                        // An inactive device is:
-                        // 1. A device whose token has expired (valid_until < now), OR
-                        // 2. An older device when multiple devices exist for the user, leaving the most recent device.
-                        let target_devices =
-                            get_devices_already_in(current_roster, &auth_token.username);
-                        let is_inactive_token =
-                            auth_token.valid_until < get_current_timestamp_in_secs();
-                        let is_stale_device = if target_devices.len() > 1 {
-                            let most_recent_valid_until = target_devices
-                                .iter()
-                                .map(|(_, tok)| tok.valid_until)
-                                .max()
-                                .unwrap_or(0);
-                            auth_token.valid_until < most_recent_valid_until
-                        } else {
-                            false
-                        };
-
-                        if is_inactive_token || is_stale_device {
-                            log::info!(
-                                "Allowing removal of {}'s inactive/stale device by {}",
-                                auth_token.username,
-                                sender_username
-                            );
-                        } else {
-                            // Removing an active/primary device requires ManageMember permission
-                            if !has_permission(
-                                sender_permissions,
-                                UserPermission::ManageMember as u32,
-                            ) {
-                                return Err(format!(
-                                    "rejected remove proposal, remover {} does not have permission to manage members",
-                                    sender_username
-                                )
-                                .into());
-                            }
-
-                            // A member cannot remove someone who has permissions that the remover does not have
-                            let target_role_id = current_extension
-                                .get_role_of_user(&auth_token.username)
-                                .unwrap_or_default();
-
-                            if let Some(target_permissions) = current_extension.get_permissions_from_role_id(target_role_id) {
-                                if !has_permission(sender_permissions, target_permissions) {
-                                    return Err(format!(
-                                        "rejected remove proposal, remover {} does not have permissions to remove {}",
-                                        sender_username,
-                                        auth_token.username
-                                    )
-                                    .into());
-                                }
-                            }
-                        }
-                    }
-
-                    members_removed
-                        .entry(auth_token.username.to_string())
-                        .or_default()
-                        .push((proposal.to_remove(), auth_token));
+                Err(err) if should_drop_invalid_proposal(direction, &proposal.source) => {
+                    // a cached proposal anyone can broadcast must not block every future commit
+                    log::warn!("dropping invalid by-reference proposal from commit: {}", err);
                 }
-                Proposal::Update(proposal) => {
-                    if !does_signing_identity_has_this_username(
-                        &sender_username,
-                        proposal.signing_identity(),
-                    ) {
-                        return Err(format!(
-                            "update proposal rejected from {} as username don't match",
-                            sender_username
-                        )
-                        .into());
-                    }
-                }
-                Proposal::Psk(_) => {
-                    info!("WARN: PSK proposal included, as I don't know what it suppose to do");
-                }
-                Proposal::ReInit(_) => {
-                    info!("WARN: allowing REINIT Proposal from {}", sender_username);
-                }
-                Proposal::ExternalInit(_) => {
-                    return Err(("External Init not allowed").into());
-                }
-                Proposal::GroupContextExtensions(_extensions) => {
-                    if !has_permission(sender_permissions, UserPermission::ManageGroup as u32) {
-                        return Err(
-                            ("Skipping proposal because user doesn't have ManageGroup permission")
-                                .into(),
-                        );
-                    }
-                }
-                Proposal::Custom(custom) => {
-                    log::info!("handling custom proposal {:?}", custom);
-                    match handle_custom_proposal(
-                        &custom,
-                        &current_roster,
-                        &mut current_extension,
-                        sender_permissions,
-                        sender_username.as_str(),
-                    ) {
-                        Ok(updated) => {
-                            log::info!("extension updated {}", updated);
-                            if updated {
-                                extension_updated = updated;
-                            }
-                        }
-                        Err(err) => {
-                            return Err(format!(
-                                "rejected proposal {:?} because of {}",
-                                custom, err
-                            )
-                            .into());
-                        }
-                    }
-                }
-
-                _ => {
-                    return Err("invalid proposal".into());
-                }
+                Err(err) => return Err(err),
             }
-
-            filtered_proposals.add(proposal.proposal, proposal.sender, proposal.source);
         }
 
         if !members_removed.is_empty() {
@@ -576,13 +395,257 @@ impl MlsRules for FireflyMlsRules {
     }
 }
 
-fn handle_custom_proposal(
+/// Only invalid by-reference proposals met while _preparing_ our own commit are dropped;
+/// a received commit carrying any invalid proposal is rejected as a whole.
+pub fn should_drop_invalid_proposal(direction: CommitDirection, source: &ProposalSource) -> bool {
+    direction == CommitDirection::Send && matches!(source, ProposalSource::ByReference(_))
+}
+
+/// Validates one proposal against the group rules. Removals implied by an Add are pushed to
+/// `implied_removes`, and nothing is recorded or mutated unless the proposal is accepted.
+/// Returns whether the firefly extension was updated.
+fn check_proposal(
+    proposal: &ProposalInfo<Proposal>,
+    current_roster: &Roster,
+    current_extension: &mut FireflyGroupExtensionWrapper,
+    members_removed: &mut HashMap<String, Vec<(u32, AuthToken<'static>)>>,
+    implied_removes: &mut Vec<u32>,
+) -> Result<bool, FireflyError> {
+    let Sender::Member(sender_idx) = proposal.sender else {
+        return Err("Sender has to be member".into());
+    };
+
+    let sender_member = current_roster.member_with_index(sender_idx)?;
+
+    let sender_username = get_username_from_signing_identity(&sender_member.signing_identity)?;
+
+    let sender_permissions = sender_permissions(current_extension, &sender_username)?;
+
+    match &proposal.proposal {
+        Proposal::Add(proposal) => {
+            let Ok(addee_identity) =
+                get_auth_token_from_signing_identity(proposal.key_package().signing_identity())
+            else {
+                return Err(("Invalid credential in add proposal").into());
+            };
+
+            if addee_identity.username != sender_username
+                && !has_permission(sender_permissions, UserPermission::ManageMember as u32)
+            {
+                return Err(format!(
+                    "rejected proposal, adder {} don't have permission to manage user",
+                    sender_username,
+                )
+                .into());
+            }
+            let devices = get_devices_already_in(current_roster, &addee_identity.username);
+
+            let device_count = devices.len();
+
+            if device_count >= MAX_DEVICES_ALLOWED && devices.len() <= 1 {
+                return Err(format!("MAX_DEVICES_ALLOWED {MAX_DEVICES_ALLOWED} reached").into());
+            }
+
+            if let Some((member, old_device_with_same_address)) = devices
+                .iter()
+                .find(|(_, x)| x.address_id == addee_identity.address_id)
+            {
+                log::info!(
+                    "found old device with same address {:?}, removing index: {}",
+                    old_device_with_same_address,
+                    member.index
+                );
+                implied_removes.push(member.index);
+            }
+
+            if device_count >= MAX_DEVICES_ALLOWED {
+                if let Some((old_member, old_token)) =
+                    devices.iter().min_by_key(|(_, tok)| tok.valid_until)
+                {
+                    log::info!(
+                        "MAX_DEVICES_ALLOWED reached. Auto-removing oldest device of user {} (index: {}, device_id: {})",
+                        addee_identity.username,
+                        old_member.index,
+                        old_token.device_id
+                    );
+                    implied_removes.push(old_member.index);
+                }
+            }
+            Ok(false)
+        }
+        Proposal::Remove(proposal) => {
+            let member_to_remove = current_roster.member_with_index(proposal.to_remove())?;
+
+            let auth_token = get_auth_token_from_signing_identity(&member_to_remove.signing_identity)?;
+
+            if auth_token.username == sender_username {
+                // User removing their own device (leaving or cleanup) is always allowed
+            } else {
+                // Check if this is an inactive/stale device that any member can clean up.
+                // An inactive device is:
+                // 1. A device whose token has expired (valid_until < now), OR
+                // 2. An older device when multiple devices exist for the user, leaving the most recent device.
+                let target_devices = get_devices_already_in(current_roster, &auth_token.username);
+                let is_inactive_token = auth_token.valid_until < get_current_timestamp_in_secs();
+                let is_stale_device = if target_devices.len() > 1 {
+                    let most_recent_valid_until = target_devices
+                        .iter()
+                        .map(|(_, tok)| tok.valid_until)
+                        .max()
+                        .unwrap_or(0);
+                    auth_token.valid_until < most_recent_valid_until
+                } else {
+                    false
+                };
+
+                if is_inactive_token || is_stale_device {
+                    log::info!(
+                        "Allowing removal of {}'s inactive/stale device by {}",
+                        auth_token.username,
+                        sender_username
+                    );
+                } else {
+                    // Removing an active/primary device requires ManageMember permission
+                    if !has_permission(sender_permissions, UserPermission::ManageMember as u32) {
+                        return Err(format!(
+                            "rejected remove proposal, remover {} does not have permission to manage members",
+                            sender_username
+                        )
+                        .into());
+                    }
+
+                    // A member cannot remove someone who has permissions that the remover does not have
+                    let target_role_id = current_extension
+                        .get_role_of_user(&auth_token.username)
+                        .unwrap_or_default();
+
+                    if let Some(target_permissions) =
+                        current_extension.get_permissions_from_role_id(target_role_id)
+                    {
+                        if !has_permission(sender_permissions, target_permissions) {
+                            return Err(format!(
+                                "rejected remove proposal, remover {} does not have permissions to remove {}",
+                                sender_username, auth_token.username
+                            )
+                            .into());
+                        }
+                    }
+                }
+            }
+
+            members_removed
+                .entry(auth_token.username.to_string())
+                .or_default()
+                .push((proposal.to_remove(), auth_token));
+            Ok(false)
+        }
+        Proposal::Update(proposal) => {
+            if !does_signing_identity_has_this_username(&sender_username, proposal.signing_identity())
+            {
+                return Err(format!(
+                    "update proposal rejected from {} as username don't match",
+                    sender_username
+                )
+                .into());
+            }
+            Ok(false)
+        }
+        other => check_group_proposal(other, current_extension, &sender_username),
+    }
+}
+
+fn sender_permissions(
+    current_extension: &FireflyGroupExtensionWrapper,
+    sender_username: &str,
+) -> Result<u32, FireflyError> {
+    let sender_role = current_extension
+        .get_role_of_user(sender_username)
+        .unwrap_or_default();
+
+    if sender_role == 0 {
+        Ok(current_extension.default_permissions())
+    } else {
+        current_extension
+            .get_permissions_from_role_id(sender_role)
+            .ok_or(FireflyError::from("No Role with that index exists"))
+    }
+}
+
+/// Validates the proposals whose rules depend only on the sender and the firefly extension
+/// (everything except Add, Remove and Update). Returns whether the extension was updated.
+pub fn check_group_proposal(
+    proposal: &Proposal,
+    current_extension: &mut FireflyGroupExtensionWrapper,
+    sender_username: &str,
+) -> Result<bool, FireflyError> {
+    let sender_permissions = sender_permissions(current_extension, sender_username)?;
+
+    match proposal {
+        Proposal::Psk(_) => {
+            info!("WARN: PSK proposal included, as I don't know what it suppose to do");
+            Ok(false)
+        }
+        // nothing handles a reinitialised group, so accepting one would brick the group
+        Proposal::ReInit(_) => Err("ReInit proposals are not allowed".into()),
+        Proposal::ExternalInit(_) => Err(("External Init not allowed").into()),
+        Proposal::GroupContextExtensions(extensions) => {
+            validate_group_context_extensions(current_extension, sender_username, extensions)?;
+            Ok(false)
+        }
+        Proposal::Custom(custom) => {
+            log::info!("handling custom proposal {:?}", custom);
+            match handle_custom_proposal(
+                custom,
+                current_extension,
+                sender_permissions,
+                sender_username,
+            ) {
+                Ok(updated) => {
+                    log::info!("extension updated {}", updated);
+                    Ok(updated)
+                }
+                Err(err) => {
+                    Err(format!("rejected proposal {:?} because of {}", custom, err).into())
+                }
+            }
+        }
+        _ => Err("invalid proposal".into()),
+    }
+}
+
+/// A GroupContextExtensions proposal replaces the whole rule set at once, bypassing every
+/// custom proposal check, so only the owner may send one and the result must stay well formed.
+pub fn validate_group_context_extensions(
+    current_extension: &FireflyGroupExtensionWrapper,
+    sender_username: &str,
+    extensions: &ExtensionList,
+) -> Result<(), FireflyError> {
+    if !current_extension.is_owner(sender_username) {
+        return Err(format!(
+            "rejected group context extensions from {}, only the owner can replace them",
+            sender_username
+        )
+        .into());
+    }
+
+    let Some(new_extension) = extensions.get_as::<FireflyGroupExtension>()? else {
+        return Err("group context extensions are missing the Firefly Group Extension".into());
+    };
+
+    if !new_extension.deserialize()?.is_valid() {
+        return Err("group context extensions carry an invalid Firefly Group Extension".into());
+    }
+
+    Ok(())
+}
+
+pub fn handle_custom_proposal(
     proposal: &CustomProposal,
-    _current_roster: &Roster,
     current_extension: &mut FireflyGroupExtensionWrapper,
     sender_permissions: u32,
     sender_username: &str,
 ) -> anyhow::Result<bool> {
+    let sender_is_owner = current_extension.is_owner(sender_username);
     let proposal_type = proposal.proposal_type();
     if proposal_type == UpdateUserProposal::proposal_type() {
         let update_user = UpdateUserProposal::from_custom_proposal(proposal)?;
@@ -711,7 +774,10 @@ fn handle_custom_proposal(
                 return Ok(true);
             }
 
-            if has_permission(sender_permissions, UserPermission::ManageChannel as u32)
+            // channel defaults can never exceed what the sender holds, at root or in the channel
+            if sender_is_owner
+                || (has_permission(sender_permissions, UserPermission::ManageChannel as u32)
+                    && has_permission(sender_permissions, update_channel_proposal.default_permissions))
                 || (has_permission(
                     sender_permissions_in_channel,
                     update_channel_proposal.default_permissions,
@@ -756,7 +822,15 @@ fn handle_custom_proposal(
                 return Err(anyhow::anyhow!("invalid channel name"));
             }
 
-            // since the permissions from here apply to only channel level, we don't need to check if they are subset of creator's permissions
+            // channel level permissions such as ManageRole would otherwise be minted here and then
+            // used to rewrite every role inside the channel, so the creator can only grant what they hold
+            if !sender_is_owner
+                && !has_permission(sender_permissions, update_channel_proposal.default_permissions)
+            {
+                return Err(anyhow::anyhow!(
+                    "default permissions are higher than sender to create"
+                ));
+            }
 
             let channel_info = FireflyGroupChannel {
                 id: update_channel_proposal.id,
@@ -809,14 +883,15 @@ fn handle_custom_proposal(
         {
             // role exists
 
-            // root level manage channel permission
-            if has_permission(sender_permissions, UserPermission::ManageChannel as u32)
+            // role 0 here is the channel's default, which applies to every default-role member
+            if sender_is_owner
                 || (
-                    // manage role permission in channel
-                    has_permission(
+                    // root level manage channel permission or manage role permission in channel
+                    (has_permission(sender_permissions, UserPermission::ManageChannel as u32)
+                    || has_permission(
                     sender_permissions_in_channel,
                     UserPermission::ManageRole as u32,
-                ) &&
+                )) &&
 
                     // proposed permissions are subset of sender permissions in channel
                     has_permission(sender_permissions_in_channel, role_proposal.permissions)
@@ -835,28 +910,10 @@ fn handle_custom_proposal(
                 return Err(anyhow::anyhow!("sender does not have permissions"));
             }
         } else {
-            // role does not exist, to be created
-
-            // updater has root level ManageChannel permission
-            if has_permission(sender_permissions, UserPermission::ManageChannel as u32)
-                ||
-                // updater has ManageRole permission in channel
-                (has_permission(
-                    sender_permissions_in_channel,
-                    UserPermission::ManageRole as u32,
-                )
-                // updater's permissions in channel are subset of new role permissions
-                && has_permission(sender_permissions_in_channel, role_proposal.permissions))
-            {
-                current_extension.update_channel_role_permissions(
-                    channel_id,
-                    role_proposal.role_id,
-                    role_proposal.permissions,
-                );
-                return Ok(true);
-            } else {
-                return Err(anyhow::anyhow!("sender does not have permissions"));
-            }
+            // every group role (and role 0) resolves to permissions in an existing channel, so
+            // only roles missing from the group get here; overriding them would leave a dangling
+            // override that a later role with the same id silently inherits
+            return Err(anyhow::anyhow!("role does not exist"));
         }
     } else {
         return Err(anyhow::anyhow!("invalid custom proposal type"));

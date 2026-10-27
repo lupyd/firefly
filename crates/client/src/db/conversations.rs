@@ -10,6 +10,10 @@ impl ConversationSettings {
     pub fn new(settings: u64) -> Self {
         Self { inner: settings }
     }
+
+    pub fn bits(&self) -> u64 {
+        self.inner
+    }
 }
 
 #[derive(Clone)]
@@ -50,8 +54,9 @@ impl ConversationStore {
         .await?;
 
         if let Some(row) = row {
-            let settings = row.try_get(0)?;
-            Ok(Some(ConversationSettings::new(settings)))
+            // Stored as the i64 bit pattern of the u64 so bits 32-63 survive the round trip.
+            let settings: i64 = row.try_get(0)?;
+            Ok(Some(ConversationSettings::new(settings as u64)))
         } else {
             Ok(None)
         }
@@ -69,7 +74,7 @@ impl ConversationStore {
             "#,
         )
         .bind(username)
-        .bind(settings.inner as u32)
+        .bind(settings.inner as i64)
         .execute(&self.pool)
         .await?;
 

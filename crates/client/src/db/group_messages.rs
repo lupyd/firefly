@@ -44,6 +44,16 @@ pub fn extract_group_message_text(message: &[u8]) -> String {
     String::from_utf8_lossy(message).to_string()
 }
 
+/// Text to persist in `group_messages.text` (and therefore the FTS index). Hidden
+/// messages (e.g. history keys) never get their payload stored as searchable text.
+pub fn searchable_group_message_text(message: &[u8], message_type: u32) -> String {
+    if crate::db::search::is_searchable_message_type(message_type) {
+        extract_group_message_text(message)
+    } else {
+        String::new()
+    }
+}
+
 impl GroupMessagesStore {
     pub async fn new(pool: SqlitePool) -> anyhow::Result<Self> {
         crate::db::migrations::run_migrations(&pool).await?;
@@ -168,7 +178,7 @@ impl GroupMessagesStore {
             by,
             message_type
         );
-        let text = extract_group_message_text(message);
+        let text = searchable_group_message_text(message, message_type);
         sqlx::query(
             r#"
         INSERT INTO group_messages (id, group_id, by, message, channel_id, epoch, message_type, text)
@@ -179,7 +189,11 @@ impl GroupMessagesStore {
             channel_id = CASE WHEN excluded.channel_id != 0 THEN excluded.channel_id ELSE group_messages.channel_id END,
             epoch = CASE WHEN excluded.epoch != 0 THEN excluded.epoch ELSE group_messages.epoch END,
             message_type = CASE WHEN excluded.message_type != 0 THEN excluded.message_type ELSE group_messages.message_type END,
-            text = CASE WHEN excluded.text != '' THEN excluded.text ELSE group_messages.text END
+            text = CASE
+                WHEN ((CASE WHEN excluded.message_type != 0 THEN excluded.message_type ELSE group_messages.message_type END) & 6) != 0 THEN ''
+                WHEN excluded.text != '' THEN excluded.text
+                ELSE group_messages.text
+            END
         "#,
         )
         .bind(id as i64)
@@ -288,7 +302,7 @@ impl GroupMessagesStore {
         for r in records {
             anyhow::ensure!(r.group_id == group, "Foreign history record");
             let changed = sqlx::query("INSERT INTO group_messages(id,group_id,by,message,channel_id,epoch,message_type,text) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(group_id,id) DO UPDATE SET by=excluded.by,message=excluded.message,channel_id=excluded.channel_id,epoch=excluded.epoch,message_type=excluded.message_type,text=excluded.text WHERE EXISTS(SELECT 1 FROM group_history_imports h WHERE h.group_id=group_messages.group_id AND h.message_id=group_messages.id AND h.chunk_id<>0) AND ?<>0")
-                .bind(r.id as i64).bind(group as i64).bind(&r.by).bind(&r.message).bind(r.channel_id as i64).bind(r.epoch as i64).bind(r.message_type as i64).bind(extract_group_message_text(&r.message)).bind(chunk as i64).execute(&mut *tx).await?.rows_affected();
+                .bind(r.id as i64).bind(group as i64).bind(&r.by).bind(&r.message).bind(r.channel_id as i64).bind(r.epoch as i64).bind(r.message_type as i64).bind(searchable_group_message_text(&r.message, r.message_type)).bind(chunk as i64).execute(&mut *tx).await?.rows_affected();
             if changed > 0 {
                 sqlx::query("INSERT INTO group_history_imports(group_id,message_id,chunk_id) VALUES(?,?,?) ON CONFLICT(group_id,message_id) DO UPDATE SET chunk_id=excluded.chunk_id").bind(group as i64).bind(r.id as i64).bind(chunk as i64).execute(&mut *tx).await?;
                 imported += 1;
@@ -406,7 +420,10 @@ impl GroupMessagesStore {
             return Ok(Vec::new());
         }
 
-        let mut conditions = vec!["group_messages_fts MATCH ?".to_string()];
+        let mut conditions = vec![
+            "group_messages_fts MATCH ?".to_string(),
+            "(gm.message_type & 6) = 0".to_string(),
+        ];
         if group_id.is_some() {
             conditions.push("gm.group_id = ?".to_string());
         }
@@ -523,7 +540,8 @@ impl GroupMessagesStore {
     }
 
     async fn update_message_type_unlocked(&self, group_id: u64, id: u64, message_type: u32) -> anyhow::Result<()> {
-        sqlx::query("UPDATE group_messages SET message_type = ? WHERE group_id = ? AND id = ?")
+        // Becoming hidden blanks the text so the FTS update trigger drops it from the index.
+        sqlx::query("UPDATE group_messages SET message_type = ?1, text = CASE WHEN (?1 & 6) != 0 THEN '' ELSE text END WHERE group_id = ?2 AND id = ?3")
             .bind(message_type as i64)
             .bind(group_id as i64)
             .bind(id as i64)

@@ -288,6 +288,15 @@ impl FireflyMlsClient {
         let welcome_message: MlsMessage = MlsMessage::mls_decode(&mut welcome_message.as_slice())?;
 
         let (group, _) = self.client.join_group(None, &welcome_message, None).await?;
+        // the Welcome is the only point a group context is taken without our MlsRules vetting it
+        let extension = group
+            .context()
+            .extensions()
+            .get_as::<FireflyGroupExtension>()?
+            .context("no firefly extension on group")?;
+        if !extension.deserialize()?.is_valid() {
+            return Err(anyhow::anyhow!("welcome carries an invalid firefly group extension"));
+        }
         Ok(FireflyMlsGroup::new(
             group_id,
             group,
@@ -327,6 +336,78 @@ pub struct FireflyMlsGroup {
     base_url: Arc<str>,
     auth_token_callback: Arc<dyn FireflyAuthTokenCallback>,
     group_id: u64,
+    /// Users whose last device left the group in a commit applied through this object, in
+    /// application order. Drained by [`FireflyMlsGroup::take_departures`].
+    departures: std::sync::Mutex<Vec<Departure>>,
+}
+
+/// A user whose every device was removed from the group by an MLS-authenticated commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Departure {
+    pub username: String,
+    /// True only when every device removed in the departing commit had an expired credential
+    /// (a stale cleanup). Kicks and voluntary leaves remove at least one live device.
+    pub re_addable: bool,
+    /// Epoch of the group after the departing commit.
+    pub epoch: u64,
+}
+
+/// One leaf of the roster before a commit: the owner's username and whether its credential had
+/// expired when the commit was processed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RosterLeaf {
+    pub username: String,
+    pub expired: bool,
+}
+
+/// Classifies the users who left the group between two rosters. A user present in `before`
+/// with no leaf in `after` departed; the departure is re-addable only if every one of their
+/// `before` leaves (all of which were removed) had an expired credential.
+pub fn compute_departures<'a>(
+    before: &[RosterLeaf],
+    after: impl IntoIterator<Item = &'a str>,
+    epoch: u64,
+) -> Vec<Departure> {
+    let after: std::collections::HashSet<&str> = after.into_iter().collect();
+    let mut departed: Vec<Departure> = Vec::new();
+    for leaf in before {
+        if after.contains(leaf.username.as_str()) {
+            continue;
+        }
+        match departed.iter_mut().find(|d| d.username == leaf.username) {
+            Some(d) => d.re_addable &= leaf.expired,
+            None => departed.push(Departure {
+                username: leaf.username.clone(),
+                re_addable: leaf.expired,
+                epoch,
+            }),
+        }
+    }
+    departed
+}
+
+fn roster_leaves(group: &Group<FireflyClientMlsConfig>) -> Vec<RosterLeaf> {
+    group
+        .roster()
+        .members_iter()
+        .filter_map(|m| {
+            let username = get_username_from_signing_identity(&m.signing_identity).ok()?;
+            // An unparsable expiry counts as live: fail closed (not re-addable).
+            let expired = FireflyCredential::from_signing_identity(&m.signing_identity)
+                .ok()
+                .map(|c| c.is_expired().is_some())
+                .unwrap_or(false);
+            Some(RosterLeaf { username, expired })
+        })
+        .collect()
+}
+
+fn roster_usernames(group: &Group<FireflyClientMlsConfig>) -> Vec<String> {
+    group
+        .roster()
+        .members_iter()
+        .filter_map(|m| get_username_from_signing_identity(&m.signing_identity).ok())
+        .collect()
 }
 
 impl FireflyMlsGroup {
@@ -360,6 +441,34 @@ impl FireflyMlsGroup {
             base_url,
             auth_token_callback,
             group_id,
+            departures: Default::default(),
+        }
+    }
+
+    /// Drains the departures recorded by commits applied since the last call.
+    pub fn take_departures(&self) -> Vec<Departure> {
+        std::mem::take(&mut *self.departures.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// Whether `username` currently has at least one device in the group's roster.
+    pub async fn has_member_user(&self, username: &str) -> bool {
+        let group = self.group.lock().await;
+        group
+            .roster()
+            .members_iter()
+            .any(|m| does_signing_identity_has_this_username(username, &m.signing_identity))
+    }
+
+    fn record_departures(&self, before: &[RosterLeaf], group: &Group<FireflyClientMlsConfig>) {
+        let after = roster_usernames(group);
+        let departures =
+            compute_departures(before, after.iter().map(String::as_str), group.current_epoch());
+        if !departures.is_empty() {
+            log::info!("group {} departures: {:?}", self.group_id, departures);
+            self.departures
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(departures);
         }
     }
 }
@@ -506,9 +615,14 @@ impl FireflyMlsGroup {
     pub async fn process(&self, message: &[u8]) -> anyhow::Result<FireflyMlsReceivedMessage> {
         let mut group = self.group.lock().await;
 
-        let msg = group
-            .process_incoming_message(MlsMessage::from_bytes(message)?)
-            .await?;
+        let message = MlsMessage::from_bytes(message)?;
+        ensure_application_message_is_current(&message, group.current_epoch())?;
+
+        let before = (!is_application_message(&message)).then(|| roster_leaves(&group));
+        let msg = group.process_incoming_message(message).await?;
+        if let (Some(before), mls_rs::group::ReceivedMessage::Commit(_)) = (&before, &msg) {
+            self.record_departures(before, &group);
+        }
         let out = match msg {
             mls_rs::group::ReceivedMessage::ApplicationMessage(application_message_description) => {
                 let sender_username = get_username_from_signing_identity(
@@ -573,7 +687,17 @@ impl FireflyMlsGroup {
 
         let mut invitee_addresses = Vec::new();
 
-        commit_builder = commit_builder.add_member(MlsMessage::from_bytes(&package.package)?)?;
+        let key_package = MlsMessage::from_bytes(&package.package)?;
+        if package.address != address_id {
+            return Err(anyhow::anyhow!(
+                "server returned key package for address {} instead of {}",
+                package.address,
+                address_id
+            ));
+        }
+        ensure_key_package_belongs_to(&key_package, &username, address_id)?;
+
+        commit_builder = commit_builder.add_member(key_package)?;
 
         invitee_addresses.push(package.address);
 
@@ -584,7 +708,9 @@ impl FireflyMlsGroup {
             .await
         {
             Ok(id) => {
+                let before = roster_leaves(&group);
                 group.apply_pending_commit().await?;
+                self.record_departures(&before, &group);
 
                 group.write_to_storage().await?;
 
@@ -646,6 +772,17 @@ impl FireflyMlsGroup {
                 continue;
             }
 
+            if let Err(err) = MlsMessage::from_bytes(&package.package)
+                .map_err(anyhow::Error::from)
+                .and_then(|m| ensure_key_package_belongs_to(&m, &username, package.address))
+            {
+                log::warn!(
+                    "Skipping key package for address {} of user {}: {}",
+                    package.address, username, err
+                );
+                continue;
+            }
+
             if let Ok(message) = MlsMessage::from_bytes(&package.package) {
                 if let Some(kp) = message.as_key_package() {
                     if let Ok(cred) = crate::config::FireflyCredential::from_signing_identity(kp.signing_identity()) {
@@ -701,7 +838,9 @@ impl FireflyMlsGroup {
             .await
         {
             Ok(id) => {
+                let before = roster_leaves(&group);
                 group.apply_pending_commit().await?;
+                self.record_departures(&before, &group);
                 group.write_to_storage().await?;
 
                 return Ok(id);
@@ -839,7 +978,9 @@ impl FireflyMlsGroup {
                     group.has_pending_commit()
                 );
 
+                let before = roster_leaves(group);
                 let desc = group.apply_pending_commit().await?;
+                self.record_departures(&before, group);
 
                 log::info!("applied pending commit: {:?}", desc);
 
@@ -948,4 +1089,67 @@ impl FireflyMlsGroup {
 
         return Ok(message.id);
     }
+}
+
+fn is_application_message(message: &MlsMessage) -> bool {
+    matches!(
+        message.description(),
+        mls_rs::MlsMessageDescription::PrivateProtocolMessage {
+            content_type: mls_rs::group::ContentType::Application,
+            ..
+        } | mls_rs::MlsMessageDescription::PublicProtocolMessage {
+            content_type: mls_rs::group::ContentType::Application,
+            ..
+        }
+    )
+}
+
+/// mls-rs decrypts application messages from retained prior epochs, but senders are resolved
+/// and authorised against the current roster and rules. A leaf index can be reused after a
+/// kick, so an old-epoch message would be attributed to whoever holds that leaf now.
+pub fn ensure_application_message_is_current(
+    message: &MlsMessage,
+    current_epoch: u64,
+) -> anyhow::Result<()> {
+    if let mls_rs::MlsMessageDescription::PrivateProtocolMessage {
+        epoch_id,
+        content_type: mls_rs::group::ContentType::Application,
+        ..
+    } = message.description()
+    {
+        if epoch_id != current_epoch {
+            return Err(anyhow::anyhow!(
+                "rejecting application message from epoch {} in epoch {}",
+                epoch_id,
+                current_epoch
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Key packages are served by the untrusted server; only accept one whose signed credential
+/// names the user (and device address) we asked for.
+pub fn ensure_key_package_belongs_to(
+    message: &MlsMessage,
+    username: &str,
+    address_id: u64,
+) -> anyhow::Result<()> {
+    let key_package = message.as_key_package().context("not a key package")?;
+    let token = get_auth_token_from_signing_identity(key_package.signing_identity())?;
+    if token.username != username {
+        return Err(anyhow::anyhow!(
+            "key package belongs to {} instead of {}",
+            token.username,
+            username
+        ));
+    }
+    if token.address_id != address_id {
+        return Err(anyhow::anyhow!(
+            "key package belongs to address {} instead of {}",
+            token.address_id,
+            address_id
+        ));
+    }
+    Ok(())
 }

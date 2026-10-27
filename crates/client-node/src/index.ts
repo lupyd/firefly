@@ -143,8 +143,10 @@ export interface StorageProviders {
 }
 
 export const initLogger = (filePath: string) => {
-  if (typeof (wasmPkg as any).init_logger === 'function') {
-    (wasmPkg as any).init_logger(filePath);
+  // The wasm export is `initLogger` (js_name); keep `init_logger` as a fallback for older builds.
+  const init = (wasmPkg as any).initLogger ?? (wasmPkg as any).init_logger;
+  if (typeof init === 'function') {
+    init(filePath);
   }
 };
 

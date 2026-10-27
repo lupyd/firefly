@@ -9,6 +9,11 @@ name = "firefly_core"
 
 
 
+[features]
+# Honour EMULATOR_MODE (skips credential expiry checks) for local E2E tests. Never enable for
+# release builds.
+test-hooks = []
+
 [dependencies]
 firefly-protos = { workspace = true }
 anyhow = { workspace = true, features = ["backtrace"] }

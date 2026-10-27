@@ -154,7 +154,7 @@ fn set_panic_handler() {
         eprintln!("{}", msg);
         if std::env::var("CARGO").is_err()
             && std::env::var("RUST_TEST_THREADS").is_err()
-            && std::env::var("EMULATOR_MODE").is_err()
+            && !*firefly_core::utils::EMULATOR_MODE
         {
             std::process::abort();
         }
