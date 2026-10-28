@@ -1492,6 +1492,7 @@ impl<'a> MessageWrite for UserOnlineStatusRequest<'a> {
 #[derive(Debug, Default, PartialEq, Clone)]
 pub struct UserOnlineStatusResponse {
     pub online_bits: u32,
+    pub last_seen: Vec<u64>,
 }
 
 impl<'a> MessageRead<'a> for UserOnlineStatusResponse {
@@ -1500,6 +1501,7 @@ impl<'a> MessageRead<'a> for UserOnlineStatusResponse {
         while !r.is_eof() {
             match r.next_tag(bytes) {
                 Ok(13) => msg.online_bits = r.read_fixed32(bytes)?,
+                Ok(18) => msg.last_seen = r.read_packed(bytes, |r, bytes| Ok(r.read_uint64(bytes)?))?,
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -1512,10 +1514,44 @@ impl MessageWrite for UserOnlineStatusResponse {
     fn get_size(&self) -> usize {
         0
         + if self.online_bits == 0u32 { 0 } else { 1 + 4 }
+        + if self.last_seen.is_empty() { 0 } else { 1 + sizeof_len(self.last_seen.iter().map(|s| sizeof_varint(*(s) as u64)).sum::<usize>()) }
     }
 
     fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
         if self.online_bits != 0u32 { w.write_with_tag(13, |w| w.write_fixed32(*&self.online_bits))?; }
+        w.write_packed_with_tag(18, &self.last_seen, |w, m| w.write_uint64(*m), &|m| sizeof_varint(*(m) as u64))?;
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct PresenceSettings {
+    pub hidden: bool,
+}
+
+impl<'a> MessageRead<'a> for PresenceSettings {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.hidden = r.read_bool(bytes)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl MessageWrite for PresenceSettings {
+    fn get_size(&self) -> usize {
+        0
+        + if self.hidden == false { 0 } else { 1 + sizeof_varint(*(&self.hidden) as u64) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.hidden != false { w.write_with_tag(8, |w| w.write_bool(*&self.hidden))?; }
         Ok(())
     }
 }
