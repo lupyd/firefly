@@ -390,7 +390,30 @@ impl FireflyWsClientCallback for InternalSignalCallback {
     async fn on_transport_changed(&self, transport: String) {
         self.inner.on_transport_changed(transport).await;
     }
+    async fn on_device_revoked(&self) {
+        self.inner.on_device_revoked().await;
+    }
 }
+
+/// A user's online status and when they were last active (Unix seconds, 0 when unknown or hidden).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UserPresence {
+    pub username: String,
+    pub online: bool,
+    pub last_seen_secs: u64,
+}
+
+/// The server answered that the user removed this device (HTTP 410).
+#[derive(Debug)]
+pub struct DeviceRevoked;
+
+impl std::fmt::Display for DeviceRevoked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this device was removed from the account")
+    }
+}
+
+impl std::error::Error for DeviceRevoked {}
 
 pub struct Connection {
     sender_task: crate::rt::JoinHandle<()>,
@@ -1035,6 +1058,9 @@ impl FireflyWsClient {
                             log::info!("setup check passed");
                             // break is tricky inside async block for loop
                         }
+                        Err(err) if err.downcast_ref::<DeviceRevoked>().is_some() => {
+                            self.on_device_revoked().await;
+                        }
                         Err(err) => {
                             log::error!("failed to check setup: {:?}", err);
                         }
@@ -1069,6 +1095,12 @@ impl FireflyWsClient {
                     let started = get_current_timestamp_millis_since_epoch();
                     let result = self.connect().await;
                     let lived_ms = get_current_timestamp_millis_since_epoch().saturating_sub(started);
+                    // The server refuses (and drops) removed devices; the WebSocket handshake
+                    // hides why from browsers, so ask before reconnecting.
+                    if self.is_device_revoked().await {
+                        self.on_device_revoked().await;
+                        return;
+                    }
                     // A connection that stayed up for a while resets the backoff.
                     if result.is_ok() && lived_ms > 30_000 {
                         consecutive_failures = 0;
@@ -1532,6 +1564,75 @@ impl FireflyWsClient {
         Ok(())
     }
 
+    /// Whether the user hides their online status and last seen from others.
+    pub async fn get_presence_hidden(&self) -> anyhow::Result<bool> {
+        let token = self.bearer_token().await?;
+        let response = HTTP_CLIENT
+            .get(format!("{}/user/presence", self.firefly_base_url))
+            .bearer_auth(token)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "unexpected status: [{}] {}",
+                response.status(),
+                response.text().await.unwrap_or_default()
+            );
+        }
+        let body = response.bytes().await?;
+        Ok(deserialize_proto::<firefly::PresenceSettings>(&body)?.hidden)
+    }
+
+    pub async fn set_presence_hidden(&self, hidden: bool) -> anyhow::Result<()> {
+        let token = self.bearer_token().await?;
+        let body = serialize_proto(&firefly::PresenceSettings { hidden })?;
+        let response = HTTP_CLIENT
+            .put(format!("{}/user/presence", self.firefly_base_url))
+            .bearer_auth(token)
+            .body(body.to_vec())
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "unexpected status: [{}] {}",
+                response.status(),
+                response.text().await.unwrap_or_default()
+            );
+        }
+        Ok(())
+    }
+
+    /// Presence of every member of a group, one entry per member (online on any device, last
+    /// seen on the most recent one).
+    pub async fn get_group_members_presence(&self, group_id: u64) -> anyhow::Result<Vec<UserPresence>> {
+        let token = self.bearer_token().await?;
+        let response = HTTP_CLIENT
+            .get(format!("{}/group/members/status?groupId={}", self.firefly_base_url, group_id))
+            .bearer_auth(token)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "unexpected status: [{}] {}",
+                response.status(),
+                response.text().await.unwrap_or_default()
+            );
+        }
+        let body = response.bytes().await?;
+        let status = deserialize_proto::<firefly::GroupMembersOnlineStatus>(&body)?;
+        let mut by_user: std::collections::BTreeMap<String, UserPresence> = std::collections::BTreeMap::new();
+        for member in status.members {
+            let entry = by_user.entry(member.username.to_string()).or_insert_with(|| UserPresence {
+                username: member.username.to_string(),
+                online: false,
+                last_seen_secs: 0,
+            });
+            entry.online |= member.is_online;
+            entry.last_seen_secs = entry.last_seen_secs.max(member.last_connected_at);
+        }
+        Ok(by_user.into_values().collect())
+    }
+
     pub fn current_transport(&self) -> Option<ActiveTransport> {
         *self.active_transport.read().unwrap()
     }
@@ -1791,6 +1892,18 @@ impl FireflyWsClient {
     }
 
     pub async fn get_online_status(&self, usernames: Vec<String>) -> anyhow::Result<Vec<String>> {
+        Ok(self
+            .get_presence(usernames)
+            .await?
+            .into_iter()
+            .filter(|p| p.online)
+            .map(|p| p.username)
+            .collect())
+    }
+
+    /// Online status and last seen of up to 32 users, in request order. Users who hide their
+    /// presence (and every user on servers without last seen) report `last_seen_secs: 0`.
+    pub async fn get_presence(&self, usernames: Vec<String>) -> anyhow::Result<Vec<UserPresence>> {
         if usernames.is_empty() {
             return Ok(vec![]);
         }
@@ -1816,18 +1929,16 @@ impl FireflyWsClient {
         }
 
         match response.body {
-            firefly::mod_Response::OneOfbody::userOnlineStatus(res) => {
-                let mut online_users = Vec::new();
-                for (i, username) in usernames.iter().enumerate() {
-                    if i >= 32 {
-                        break;
-                    }
-                    if (res.online_bits & (1 << i)) != 0 {
-                        online_users.push(username.clone());
-                    }
-                }
-                Ok(online_users)
-            }
+            firefly::mod_Response::OneOfbody::userOnlineStatus(res) => Ok(usernames
+                .into_iter()
+                .take(32)
+                .enumerate()
+                .map(|(i, username)| UserPresence {
+                    online: (res.online_bits & (1 << i)) != 0,
+                    last_seen_secs: res.last_seen.get(i).copied().unwrap_or(0),
+                    username,
+                })
+                .collect()),
             _ => Err(anyhow::anyhow!("unexpected response body")),
         }
     }
@@ -3680,6 +3791,45 @@ impl FireflyWsClient {
         Ok(group)
     }
 
+    /// Whether the user removed this device (best effort: unknown counts as not revoked).
+    async fn is_device_revoked(&self) -> bool {
+        let address_id = self.addressId.load(std::sync::atomic::Ordering::Relaxed);
+        if address_id == 0 {
+            return false;
+        }
+        let Some(token) = self.callbacks.get_access_token().await else {
+            return false;
+        };
+        match HTTP_CLIENT
+            .get(format!("{}/user/device?id={}", self.firefly_base_url, address_id))
+            .bearer_auth(token)
+            .send()
+            .await
+        {
+            Ok(response) => response.status() == reqwest::StatusCode::GONE,
+            Err(_) => false,
+        }
+    }
+
+    /// Stops the client and forgets its registration, so a later sign-in on this device registers
+    /// a new device instead of reviving the removed one, then lets the app sign out.
+    async fn on_device_revoked(&self) {
+        log::warn!("this device was removed from the account, stopping");
+        self.stop_reconnecting.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.addressId.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.connection.write().await.take();
+        let identity = &self.key_stores.store().identity_store;
+        match identity.get_full_identity_key_pair().await {
+            Ok(row) => {
+                if let Err(err) = identity.update_registration_for_keypair(0, &row.username, row.device_id).await {
+                    log::error!("failed to forget the revoked registration: {:?}", err);
+                }
+            }
+            Err(err) => log::error!("failed to read the identity to forget: {:?}", err),
+        }
+        self.callbacks.on_device_revoked().await;
+    }
+
     pub async fn check_setup(&self) -> anyhow::Result<()> {
         if self
             .fully_initialized
@@ -3732,6 +3882,9 @@ impl FireflyWsClient {
                 .send()
                 .await?;
 
+            if response.status() == reqwest::StatusCode::GONE {
+                return Err(DeviceRevoked.into());
+            }
             if !response.status().is_success() {
                 return Err(anyhow::anyhow!(
                     "unexpected status [{}]: {}",
@@ -6503,6 +6656,22 @@ impl FfiFireflyWsClient {
 
     pub async fn set_requests_disabled(&self, disabled: bool) -> anyhow::Result<()> {
         self.inner.set_requests_disabled(disabled).await
+    }
+
+    pub async fn get_presence(&self, usernames: Vec<String>) -> anyhow::Result<Vec<UserPresence>> {
+        self.inner.get_presence(usernames).await
+    }
+
+    pub async fn get_presence_hidden(&self) -> anyhow::Result<bool> {
+        self.inner.get_presence_hidden().await
+    }
+
+    pub async fn set_presence_hidden(&self, hidden: bool) -> anyhow::Result<()> {
+        self.inner.set_presence_hidden(hidden).await
+    }
+
+    pub async fn get_group_members_presence(&self, group_id: u64) -> anyhow::Result<Vec<UserPresence>> {
+        self.inner.get_group_members_presence(group_id).await
     }
 
     pub async fn create_with_endpoints(

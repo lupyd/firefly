@@ -189,6 +189,14 @@ message UserOnlineStatusRequest {
 
 message UserOnlineStatusResponse {
   fixed32 online_bits = 1; // bit i is 1 if usernames[i] is online
+  // Unix seconds usernames[i] was last active (connected), index-aligned with the request; 0 when
+  // unknown or the user hides their presence. Absent from older servers.
+  repeated uint64 last_seen = 2;
+}
+
+// GET/PUT /user/presence: whether others may see the caller's online status and last seen.
+message PresenceSettings {
+  bool hidden = 1;
 }
 
 message Request {

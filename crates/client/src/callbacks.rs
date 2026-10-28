@@ -73,5 +73,9 @@ pub trait FireflyWsClientCallback: Send + Sync {
 
     /// Called whenever a connection is established, with `"webtransport"` or `"websocket"`.
     async fn on_transport_changed(&self, _transport: String) {}
+
+    /// The user removed this device from another one: the client stopped and forgot its
+    /// registration; the app should sign this device out (revoking its own session).
+    async fn on_device_revoked(&self) {}
 }
 
