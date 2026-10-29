@@ -520,6 +520,17 @@ impl FfiMlsGroup {
         res
     }
 
+    /// `(address_id, device_id, username)` of the other members' leaves.
+    pub async fn member_device_addresses(&self) -> Vec<(u64, u32, String)> {
+        self.group.member_device_addresses().await
+    }
+
+    pub async fn remove_gone_devices(&self, my_username: &str, gone: &[u64]) -> anyhow::Result<Option<u64>> {
+        let res = self.group.remove_gone_devices(my_username, gone).await;
+        self.persist_departures().await;
+        res
+    }
+
     pub async fn kick_member(&self, username: String) -> anyhow::Result<u64> {
         let res = self.group.kick_member(&username).await;
         self.persist_departures().await;

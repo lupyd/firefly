@@ -487,6 +487,17 @@ impl FireflyWsClient {
         }
         Ok(())
     }
+    /// Sends the current pinned messages to the group (for a device that just joined), without
+    /// the recent tail or archive keys.
+    pub(super) async fn share_join_pins(&self, g: u64) -> anyhow::Result<()> {
+        let _lock = self.snapshot_work.lock().await;
+        self.flush_pin(g).await?;
+        let (_, _, pinned) = self.current_pins(g).await?;
+        if pinned.is_some() {
+            self.send_bundle(g, pinned, None, false).await?;
+        }
+        Ok(())
+    }
     pub(super) async fn share_join_snapshots(&self, g: u64) -> anyhow::Result<()> {
         self.key_value_store
             .set(

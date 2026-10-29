@@ -371,6 +371,8 @@ impl FireflyWsClientCallback for InternalSignalCallback {
     async fn on_call_signal(&self, signal: CallSignal) { self.inner.on_call_signal(signal).await; }
     async fn on_group_meeting_signal(&self, signal: GroupMeetingSignal) { self.inner.on_group_meeting_signal(signal).await; }
     async fn on_read_user_messages_upto(&self, read: ReadUserMessagesUpto) { self.inner.on_read_user_messages_upto(read).await; }
+    /// Signals from the server (types 0-4) are handled by the connection's own history loop;
+    /// the app only shows them and handles the client's local follow-ups (types 5-8).
     async fn on_group_history_signal(&self, signal: crate::callbacks::GroupHistorySignal) {
         let _ = self.signal_tx.send(signal.clone()).await;
         self.inner.on_group_history_signal(signal).await;
@@ -392,6 +394,12 @@ impl FireflyWsClientCallback for InternalSignalCallback {
     }
     async fn on_device_revoked(&self) {
         self.inner.on_device_revoked().await;
+    }
+    async fn on_direct_history_request(&self, request: crate::callbacks::DirectHistoryRequest) {
+        self.inner.on_direct_history_request(request).await;
+    }
+    async fn on_direct_history_page(&self, page: crate::callbacks::DirectHistoryPage) {
+        self.inner.on_direct_history_page(page).await;
     }
 }
 
@@ -454,6 +462,7 @@ impl Connection {
         device_id: u8,
         firefly_base_url: String,
         signal_tx: tokio::sync::mpsc::Sender<crate::callbacks::GroupHistorySignal>,
+        group_activity: Arc<AtomicBool>,
     ) -> Self {
         let callbacks: Arc<dyn FireflyWsClientCallback> = Arc::new(InternalSignalCallback {
             inner: callbacks,
@@ -498,6 +507,7 @@ impl Connection {
                                     address_id,
                                     device_id,
                                     &firefly_base_url,
+                                    &group_activity,
                                 )
                                 .await
                                 {
@@ -618,6 +628,7 @@ impl Connection {
         device_id: u8,
         firefly_base_url: String,
         signal_tx: tokio::sync::mpsc::Sender<crate::callbacks::GroupHistorySignal>,
+        group_activity: Arc<AtomicBool>,
     ) -> Self {
         let callbacks: Arc<dyn FireflyWsClientCallback> = Arc::new(InternalSignalCallback {
             inner: callbacks,
@@ -641,6 +652,7 @@ impl Connection {
                 let history_keys_store = history_keys_store.clone();
                 let sender2 = sender2.clone();
                 let firefly_base_url = firefly_base_url.clone();
+                let group_activity = group_activity.clone();
 
                 crate::rt::spawn(async move {
                     let mut len_buf = [0u8; 4];
@@ -670,6 +682,7 @@ impl Connection {
                                     address_id,
                                     device_id,
                                     &firefly_base_url,
+                                    &group_activity,
                                 )
                                 .await
                                 {
@@ -861,6 +874,12 @@ pub struct FireflyWsClient {
     self_group_key_packages_store: SelfGroupKeyPackageStore,
     group_key_packages_store: GroupKeyPackageStore,
     fully_initialized: AtomicBool,
+    /// When setup last joined pending groups and re-added members (ms), so the connect that
+    /// follows setup does not repeat it.
+    groups_synced_at: AtomicU64,
+    /// Set when the connection processed a live group message since the server's sync cursors
+    /// were last updated (see `connect`).
+    group_messages_since_sync_update: Arc<AtomicBool>,
     pool: SqlitePool,
     next_request_id: AtomicU32,
     last_connection_error: std::sync::Mutex<Option<String>>,
@@ -1018,6 +1037,8 @@ impl FireflyWsClient {
             self_group_key_packages_store,
             group_key_packages_store,
             fully_initialized: AtomicBool::new(false),
+            groups_synced_at: AtomicU64::new(0),
+            group_messages_since_sync_update: Arc::new(AtomicBool::new(false)),
             firefly_mls_client: Default::default(),
 
             group_info_store,
@@ -1745,6 +1766,7 @@ impl FireflyWsClient {
                     device_id,
                     self.firefly_base_url.clone(),
                     signal_tx,
+                    self.group_messages_since_sync_update.clone(),
                 ),
                 #[cfg(not(target_arch = "wasm32"))]
                 EstablishedTransport::WebTransport(session) => Connection::new_webtransport(
@@ -1762,6 +1784,7 @@ impl FireflyWsClient {
                     device_id,
                     self.firefly_base_url.clone(),
                     signal_tx,
+                    self.group_messages_since_sync_update.clone(),
                 ),
             });
         }
@@ -1770,12 +1793,17 @@ impl FireflyWsClient {
             log::error!("sync group messages failed: {:?}", err);
         }
 
-        if let Some(token) = self.callbacks.get_access_token().await {
-            let address_id = self.addressId.load(std::sync::atomic::Ordering::Relaxed);
-            let _ = self.join_groups(&token, address_id, device_id as u8).await;
-            let _ = self
-                .add_requested_re_add_group_members(&token, address_id, device_id as u8)
-                .await;
+        let synced_at = self.groups_synced_at.load(std::sync::atomic::Ordering::Relaxed);
+        let synced_recently =
+            crate::utils::get_current_timestamp_millis_since_epoch().saturating_sub(synced_at) < 60_000;
+        if !synced_recently {
+            if let Some(token) = self.callbacks.get_access_token().await {
+                let address_id = self.addressId.load(std::sync::atomic::Ordering::Relaxed);
+                let _ = self.join_groups(&token, address_id, device_id as u8).await;
+                let _ = self
+                    .add_requested_re_add_group_members(&token, address_id, device_id as u8)
+                    .await;
+            }
         }
 
         if let Err(err) = self.refresh_accepted_users().await {
@@ -1802,6 +1830,40 @@ impl FireflyWsClient {
             _ = migrate_to_wt => {
                 self.connection.write().await.take();
             },
+            // Daily per group: drop devices of other members that no longer exist. Runs beside the
+            // connection (after a jitter, so devices don't all ask at once) instead of delaying it.
+            _ = async {
+                let jitter = rand::random::<u64>() % 60_000;
+                crate::rt::sleep(Duration::from_millis(jitter)).await;
+                match self.remove_gone_devices_from_groups(false).await {
+                    Ok(0) => {}
+                    Ok(changed) => log::info!("removed gone devices from {changed} groups"),
+                    Err(err) => log::warn!("checking groups for gone devices failed: {err:?}"),
+                }
+                futures::future::pending::<()>().await
+            } => {},
+            // Keep the server's sync cursors current, at most once a minute, so a reconnect does
+            // not re-push everything received during this session.
+            _ = async {
+                loop {
+                    crate::rt::sleep(Duration::from_secs(60)).await;
+                    if !self
+                        .group_messages_since_sync_update
+                        .swap(false, std::sync::atomic::Ordering::Relaxed)
+                    {
+                        continue;
+                    }
+                    let Some(token) = self.callbacks.get_access_token().await else {
+                        self.group_messages_since_sync_update.store(true, std::sync::atomic::Ordering::Relaxed);
+                        continue;
+                    };
+                    let address_id = self.addressId.load(std::sync::atomic::Ordering::Relaxed);
+                    if let Err(err) = self.update_group_commits(&token, address_id).await {
+                        log::warn!("periodic group sync update failed: {err:?}");
+                        self.group_messages_since_sync_update.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            } => {},
         }
 
         {
@@ -3057,6 +3119,10 @@ impl FireflyWsClient {
             .await;
 
         let _ = self.update_group_commits(&token, address_id).await;
+        self.groups_synced_at.store(
+            crate::utils::get_current_timestamp_millis_since_epoch(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         self.fully_initialized
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -3248,7 +3314,6 @@ impl FireflyWsClient {
         }
 
         log::info!("[re_add_member] Calling group.re_add_member for user {} (address {}) in group {}", request.username, request.address_id, groupId);
-        self.key_value_store.set(&format!("snapshot-join-pending:{groupId}"),&format!("{:016x}",rand::random::<u64>())).await?;
         let res = group
             .re_add_member(request.username.to_string(), request.address_id)
             .await;
@@ -3504,8 +3569,10 @@ impl FireflyWsClient {
     }
 
     // Retained FFI name for existing callers; no original messages are resent.
+    /// Hands a newly added device the group's pinned messages. Older messages and the recent
+    /// tail are only handed over when the device asks for them (see `fulfill_group_history`).
     pub async fn re_encrypt_and_send_pinned_messages(&self, group_id:u64)->anyhow::Result<()> {
-        self.share_join_snapshots(group_id).await
+        self.share_join_pins(group_id).await
     }
 
     pub async fn encrypt_and_send_group_with_type(
@@ -3875,8 +3942,10 @@ impl FireflyWsClient {
             self.addressId
                 .store(identity.id as u64, std::sync::atomic::Ordering::Relaxed);
 
+            // Web devices expire sooner on the server (private windows, shared computers).
+            let platform = if cfg!(target_arch = "wasm32") { "web" } else { "native" };
             let response = HTTP_CLIENT
-                .post(format!("{}/user/device", self.firefly_base_url))
+                .post(format!("{}/user/device?platform={platform}", self.firefly_base_url))
                 .body(serialize_proto(&address)?)
                 .bearer_auth(&token)
                 .send()
@@ -4419,7 +4488,6 @@ impl FireflyWsClient {
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
 
-        self.key_value_store.set(&format!("snapshot-join-pending:{group_id}"),&format!("{:016x}",rand::random::<u64>())).await?;
         let id = group.add_member(username, role_id).await?;
 
         self.group_messages_store
@@ -4462,6 +4530,72 @@ impl FireflyWsClient {
         }
 
         Ok(())
+    }
+
+    /// Removes devices that no longer exist (removed, evicted or expired on the server) from the
+    /// groups this device is in, where the rules let it: its own user's devices, expired
+    /// credentials, and devices older than their user's newest one. Each group is checked at most
+    /// once a day unless `force` (after this user removed one of its devices). Returns how many
+    /// groups were changed.
+    pub async fn remove_gone_devices_from_groups(&self, force: bool) -> anyhow::Result<usize> {
+        const CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
+        let client = self.firefly_mls_client.get().context("firefly_mls_client is unitialized")?;
+        let my_username = self.callbacks.name().to_string();
+        let token = self.callbacks.get_access_token().await.context("token not found")?;
+        let now = crate::utils::get_current_timestamp_seconds_since_epoch();
+        let mut changed = 0;
+        for info in self.group_info_store.get_all().await? {
+            let checked_key = format!("gone-devices-checked:{}", info.id);
+            if !force {
+                let last = self.key_value_store.get(&checked_key).await.unwrap_or_default().parse::<u64>().unwrap_or(0);
+                if now.saturating_sub(last) < CHECK_INTERVAL_SECS {
+                    continue;
+                }
+            }
+            let Ok(group) = client.load_group(info.id, info.identifier.clone()).await else {
+                continue;
+            };
+            let devices = group.member_device_addresses().await;
+            let mut gone = Vec::new();
+            // The server answers with the comma-separated address ids that are gone.
+            for chunk in devices.chunks(256) {
+                let devices = chunk
+                    .iter()
+                    .map(|(address_id, device_id, username)| format!("{address_id}.{device_id}.{username}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let response = HTTP_CLIENT
+                    .get(format!("{}/user/addresses/gone", self.firefly_base_url))
+                    .query(&[("devices", devices)])
+                    .bearer_auth(&token)
+                    .send()
+                    .await?;
+                if !response.status().is_success() {
+                    // An older server without the endpoint: nothing to learn.
+                    return Ok(changed);
+                }
+                gone.extend(
+                    response.text().await?.split(',').filter_map(|id| id.trim().parse::<u64>().ok()),
+                );
+            }
+            if !gone.is_empty() {
+                match group.remove_gone_devices(&my_username, &gone).await {
+                    Ok(Some(id)) => {
+                        log::info!("removed gone devices {gone:?} from group {}", info.id);
+                        self.group_messages_store.update_cursor(id, info.id, group.epoch().await as u32).await?;
+                        changed += 1;
+                    }
+                    Ok(None) => {}
+                    // Usually a concurrent commit by another member; checked again next time.
+                    Err(err) => {
+                        log::warn!("could not remove gone devices from group {}: {err}", info.id);
+                        continue;
+                    }
+                }
+            }
+            self.key_value_store.set(&checked_key, &now.to_string()).await?;
+        }
+        Ok(changed)
     }
 
     pub async fn kick_group_member(&self, groupId: u64, username: String) -> anyhow::Result<()> {
@@ -4880,14 +5014,34 @@ impl FireflyWsClient {
         }).await
     }
 
+    /// Whether the group syncs history. One history operation asks several times, so answers
+    /// are cached per account and group: "on" for a few minutes (the server enforces the setting
+    /// anyway), "off" briefly so turning history on takes effect soon.
     pub async fn history_enabled(&self, group_id: u64) -> anyhow::Result<bool> {
+        const TTL_MS: u64 = 5 * 60 * 1000;
+        const OFF_TTL_MS: u64 = 30 * 1000;
+        static CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<(String, u64), (u64, bool)>>> =
+            std::sync::LazyLock::new(Default::default);
+        let key = (self.callbacks.name().to_string(), group_id);
+        let now = crate::utils::get_current_timestamp_millis_since_epoch();
+        if let Some((at, enabled)) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+            if now.saturating_sub(*at) < if *enabled { TTL_MS } else { OFF_TTL_MS } {
+                return Ok(*enabled);
+            }
+        }
         #[derive(serde::Deserialize)]
         struct Policy { group_id: u64, is_member: bool, settings: u32 }
         let token=self.callbacks.get_access_token().await.context("Authentication required")?;
         let response=crate::utils::no_redirect_client(Some(Duration::from_secs(10)))?
             .get(format!("{}/group/policy?id={}",self.firefly_base_url.trim_end_matches('/'),group_id)).bearer_auth(token).send().await?.error_for_status()?;
         let policy: Policy=serde_json::from_slice(&response.bytes().await?)?;
-        Ok(policy.group_id==group_id && policy.is_member && policy.settings & 2 != 0)
+        let enabled = policy.group_id==group_id && policy.is_member && policy.settings & 2 != 0;
+        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.len() > 4096 {
+            cache.retain(|_, (at, _)| now.saturating_sub(*at) < TTL_MS);
+        }
+        cache.insert(key, (now, enabled));
+        Ok(enabled)
     }
 
     pub async fn share_group_history_keys(
@@ -5130,6 +5284,95 @@ impl FireflyWsClient {
         Ok(())
     }
 
+    /// Asks this user's other devices for direct messages with `other` older than `before_id`.
+    /// Returns the request id and how the server routed it (0 = a connected device, 1 = waking a
+    /// device, 2 = no other device can answer); the answer arrives as `on_direct_history_page`.
+    pub async fn request_direct_history(&self, other: &str, before_id: u64, limit: u32) -> anyhow::Result<(u64, u32)> {
+        let bytes = self
+            .request(firefly::Request {
+                payload: firefly::mod_Request::OneOfpayload::requestDirectHistory(firefly::DirectHistoryRequest {
+                    other: other.into(),
+                    before_id,
+                    limit,
+                    ..Default::default()
+                }),
+                id: 0,
+            })
+            .await?;
+        let response = deserialize_proto::<firefly::Response<'_>>(&bytes)?;
+        if let Some(error) = response.error {
+            return Err(anyhow::anyhow!("[{}], {}", error.errorCode, error.error));
+        }
+        match response.body {
+            firefly::mod_Response::OneOfbody::directHistoryStatus(status) => Ok((status.request_id, status.status)),
+            _ => Err(anyhow::anyhow!("unexpected response to a direct history request")),
+        }
+    }
+
+    /// Sends older direct messages to the device of this user that asked for them, end-to-end
+    /// encrypted to that device only.
+    pub async fn send_direct_history_page(
+        &self,
+        request: &crate::callbacks::DirectHistoryRequest,
+        messages: &[crate::db::messages::UserMessage],
+        has_more: bool,
+    ) -> anyhow::Result<()> {
+        let username = self.callbacks.name().to_string();
+        let payload = serialize_proto(&firefly::UserMessageInner {
+            message: firefly::mod_UserMessageInner::OneOfmessage::directHistory(firefly::DirectHistoryPage {
+                request_id: request.request_id,
+                other: request.other.as_str().into(),
+                messages: messages
+                    .iter()
+                    .map(|m| firefly::DirectHistoryRecord {
+                        id: m.id,
+                        sent_by_other: m.sent_by_other,
+                        message: m.message.as_slice().into(),
+                        message_type: m.message_type,
+                    })
+                    .collect(),
+                has_more,
+            }),
+            nonce: rng().next_u32(),
+            message_type: firefly_protos::MESSAGE_TYPE_HIDDEN,
+        })?
+        .to_vec();
+        let device_id = u8::try_from(request.requester_device_id).map_err(|_| anyhow::anyhow!("invalid device id"))?;
+        // The asking device is usually new: set up a session with it from its pre-key bundle,
+        // accepting only a device of this account.
+        if self.key_stores.store().address_store.get_by_id(request.requester_address).await?.is_none() {
+            let token = self.callbacks.get_access_token().await.context("token not found")?;
+            let allowed = [username.as_str()];
+            self.get_and_process_pre_key_bundles_per_ids(&[request.requester_address], Some(&allowed[..]), &token)
+                .await?;
+            anyhow::ensure!(
+                self.key_stores.store().address_store.get_by_id(request.requester_address).await?.is_some(),
+                "the asking device has no keys"
+            );
+        }
+        let message = self
+            .create_encrypted_message(
+                ProtocolAddress::new(username, DeviceId::new(device_id)?),
+                request.requester_address,
+                firefly_protos::USER_MESSAGE_SETTINGS_PROTOCOL | 1,
+                payload,
+            )
+            .await?;
+        let bytes = self
+            .request(firefly::Request {
+                payload: firefly::mod_Request::OneOfpayload::uploadUserMessage(firefly::UploadUserMessage {
+                    messages: vec![message],
+                }),
+                id: 0,
+            })
+            .await?;
+        let response = deserialize_proto::<firefly::Response<'_>>(&bytes)?;
+        if let Some(error) = response.error {
+            return Err(anyhow::anyhow!("[{}], {}", error.errorCode, error.error));
+        }
+        Ok(())
+    }
+
     pub async fn send_backup_key_sync(
         &self,
         sync: firefly_protos::firefly::DirectBackupKeySync<'static>,
@@ -5193,6 +5436,9 @@ impl FireflyWsClient {
         }
         let cursor_key=format!("history_verify_cursor:{group_id}");
         let mut before=self.key_value_store.get(&cursor_key).await.ok().and_then(|s|s.parse::<u64>().ok()).unwrap_or(0);
+        // Every member is told about a new chunk at once and one approval verifies it: wait a
+        // random moment so usually a single member downloads it, the rest see it verified.
+        crate::rt::sleep(Duration::from_millis(rand::random::<u64>() % 15_000)).await;
         for _ in 0..8 {
         let chunks = self.list_group_history_chunks(group_id, 0, before, true).await?;
         let complete=chunks.len()<32;
@@ -5200,6 +5446,9 @@ impl FireflyWsClient {
         for chunk in chunks {
             if chunk.verified || chunk.uploaded_by == self.callbacks.name() || self.history_keys_store.is_chunk_disapproved(group_id, chunk.id).await? { continue; }
             let Some(key) = self.history_keys_store.verified_key(group_id, chunk.start_msg_id, chunk.end_msg_id, &chunk.unencrypted_hash).await? else { continue; };
+            // Approval needs every message of the chunk received here; skip the download when
+            // there are fewer (a device that joined later, a sparse member).
+            if self.group_messages_store.authenticated_history_count(group_id, chunk.start_msg_id, chunk.end_msg_id).await? < chunk.msg_count as u64 { continue; }
             let blob = match self.download_chunk_blob(group_id,&chunk.chunk_url).await {
                 Ok(blob)=>blob,
                 Err(err)=>{log::debug!("Peer chunk unavailable for verification: {}",err);continue;}
@@ -5601,6 +5850,36 @@ async fn on_user_message(
         }
     }
 
+    if let Ok(inner) = deserialize_proto::<firefly::UserMessageInner>(&final_message) {
+        if let firefly::mod_UserMessageInner::OneOfmessage::directHistory(page) = inner.message {
+            is_dummy = true;
+            // Only our own devices hold our history; anyone else could forge it.
+            if is_self_msg {
+                let other = page.other.to_string();
+                callbacks
+                    .on_direct_history_page(crate::callbacks::DirectHistoryPage {
+                        request_id: page.request_id,
+                        messages: page
+                            .messages
+                            .into_iter()
+                            .map(|record| crate::db::messages::UserMessage {
+                                id: record.id,
+                                other: other.clone(),
+                                message: record.message.into_owned(),
+                                sent_by_other: record.sent_by_other,
+                                message_type: record.message_type,
+                            })
+                            .collect(),
+                        other,
+                        has_more: page.has_more,
+                    })
+                    .await;
+            } else {
+                log::warn!("ignoring direct history from {}: not one of our own devices", msg.fromUsername);
+            }
+        }
+    }
+
     if !is_dummy {
         callbacks
             .on_message(crate::db::messages::UserMessage {
@@ -5815,7 +6094,6 @@ async fn re_add_member_internal(
         }
     }
 
-    group_message_store.mark_snapshot_join_pending(group_id).await?;
     let res = group
         .re_add_member(request.username.to_string(), request.address_id)
         .await;
@@ -5871,7 +6149,6 @@ async fn add_member_internal(
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    group_message_store.mark_snapshot_join_pending(group_id).await?;
     let id = group.add_member(username, role_id).await?;
 
     group_message_store
@@ -6070,7 +6347,16 @@ async fn on_server_message(
     address_id: u64,
     device_id: u8,
     firefly_base_url: &str,
+    group_activity: &AtomicBool,
 ) -> anyhow::Result<()> {
+    if matches!(
+        msg.message,
+        firefly::mod_ServerMessage::OneOfmessage::groupMessage(_)
+            | firefly::mod_ServerMessage::OneOfmessage::groupMessages(_)
+            | firefly::mod_ServerMessage::OneOfmessage::groupCommits(_)
+    ) {
+        group_activity.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     match msg.message {
         firefly::mod_ServerMessage::OneOfmessage::userMessage(user_message) => {
             log::info!(
@@ -6131,6 +6417,8 @@ async fn on_server_message(
             }
         }
         firefly::mod_ServerMessage::OneOfmessage::groupMessages(messages) => {
+            // The server only sends commit bundles this way (re-pushed on reconnect), so ones at
+            // the current epoch were already applied and are skipped.
             for group_message in messages.messages {
                 if let Err(err) = on_group_message(
                     &group_message,
@@ -6140,7 +6428,7 @@ async fn on_server_message(
                     history_keys_store,
                     key_value_store,
                     callbacks,
-                    false,
+                    true,
                 )
                 .await
                 {
@@ -6348,6 +6636,27 @@ async fn on_server_message(
             };
             callbacks.on_group_history_signal(s).await;
         }
+        firefly::mod_ServerMessage::OneOfmessage::directHistoryRequest(request) => {
+            log::info!(
+                "direct history request {} for {} before {} from device {}",
+                request.request_id,
+                request.other,
+                request.before_id,
+                request.requester_address
+            );
+            if request.requester_address != address_id {
+                callbacks
+                    .on_direct_history_request(crate::callbacks::DirectHistoryRequest {
+                        request_id: request.request_id,
+                        other: request.other.to_string(),
+                        before_id: request.before_id,
+                        limit: request.limit,
+                        requester_address: request.requester_address,
+                        requester_device_id: request.requester_device_id,
+                    })
+                    .await;
+            }
+        }
         firefly::mod_ServerMessage::OneOfmessage::pong(_pong_bytes) => {}
         firefly::mod_ServerMessage::OneOfmessage::ping(_ping_bytes) => {}
         _ => return Err(anyhow::anyhow!("unhandled server message")),
@@ -6394,6 +6703,30 @@ impl FfiFireflyWsClient {
         CURRENT_CLIENT.scope(name, self.inner.send_backup_key_sync(sync)).await
     }
     pub async fn request_group_history(&self, group: u64, start: u64, end: u64) -> anyhow::Result<()> { self.inner.request_group_history(group, start, end).await.map(|_| ()) }
+    /// Device addresses of the group's other members (its MLS roster, without this device).
+    pub async fn group_member_devices(&self, group_id: u64) -> anyhow::Result<Vec<u64>> {
+        Ok(self
+            .inner
+            .get_mls_group(group_id)
+            .await?
+            .member_device_addresses()
+            .await
+            .into_iter()
+            .map(|(address_id, _, _)| address_id)
+            .collect())
+    }
+    pub async fn remove_gone_devices_from_groups(&self, force: bool) -> anyhow::Result<usize> {
+        let name = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT.scope(name, self.inner.remove_gone_devices_from_groups(force)).await
+    }
+    pub async fn request_direct_history(&self, other: &str, before_id: u64, limit: u32) -> anyhow::Result<(u64, u32)> {
+        let name = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT.scope(name, self.inner.request_direct_history(other, before_id, limit)).await
+    }
+    pub async fn send_direct_history_page(&self, request: &crate::callbacks::DirectHistoryRequest, messages: &[crate::db::messages::UserMessage], has_more: bool) -> anyhow::Result<()> {
+        let name = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT.scope(name, self.inner.send_direct_history_page(request, messages, has_more)).await
+    }
     pub async fn import_group_history_page(&self, group: u64, since: u64, until: u64) -> anyhow::Result<HistoryImportPage> { self.inner.import_group_history_page(group,since,until).await }
     pub async fn handle_group_history_signal(&self, signal: crate::callbacks::GroupHistorySignal) -> anyhow::Result<()> {
         self.inner.handle_group_history_signal(signal).await

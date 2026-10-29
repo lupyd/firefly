@@ -303,6 +303,17 @@ impl GroupMessagesStore {
         rows.iter().map(GroupMessage::from_row).collect::<Result<Vec<_>,_>>().map_err(Into::into)
     }
     /// Only independently received messages may substantiate a peer vote.
+    /// How many messages this device received itself (not imported) in `start..=end`: a chunk
+    /// with more messages than that cannot be vouched for, so it need not be downloaded.
+    pub async fn authenticated_history_count(&self, group: u64, start: u64, end: u64) -> anyhow::Result<u64> {
+        let count: i64 = crate::sql::query_scalar("SELECT COUNT(*) FROM group_messages m WHERE m.group_id=? AND m.id>=? AND m.id<=? AND m.by!='' AND NOT EXISTS (SELECT 1 FROM group_history_imports h WHERE h.group_id=m.group_id AND h.message_id=m.id)")
+            .bind(group as i64)
+            .bind(start.min(i64::MAX as u64) as i64)
+            .bind(end.min(i64::MAX as u64) as i64)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count as u64)
+    }
     pub async fn authenticated_history_ids(&self, group: u64, ids: &[u64]) -> anyhow::Result<Vec<GroupMessage>> {
         anyhow::ensure!(!ids.is_empty() && ids.len() <= crate::history::DEFAULT_CHUNK_SIZE, "Invalid history evidence count");
         let mut query = crate::sql::QueryBuilder::<crate::sql::Sqlite>::new("SELECT m.id,m.by,m.message,m.channel_id,m.group_id,m.epoch,m.message_type FROM group_messages m WHERE m.group_id=");

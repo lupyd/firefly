@@ -223,6 +223,7 @@ message Request {
     GetPendingHistoryRequests getPendingHistoryRequests = 20;
     CloseHistoryRequest closeHistoryRequest = 21;
     ApproveHistoryChunkRequest approveHistoryChunk = 22;
+    DirectHistoryRequest requestDirectHistory = 23;
   }
 }
 
@@ -244,6 +245,7 @@ message Response {
     GetPendingHistoryRequestsResponse getPendingHistoryRequestsResponse = 16;
     HistoryOperationSuccess historySuccess = 17;
     ClaimHistoryResponse claimHistoryResponse = 18;
+    DirectHistoryRequestStatus directHistoryStatus = 19;
   }
 }
 
@@ -269,6 +271,8 @@ message ServerMessage {
     CallSignal callSignal = 20;
     GroupMeetingSignal groupMeetingSignal = 21;
     GroupHistorySignal groupHistorySignal = 22;
+    // Another device of this user asks for older direct messages.
+    DirectHistoryRequest directHistoryRequest = 23;
   }
 }
 
@@ -499,6 +503,8 @@ message UserMessageInner {
     Reaction reaction = 6;
     DirectBackupKeySync backupKeySync = 7;
     DirectPinSnapshotSecret directPinSnapshot = 8;
+    // Only between devices of the same user, only to the device that asked.
+    DirectHistoryPage directHistory = 9;
   }
 
   fixed32 nonce = 10;
@@ -750,6 +756,38 @@ enum HistorySignalType {
   HISTORY_SIGNAL_CHUNK_DISAPPROVED = 2;
   HISTORY_SIGNAL_REQUEST_FULFILLED = 3;
   HISTORY_SIGNAL_CHUNK_VERIFIED = 4;
+}
+
+// Older direct messages: a device without them asks the user's other devices, through the server,
+// which forwards the request to one of them (online, or woken by a push). That device answers with
+// a DirectHistoryPage, end-to-end encrypted to the asking device only.
+message DirectHistoryRequest {
+  fixed64 request_id = 1; // set by the server
+  string other = 2; // the conversation
+  fixed64 before_id = 3; // messages older than this id
+  uint32 limit = 4;
+  uint64 requester_address = 5; // set by the server
+  uint32 requester_device_id = 6; // set by the server
+}
+
+message DirectHistoryRequestStatus {
+  fixed64 request_id = 1;
+  // 0 = sent to a connected device, 1 = waking a device with a push, 2 = no other device can answer
+  uint32 status = 2;
+}
+
+message DirectHistoryRecord {
+  fixed64 id = 1;
+  bool sent_by_other = 2;
+  bytes message = 3;
+  uint32 message_type = 4;
+}
+
+message DirectHistoryPage {
+  fixed64 request_id = 1;
+  string other = 2;
+  repeated DirectHistoryRecord messages = 3;
+  bool has_more = 4;
 }
 
 message GroupHistorySignal {

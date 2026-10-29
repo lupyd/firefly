@@ -41,6 +41,27 @@ pub struct GroupHistorySignal {
     pub username: String,
 }
 
+/// Another device of this user asks for older direct messages with `other` (see
+/// `FireflyWsClient::send_direct_history_page`).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DirectHistoryRequest {
+    pub request_id: u64,
+    pub other: String,
+    pub before_id: u64,
+    pub limit: u32,
+    pub requester_address: u64,
+    pub requester_device_id: u32,
+}
+
+/// Older direct messages with `other` sent by another device of this user, answering a request.
+#[derive(Clone, Debug)]
+pub struct DirectHistoryPage {
+    pub request_id: u64,
+    pub other: String,
+    pub messages: Vec<UserMessage>,
+    pub has_more: bool,
+}
+
 #[async_trait::async_trait]
 pub trait FireflyWsClientCallback: Send + Sync {
     fn name(&self) -> &str;
@@ -77,5 +98,9 @@ pub trait FireflyWsClientCallback: Send + Sync {
     /// The user removed this device from another one: the client stopped and forgot its
     /// registration; the app should sign this device out (revoking its own session).
     async fn on_device_revoked(&self) {}
+    /// Answer with `send_direct_history_page` from the local message store.
+    async fn on_direct_history_request(&self, _request: DirectHistoryRequest) {}
+    /// Store the messages (they are older than what this device has).
+    async fn on_direct_history_page(&self, _page: DirectHistoryPage) {}
 }
 

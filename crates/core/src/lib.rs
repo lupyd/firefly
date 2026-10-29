@@ -852,6 +852,65 @@ impl FireflyMlsGroup {
         };
     }
 
+    /// `(address_id, device_id, username)` of the other members' leaves (not this device's),
+    /// taken from the auth token in each leaf credential. Leaves without an address are skipped.
+    pub async fn member_device_addresses(&self) -> Vec<(u64, u32, String)> {
+        let group = self.group.lock().await;
+        let mine = group.current_member_index();
+        group
+            .roster()
+            .members_iter()
+            .filter(|m| m.index != mine)
+            .filter_map(|m| get_auth_token_from_signing_identity(&m.signing_identity).ok())
+            .filter(|t| t.address_id != 0)
+            .map(|t| (t.address_id, t.device_id, t.username.into_owned()))
+            .collect()
+    }
+
+    /// Removes the leaves of the given device addresses that this member may remove without the
+    /// ManageMember permission (see `rules`): devices of its own user, devices whose credential
+    /// expired, and devices older than their user's newest one. Returns the commit id, or `None`
+    /// when there was nothing it may remove.
+    pub async fn remove_gone_devices(&self, my_username: &str, gone: &[u64]) -> anyhow::Result<Option<u64>> {
+        let mut group = self.group.lock().await;
+        let mine = group.current_member_index();
+        // Receivers check the expiry against their own clock, so only count a credential as
+        // expired once it is an hour past, leaving room for clock skew between devices.
+        const EXPIRY_MARGIN_SECS: u64 = 60 * 60;
+        let now = crate::utils::get_current_timestamp_in_secs();
+        let tokens: Vec<_> = group
+            .roster()
+            .members_iter()
+            .filter_map(|m| get_auth_token_from_signing_identity(&m.signing_identity).ok().map(|t| (m.index, t)))
+            .collect();
+        let newest = |username: &str| {
+            tokens
+                .iter()
+                .filter(|(_, t)| t.username == username)
+                .map(|(_, t)| t.valid_until)
+                .max()
+                .unwrap_or(0)
+        };
+        let indices: Vec<u32> = tokens
+            .iter()
+            .filter(|(index, t)| {
+                *index != mine
+                    && gone.contains(&t.address_id)
+                    && (t.username == my_username || t.valid_until.saturating_add(EXPIRY_MARGIN_SECS) < now || t.valid_until < newest(&t.username))
+            })
+            .map(|(index, _)| *index)
+            .collect();
+        if indices.is_empty() {
+            return Ok(None);
+        }
+        let mut builder = group.commit_builder();
+        for index in indices {
+            builder = builder.remove_member(index)?;
+        }
+        let commit = builder.build().await?;
+        self.send_commit_to_server_and_apply_commit(&mut *group, commit).await.map(Some)
+    }
+
     pub async fn kick_member(&self, username: &str) -> anyhow::Result<u64> {
         let mut indices = Vec::new();
 
