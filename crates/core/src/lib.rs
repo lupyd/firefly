@@ -254,12 +254,23 @@ impl FireflyMlsClient {
     }
 
     pub async fn generate_key_package(&self) -> anyhow::Result<Vec<u8>> {
+        // Valid from an hour ago: whoever adds us checks the lifetime against their own clock,
+        // so a device whose clock runs ahead would otherwise publish packages nobody can use yet.
+        let not_before = crate::utils::get_current_timestamp_in_secs().saturating_sub(60 * 60);
         let package = self
             .client
-            .generate_key_package_message(Default::default(), Default::default(), None)
+            .generate_key_package_message(Default::default(), Default::default(), Some(not_before.into()))
             .await?;
 
         Ok(package.to_bytes()?)
+    }
+
+    /// When the lifetime of the key package `message` ends (unix seconds); whoever adds this
+    /// device with it after that fails.
+    pub fn key_package_lifetime_ends_at(message: &[u8]) -> anyhow::Result<u64> {
+        let message = MlsMessage::from_bytes(message)?;
+        let key_package = message.as_key_package().context("not a key package")?;
+        Ok(key_package.expiration()?.seconds_since_epoch())
     }
 
     pub fn key_package_info_credential(message: &[u8]) -> anyhow::Result<FireflyCredential> {
@@ -894,9 +905,15 @@ impl FireflyMlsGroup {
         let indices: Vec<u32> = tokens
             .iter()
             .filter(|(index, t)| {
+                let expired = t.valid_until.saturating_add(EXPIRY_MARGIN_SECS) < now;
+                // A member whose credential expired (a device that stayed away past it without
+                // renewing) blocks everyone who joins after it: joiners check every member's
+                // credential. Removing it records a stale departure, so it is re-added when it
+                // comes back with a renewed one.
                 *index != mine
-                    && gone.contains(&t.address_id)
-                    && (t.username == my_username || t.valid_until.saturating_add(EXPIRY_MARGIN_SECS) < now || t.valid_until < newest(&t.username))
+                    && (expired
+                        || (gone.contains(&t.address_id)
+                            && (t.username == my_username || t.valid_until < newest(&t.username))))
             })
             .map(|(index, _)| *index)
             .collect();
@@ -991,6 +1008,13 @@ impl FireflyMlsGroup {
         proposals: impl Iterator<Item = UpdateUserProposal>,
     ) -> anyhow::Result<u64> {
         self.commit_custom_proposals(proposals).await
+    }
+
+    /// When the credential in this device's own leaf of the group expires (unix seconds).
+    pub async fn own_credential_valid_until(&self) -> anyhow::Result<u64> {
+        let group = self.group.lock().await;
+        let identity = group.current_member_signing_identity()?;
+        Ok(FireflyCredential::from_signing_identity(identity)?.valid_until_secs()?)
     }
 
     pub async fn update_leaf(&self, identity: &FireflyIdentity) -> anyhow::Result<u64> {

@@ -1842,6 +1842,18 @@ impl FireflyWsClient {
                 }
                 futures::future::pending::<()>().await
             } => {},
+            // Renew the group credential while connected: an app left open for months must not
+            // let it expire.
+            _ = async {
+                loop {
+                    crate::rt::sleep(Duration::from_secs(60)).await;
+                    let Some(token) = self.callbacks.get_access_token().await else { continue };
+                    let address_id = self.addressId.load(std::sync::atomic::Ordering::Relaxed);
+                    if let Err(err) = self.renew_group_credential(&token, address_id, device_id as u8).await {
+                        log::warn!("renewing the group credential failed: {err:#}");
+                    }
+                }
+            } => {},
             // Keep the server's sync cursors current, at most once a minute, so a reconnect does
             // not re-push everything received during this session.
             _ = async {
@@ -2976,6 +2988,16 @@ impl FireflyWsClient {
                         continue;
                     }
 
+                    // Replaced well before its lifetime (a year) ends: a package nobody used for a
+                    // year would otherwise make adding this device fail.
+                    const KEY_PACKAGE_RENEW_BEFORE_SECS: u64 = 30 * 24 * 60 * 60;
+                    let ends_at = firefly_core::FireflyMlsClient::key_package_lifetime_ends_at(&package.package).unwrap_or(0);
+                    if ends_at < crate::utils::get_current_timestamp_seconds_since_epoch() + KEY_PACKAGE_RENEW_BEFORE_SECS {
+                        log::info!("Key package id={} ends its lifetime at {}, replacing it", id, ends_at);
+                        ids_to_delete.push(id);
+                        continue;
+                    }
+
                     let Ok(kp_ref) = firefly_core::FireflyMlsClient::key_package_reference(&package.package).await else {
                         log::warn!(
                             "Key package id={} could not be parsed for reference, marking for deletion",
@@ -3176,6 +3198,10 @@ impl FireflyWsClient {
             .device_id;
 
         self.ensure_mls_client_initialized().await?;
+
+        if let Err(err) = self.renew_group_credential(&token, address_id, device_id).await {
+            log::warn!("renewing the group credential failed: {err:#}");
+        }
 
         self.check_key_packages(&token, address_id, device_id)
             .await?;
@@ -4602,6 +4628,61 @@ impl FireflyWsClient {
         Ok(())
     }
 
+    /// Renews this device's group credential when it is due (group::credential_due) and puts the
+    /// current one into every group whose copy of this device's leaf carries an older one, with a
+    /// commit replacing the leaf (same member, same address). Groups that fail are tried again on
+    /// the next check. Members check each other's credentials whenever someone joins, so one that
+    /// expired would keep anyone from joining its groups.
+    pub async fn renew_group_credential(&self, token: &str, address_id: u64, device_id: u8) -> anyhow::Result<()> {
+        let client = self.ensure_mls_client_initialized().await?;
+        let valid_until = client.identity().is_valid_until_secs()?;
+        let obtained_at = self
+            .key_value_store
+            .get(crate::group::GROUP_IDENTITY_OBTAINED_AT_KEY)
+            .await
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok());
+        let now = crate::utils::get_current_timestamp_seconds_since_epoch();
+        if crate::group::credential_due(valid_until, obtained_at, now) {
+            let renewed = client.renew_credential(token.to_string(), device_id, address_id).await?;
+            self.key_value_store
+                .set(crate::group::GROUP_IDENTITY_KEY, &base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(renewed.to_vec()?))
+                .await?;
+            self.key_value_store
+                .set(crate::group::GROUP_IDENTITY_OBTAINED_AT_KEY, &now.to_string())
+                .await?;
+            log::info!(
+                "renewed the group credential (was valid until {valid_until}, now until {})",
+                renewed.is_valid_until_secs()?
+            );
+            // Packages carrying the old credential are replaced on the next check.
+            let _ = self.check_key_packages(token, address_id, device_id).await;
+        }
+
+        let identity = client.identity();
+        let current = identity.is_valid_until_secs()?;
+        for info in self.group_info_store.get_all().await? {
+            let Ok(group) = client.load_group(info.id, info.identifier.clone()).await else {
+                continue;
+            };
+            let Ok(in_group) = group.own_credential_valid_until().await else {
+                continue;
+            };
+            if in_group >= current {
+                continue;
+            }
+            match group.update_leaf(&identity).await {
+                Ok(id) => {
+                    log::info!("renewed this device's credential in group {}", info.id);
+                    self.group_messages_store.update_cursor(id, info.id, group.epoch().await as u32).await?;
+                }
+                // Usually a concurrent commit by another member; tried again next time.
+                Err(err) => log::warn!("could not renew this device's credential in group {}: {err:#}", info.id),
+            }
+        }
+        Ok(())
+    }
+
     /// Removes devices that no longer exist (removed, evicted or expired on the server) from the
     /// groups this device is in, where the rules let it: its own user's devices, expired
     /// credentials, and devices older than their user's newest one. Each group is checked at most
@@ -4648,7 +4729,8 @@ impl FireflyWsClient {
                     response.text().await?.split(',').filter_map(|id| id.trim().parse::<u64>().ok()),
                 );
             }
-            if !gone.is_empty() {
+            // Members whose credential expired are removed even when the server still knows them.
+            {
                 match group.remove_gone_devices(&my_username, &gone).await {
                     Ok(Some(id)) => {
                         log::info!("removed gone devices {gone:?} from group {}", info.id);

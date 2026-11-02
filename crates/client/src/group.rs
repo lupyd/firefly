@@ -31,6 +31,26 @@ use crate::db::{
 
 use crate::callbacks::FireflyWsClientCallback;
 
+/// Where the device's group identity (signing key and credential) is kept.
+pub const GROUP_IDENTITY_KEY: &str = "group_identity_b64";
+/// When the current credential was issued to this device (unix seconds), for renewal.
+pub const GROUP_IDENTITY_OBTAINED_AT_KEY: &str = "group_identity_obtained_at";
+
+/// Whether a group credential valid until `valid_until` should be renewed now: once three
+/// quarters of its life have passed, so a device that is only online now and then still renews
+/// long before it expires. For credentials issued before renewal existed (`obtained_at`
+/// unknown), in its last 30 days.
+pub fn credential_due(valid_until: u64, obtained_at: Option<u64>, now: u64) -> bool {
+    let margin = match obtained_at {
+        Some(obtained) if obtained < valid_until => (valid_until - obtained) / 4,
+        _ => 30 * 24 * 60 * 60,
+    };
+    now.saturating_add(margin) >= valid_until
+}
+
+/// Builds the MLS client around an identity, over this device's stores.
+type BuildClient = Box<dyn Fn(Arc<FireflyIdentity>) -> anyhow::Result<FireflyMlsClient> + Send + Sync>;
+
 #[derive(Debug)]
 pub struct EncryptedGroupMessage {
     pub sender: String,
@@ -48,7 +68,10 @@ pub enum FireflyMlsReceivedMessage {
 }
 
 pub struct FfiMlsClient {
-    client: FireflyMlsClient,
+    /// Replaced when the group credential is renewed (renew_credential). Groups keep their own
+    /// signer in their state, so this only decides new key packages and new groups.
+    client: std::sync::RwLock<Arc<FireflyMlsClient>>,
+    build_client: BuildClient,
     base_url: Arc<str>,
     group_info_state: Arc<dyn GroupInfoStorage>,
     departure_store: Arc<dyn GroupDepartureStorage>,
@@ -59,7 +82,34 @@ pub struct FfiMlsClient {
 
 impl FfiMlsClient {
     pub fn credential(&self) {
-        self.client.get_identity();
+        self.inner().get_identity();
+    }
+
+    fn inner(&self) -> Arc<FireflyMlsClient> {
+        self.client.read().unwrap().clone()
+    }
+
+    /// This device's group identity (signing key and credential).
+    pub fn identity(&self) -> Arc<FireflyIdentity> {
+        self.inner().get_identity()
+    }
+
+    /// Gets a new credential for the same signing key and uses it from now on (new key packages,
+    /// new groups). Groups the device is already in take it with a commit (update_leaf).
+    pub async fn renew_credential(
+        &self,
+        token: String,
+        device_id: u8,
+        address_id: u64,
+    ) -> anyhow::Result<Arc<FireflyIdentity>> {
+        let renewed = Arc::new(
+            self.identity()
+                .refresh(token, self.base_url.clone(), device_id, address_id)
+                .await?,
+        );
+        let client = (self.build_client)(renewed.clone())?;
+        *self.client.write().unwrap() = Arc::new(client);
+        Ok(renewed)
     }
 
     pub async fn initialize(
@@ -70,7 +120,6 @@ impl FfiMlsClient {
         base_url: String,
         pool: SqlitePool,
     ) -> anyhow::Result<Self> {
-        const GROUP_IDENTITY_KEY: &str = "group_identity_b64";
         let base_url: Arc<str> = base_url.into();
 
         let identity = if let Ok(identity_b64) = key_value_store.get(GROUP_IDENTITY_KEY).await {
@@ -99,6 +148,12 @@ impl FfiMlsClient {
                 key_value_store
                     .set(GROUP_IDENTITY_KEY, &serialized_base64_identity)
                     .await?;
+                key_value_store
+                    .set(
+                        GROUP_IDENTITY_OBTAINED_AT_KEY,
+                        &firefly_core::utils::get_current_timestamp_in_secs().to_string(),
+                    )
+                    .await?;
 
                 identity
             } else {
@@ -122,20 +177,33 @@ impl FfiMlsClient {
             key_value_store
                 .set(GROUP_IDENTITY_KEY, &serialized_base64_identity)
                 .await?;
+            key_value_store
+                .set(
+                    GROUP_IDENTITY_OBTAINED_AT_KEY,
+                    &firefly_core::utils::get_current_timestamp_in_secs().to_string(),
+                )
+                .await?;
 
             identity
         };
 
-        let client = FireflyMlsClient::load(
-            base_url.to_string(),
-            identity.into(),
-            Arc::new(GroupKeyPackageStore::new(pool.clone()).await?),
-            Arc::new(GroupStateStore::new(pool.clone()).await?),
-            Arc::new(GroupPskStore {}),
-            Arc::new(AuthCallback {
-                callbacks: callbacks.clone(),
-            }),
-        )?;
+        let key_packages: Arc<dyn MlsKeyPackageStorage> = Arc::new(GroupKeyPackageStore::new(pool.clone()).await?);
+        let group_states: Arc<dyn MlsGroupStateStorage> = Arc::new(GroupStateStore::new(pool.clone()).await?);
+        let auth: Arc<dyn FireflyAuthTokenCallback> = Arc::new(AuthCallback {
+            callbacks: callbacks.clone(),
+        });
+        let load_base_url = base_url.to_string();
+        let build_client: BuildClient = Box::new(move |identity| {
+            FireflyMlsClient::load(
+                load_base_url.clone(),
+                identity,
+                key_packages.clone(),
+                group_states.clone(),
+                Arc::new(GroupPskStore {}),
+                auth.clone(),
+            )
+        });
+        let client = build_client(identity.into())?;
 
         let group_info_state: Arc<dyn GroupInfoStorage> =
             Arc::new(GroupInfoStore::new(pool.clone()).await?);
@@ -143,7 +211,8 @@ impl FfiMlsClient {
             Arc::new(GroupDepartureStore::new(pool.clone()).await?);
 
         Ok(Self {
-            client,
+            client: std::sync::RwLock::new(Arc::new(client)),
+            build_client,
             base_url,
             group_info_state,
             departure_store,
@@ -163,7 +232,6 @@ impl FfiMlsClient {
         group_info_state: Arc<dyn GroupInfoStorage>,
         base_url: String,
     ) -> anyhow::Result<Self> {
-        const GROUP_IDENTITY_KEY: &str = "group_identity_b64";
         let base_url: Arc<str> = base_url.into();
 
         let identity = if let Ok(identity_b64) = key_value_store.get(GROUP_IDENTITY_KEY).await {
@@ -190,6 +258,12 @@ impl FfiMlsClient {
                 key_value_store
                     .set(GROUP_IDENTITY_KEY, &serialized_base64_identity)
                     .await?;
+                key_value_store
+                    .set(
+                        GROUP_IDENTITY_OBTAINED_AT_KEY,
+                        &firefly_core::utils::get_current_timestamp_in_secs().to_string(),
+                    )
+                    .await?;
 
                 identity
             } else {
@@ -212,6 +286,12 @@ impl FfiMlsClient {
             key_value_store
                 .set(GROUP_IDENTITY_KEY, &serialized_base64_identity)
                 .await?;
+            key_value_store
+                .set(
+                    GROUP_IDENTITY_OBTAINED_AT_KEY,
+                    &firefly_core::utils::get_current_timestamp_in_secs().to_string(),
+                )
+                .await?;
 
             identity
         };
@@ -219,19 +299,25 @@ impl FfiMlsClient {
         let departure_store: Arc<dyn GroupDepartureStorage> =
             Arc::new(KeyValueGroupDepartureStore::new(key_value_store.clone()));
 
-        let client = FireflyMlsClient::load(
-            base_url.to_string(),
-            identity.into(),
-            key_package_storage,
-            group_state_storage,
-            psk_storage,
-            Arc::new(AuthCallback {
-                callbacks: callbacks.clone(),
-            }),
-        )?;
+        let auth: Arc<dyn FireflyAuthTokenCallback> = Arc::new(AuthCallback {
+            callbacks: callbacks.clone(),
+        });
+        let load_base_url = base_url.to_string();
+        let build_client: BuildClient = Box::new(move |identity| {
+            FireflyMlsClient::load(
+                load_base_url.clone(),
+                identity,
+                key_package_storage.clone(),
+                group_state_storage.clone(),
+                psk_storage.clone(),
+                auth.clone(),
+            )
+        });
+        let client = build_client(identity.into())?;
 
         Ok(Self {
-            client,
+            client: std::sync::RwLock::new(Arc::new(client)),
+            build_client,
             base_url,
             group_info_state,
             departure_store,
@@ -263,11 +349,11 @@ pub struct FfiMlsGroup {
 
 impl FfiMlsClient {
     pub fn username(&self) -> Option<String> {
-        self.client.username()
+        self.inner().username()
     }
 
     pub fn signing_identity(&self) -> SigningIdentity {
-        self.client.get_identity().signing_identity()
+        self.inner().get_identity().signing_identity()
     }
 
     pub async fn create_group(&self, group_name: String) -> anyhow::Result<Arc<FfiMlsGroup>> {
@@ -295,7 +381,7 @@ impl FfiMlsClient {
             role: 1,
         });
 
-        let group = self.client.create_group_with_settings(ext.inner().clone(),description.clone(),settings).await?;
+        let group = self.inner().create_group_with_settings(ext.inner().clone(),description.clone(),settings).await?;
 
         self.group_info_state
             .set(
@@ -322,7 +408,7 @@ impl FfiMlsClient {
     }
 
     pub async fn generate_key_package(&self) -> anyhow::Result<Vec<u8>> {
-        self.client.generate_key_package().await
+        self.inner().generate_key_package().await
     }
 
     pub async fn join_group(
@@ -330,7 +416,7 @@ impl FfiMlsClient {
         group_id: u64,
         welcome_message: Vec<u8>,
     ) -> anyhow::Result<Arc<FfiMlsGroup>> {
-        let group = self.client.join_group(group_id, welcome_message).await?;
+        let group = self.inner().join_group(group_id, welcome_message).await?;
 
         let group = Arc::new(FfiMlsGroup {
             group,
@@ -370,7 +456,7 @@ impl FfiMlsClient {
             return Ok(group);
         }
 
-        let group = self.client.load_group(group_id, group_identifier).await?;
+        let group = self.inner().load_group(group_id, group_identifier).await?;
         let group = Arc::new(FfiMlsGroup {
             group,
             base_url: self.base_url.clone(),
@@ -398,11 +484,21 @@ impl FfiMlsClient {
     }
 
     pub async fn is_valid_until_secs(&self) -> anyhow::Result<u64> {
-        self.client.is_valid_until_secs().await
+        self.inner().is_valid_until_secs().await
     }
 }
 
 impl FfiMlsGroup {
+    /// When the credential in this device's own leaf of the group expires (unix seconds).
+    pub async fn own_credential_valid_until(&self) -> anyhow::Result<u64> {
+        self.group.own_credential_valid_until().await
+    }
+
+    /// Replaces this device's leaf with `identity` (same member, a renewed credential).
+    pub async fn update_leaf(&self, identity: &FireflyIdentity) -> anyhow::Result<u64> {
+        self.group.update_leaf(identity).await
+    }
+
     pub async fn state(&self) -> anyhow::Result<Vec<u8>> {
         self.group.state().await
     }
@@ -651,4 +747,34 @@ pub struct UpdateRoleProposalFfi {
 pub struct UpdateUserProposalFfi {
     pub username: String,
     pub role_id: u32,
+}
+
+#[cfg(test)]
+mod credential_renewal_tests {
+    use super::credential_due;
+
+    const DAY: u64 = 24 * 60 * 60;
+
+    #[test]
+    fn renews_after_three_quarters_of_its_life() {
+        let obtained = 1_000 * DAY;
+        let valid_until = obtained + 365 * DAY;
+        assert!(!credential_due(valid_until, Some(obtained), obtained + 200 * DAY));
+        assert!(!credential_due(valid_until, Some(obtained), obtained + 273 * DAY));
+        assert!(credential_due(valid_until, Some(obtained), obtained + 274 * DAY));
+        assert!(credential_due(valid_until, Some(obtained), valid_until + DAY));
+    }
+
+    #[test]
+    fn short_lived_credentials_renew_in_time_too() {
+        assert!(!credential_due(1_240, Some(1_000), 1_100));
+        assert!(credential_due(1_240, Some(1_000), 1_180));
+    }
+
+    #[test]
+    fn credentials_from_before_renewal_renew_in_their_last_30_days() {
+        let valid_until = 1_000 * DAY;
+        assert!(!credential_due(valid_until, None, valid_until - 31 * DAY));
+        assert!(credential_due(valid_until, None, valid_until - 29 * DAY));
+    }
 }
