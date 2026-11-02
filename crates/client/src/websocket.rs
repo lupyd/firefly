@@ -2206,6 +2206,38 @@ impl FireflyWsClient {
         unreachable!("the last attempt always returns")
     }
 
+    /// Encrypts for one device and, when its stored session can no longer be used, starts a fresh
+    /// one from the device's current pre key bundle and tries again. libsignal refuses a session
+    /// the other device never acknowledged once it is 30 days old ("stale unacknowledged
+    /// session"): a contact's device that went away without ever replying leaves one behind, and
+    /// failing on it blocked every message to that contact. `Err` means the device has no usable
+    /// session even then (it is gone from the server, or its bundle is bad).
+    async fn create_encrypted_message_refreshing(
+        &self,
+        address: ProtocolAddress,
+        addressId: u64,
+        settings: u32,
+        payload: Vec<u8>,
+        username: &str,
+        token: &str,
+    ) -> anyhow::Result<firefly::UserMessage<'static>> {
+        let err = match self
+            .create_encrypted_message(address.clone(), addressId, settings, payload.clone())
+            .await
+        {
+            Ok(message) => return Ok(message),
+            Err(err) => err,
+        };
+        log::warn!("encrypt for {} failed ({:#}), fetching its current pre key bundle", address, err);
+        let added = self
+            .get_and_process_pre_key_bundles_per_ids(&[addressId], Some(&[username]), token)
+            .await?;
+        if !added.contains(&addressId) {
+            return Err(err.context(format!("no pre key bundle for {} (address {})", address, addressId)));
+        }
+        self.create_encrypted_message(address, addressId, settings, payload).await
+    }
+
     async fn create_encrypted_message_once(
         &self,
         address: ProtocolAddress,
@@ -2435,16 +2467,52 @@ impl FireflyWsClient {
             }
         }
 
+        // One device that can't be encrypted for (gone, or a session it never acknowledged) must
+        // not hold back the message from the others; the server's answer below drops the
+        // addresses it no longer knows and names any device we missed.
         for address in other_addresses.iter() {
-            let message = self
-                .create_encrypted_message(
+            match self
+                .create_encrypted_message_refreshing(
                     ProtocolAddress::new(to.to_string(), DeviceId::new(address.device_id)?),
                     address.address_id,
                     message_settings,
                     effective_payload.clone(),
+                    to,
+                    &token,
                 )
-                .await?;
-            message_entries.messages.push(message);
+                .await
+            {
+                Ok(message) => message_entries.messages.push(message),
+                Err(err) => log::warn!(
+                    "not encrypting for {}'s device {} (address {}): {:#}",
+                    to,
+                    address.device_id,
+                    address.address_id,
+                    err
+                ),
+            }
+        }
+        if message_entries.messages.is_empty() {
+            // Every cached device failed: start over from the devices the server knows now.
+            log::warn!("no cached device of {} could be encrypted for, fetching fresh pre key bundles", to);
+            for address in &other_addresses {
+                let _ = address_store.delete_by_id(address.address_id).await;
+            }
+            self.get_and_process_all_pre_key_bundles_of_user(to, &token).await?;
+            for address in address_store.get(to).await? {
+                let message = self
+                    .create_encrypted_message(
+                        ProtocolAddress::new(to.to_string(), DeviceId::new(address.device_id)?),
+                        address.address_id,
+                        message_settings,
+                        effective_payload.clone(),
+                    )
+                    .await?;
+                message_entries.messages.push(message);
+            }
+            if message_entries.messages.is_empty() {
+                return Err(anyhow::anyhow!("no addresses found for user {}", to));
+            }
         }
         let self_message_payload = serialize_proto(&firefly::UserMessageInner {
             message: firefly::mod_UserMessageInner::OneOfmessage::selfMessage(
@@ -2567,31 +2635,33 @@ impl FireflyWsClient {
                 let is_self = address.username == self_username;
                 let protocol_address =
                     ProtocolAddress::new(address.username, DeviceId::new(address.device_id)?);
-                let message = if is_self {
-                    self.create_encrypted_message(
-                        protocol_address,
-                        address.address_id,
-                        self_message_settings,
-                        self_message_payload.clone(),
-                    )
+                let (settings, payload) = if is_self {
+                    (self_message_settings, self_message_payload.clone())
                 } else {
-                    self.create_encrypted_message(
+                    (message_settings, effective_payload.clone())
+                };
+                let username = protocol_address.name().to_string();
+                // The first upload already reached the recipient's other devices: failing here
+                // would have the message resent to them, so a device that still can't be
+                // encrypted for is left out.
+                match self
+                    .create_encrypted_message_refreshing(
                         protocol_address,
                         address.address_id,
-                        message_settings,
-                        effective_payload.clone(),
+                        settings,
+                        payload,
+                        &username,
+                        &token,
                     )
-                };
-
-                match message.await {
+                    .await
+                {
                     Ok(m) => upload_request.messages.push(m),
-                    Err(e) => {
-                        if !is_self {
-                            return Err(e);
-                        } else {
-                            log::warn!("failed to encrypt message for self device: {}", e);
-                        }
-                    }
+                    Err(e) => log::warn!(
+                        "failed to encrypt for server-requested address {} of {}: {:#}",
+                        addressId,
+                        username,
+                        e
+                    ),
                 }
             } else {
                 continue;
