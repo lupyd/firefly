@@ -877,6 +877,9 @@ pub struct FireflyWsClient {
     /// When setup last joined pending groups and re-added members (ms), so the connect that
     /// follows setup does not repeat it.
     groups_synced_at: AtomicU64,
+    /// When this device last asked to be re-added to each group it is missing (ms), see
+    /// `request_missing_group_re_adds`.
+    re_adds_requested_at: std::sync::Mutex<HashMap<u64, u64>>,
     /// Set when the connection processed a live group message since the server's sync cursors
     /// were last updated (see `connect`).
     group_messages_since_sync_update: Arc<AtomicBool>,
@@ -1038,6 +1041,7 @@ impl FireflyWsClient {
             group_key_packages_store,
             fully_initialized: AtomicBool::new(false),
             groups_synced_at: AtomicU64::new(0),
+            re_adds_requested_at: std::sync::Mutex::new(HashMap::new()),
             group_messages_since_sync_update: Arc::new(AtomicBool::new(false)),
             firefly_mls_client: Default::default(),
 
@@ -1803,6 +1807,9 @@ impl FireflyWsClient {
                 let _ = self
                     .add_requested_re_add_group_members(&token, address_id, device_id as u8)
                     .await;
+                if let Err(err) = self.process_pending_group_leaves(&token).await {
+                    log::warn!("could not process pending group leaves: {err}");
+                }
             }
         }
 
@@ -2570,6 +2577,10 @@ impl FireflyWsClient {
         }
 
         let mut more_addresses_to_send_to = Vec::new();
+        // The id the server gave the message: every copy of it has this id (since server v14),
+        // so this device keeps it too and an edit, delete or reaction naming it matches
+        // everywhere. Its own clock is only the fallback.
+        let mut message_id: Option<u64> = None;
 
         let mut addresses_to_not_send_to = self_addresses.clone();
         addresses_to_not_send_to.extend_from_slice(&other_addresses);
@@ -2594,6 +2605,9 @@ impl FireflyWsClient {
                     if ids.id == 0 && ids.to != 0 {
                         more_addresses_to_send_to.push(ids.to);
                     } else {
+                        if !ids.is_self && message_id.is_none() {
+                            message_id = Some(ids.id);
+                        }
                         if let Some(index) = addresses_to_not_send_to
                             .iter()
                             .position(|x| x.address_id == ids.to)
@@ -2613,7 +2627,7 @@ impl FireflyWsClient {
 
         if more_addresses_to_send_to.is_empty() {
             return Ok(UserMessage {
-                id: get_current_timestamp_microseconds_since_epoch(),
+                id: message_id.unwrap_or_else(get_current_timestamp_microseconds_since_epoch),
                 other: to.to_string(),
                 message: effective_payload,
                 sent_by_other: false,
@@ -2694,10 +2708,13 @@ impl FireflyWsClient {
 
         if let firefly::mod_Response::OneOfbody::userMessageUploaded(uploaded) = response.body {
             log::info!("uploaded messages: {:?}", uploaded);
+            if message_id.is_none() {
+                message_id = uploaded.messageIds.iter().find(|ids| ids.id != 0 && !ids.is_self).map(|ids| ids.id);
+            }
         }
 
         Ok(UserMessage {
-            id: get_current_timestamp_microseconds_since_epoch(),
+            id: message_id.unwrap_or_else(get_current_timestamp_microseconds_since_epoch),
             other: to.to_string(),
             message: effective_payload,
             sent_by_other: false,
@@ -3215,6 +3232,9 @@ impl FireflyWsClient {
             .await;
 
         let _ = self.update_group_commits(&token, address_id).await;
+        if let Err(err) = self.process_pending_group_leaves(&token).await {
+            log::warn!("could not process pending group leaves: {err}");
+        }
         self.groups_synced_at.store(
             crate::utils::get_current_timestamp_millis_since_epoch(),
             std::sync::atomic::Ordering::Relaxed,
@@ -3555,7 +3575,88 @@ impl FireflyWsClient {
             )
             .await?;
 
+        // The account's other devices belong in the group too. If this fails they ask for a
+        // re-add when they list their groups (request_missing_group_re_adds), and this device
+        // adds them then.
+        if let Some(username) = client.username() {
+            match group.add_own_devices(username).await {
+                Ok(0) => {}
+                Ok(commit_id) => {
+                    self.group_messages_store
+                        .update_cursor(commit_id, group.group_id(), group.epoch().await as u32)
+                        .await?;
+                }
+                Err(err) => log::warn!("adding this account's other devices to group {} failed: {err:#}", group.group_id()),
+            }
+        }
+
         return self.group_info_store.get(group.group_id()).await;
+    }
+
+    /// Asks the server to have this device re-added to the groups it is missing: groups of its
+    /// account it has no state for (the server lists them, e.g. one created on another device of
+    /// the account). The server passes the request on to the group's online members, and the
+    /// others pick it up when they connect. Called whenever the group list is fetched, at most
+    /// every few minutes per group, so a device doesn't need a restart to ask.
+    /// The groups this device has an invite (a welcome) waiting for. Empty when it can't tell.
+    async fn pending_invite_group_ids(&self) -> Vec<u64> {
+        let Some(token) = self.callbacks.get_access_token().await else {
+            return Vec::new();
+        };
+        let url = format!(
+            "{}/group/invites?address={}",
+            self.firefly_base_url,
+            self.addressId.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        let Ok(response) = HTTP_CLIENT.get(&url).bearer_auth(&token).send().await else {
+            return Vec::new();
+        };
+        if !response.status().is_success() {
+            return Vec::new();
+        }
+        let Ok(bytes) = response.bytes().await else {
+            return Vec::new();
+        };
+        deserialize_proto::<firefly::GroupInvites<'_>>(&bytes)
+            .map(|invites| invites.invites.iter().map(|invite| invite.groupId).collect())
+            .unwrap_or_default()
+    }
+
+    async fn request_missing_group_re_adds(&self, group_ids: Vec<u64>) {
+        const INTERVAL_MS: u64 = 5 * 60_000;
+        // Until setup has joined the groups this device was invited to, a group it is about to
+        // join looks missing. Asking for a re-add then gets it removed and added again by a
+        // member, which strands the join from the first invite on an old epoch.
+        if self.groups_synced_at.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            return;
+        }
+        // Likewise for an invite that arrived since (a member just added this device).
+        let invited = self.pending_invite_group_ids().await;
+        let group_ids: Vec<u64> = group_ids.into_iter().filter(|id| !invited.contains(id)).collect();
+        let now = crate::utils::get_current_timestamp_millis_since_epoch();
+        let due: Vec<u64> = {
+            let mut requested = self.re_adds_requested_at.lock().unwrap();
+            requested.retain(|id, _| group_ids.contains(id));
+            let due: Vec<u64> = group_ids
+                .into_iter()
+                .filter(|id| requested.get(id).is_none_or(|at| now.saturating_sub(*at) >= INTERVAL_MS))
+                .collect();
+            for id in &due {
+                requested.insert(*id, now);
+            }
+            due
+        };
+        if due.is_empty() {
+            return;
+        }
+        log::info!("asking to be re-added to groups this device is missing: {:?}", due);
+        // One at a time: the server refuses the whole list over one group the account is no
+        // longer in.
+        for group_id in due {
+            if let Err(err) = self.request_re_add(vec![group_id]).await {
+                log::warn!("asking to be re-added to group {group_id} failed: {err:#}");
+            }
+        }
     }
 
     pub fn is_initialized(&self) -> bool {
@@ -4802,23 +4903,57 @@ impl FireflyWsClient {
             anyhow::bail!("Failed to delete group [{}]: {}", status, body);
         }
 
-        // Drop all local key material and plaintext for the group, not just its info row, so a
-        // seized device can't decrypt or read anything from a deleted group.
-        let identifier = self
-            .group_info_store
-            .get(groupId)
-            .await
-            .map(|info| info.identifier)
-            .unwrap_or_default();
-        crate::db::group_stores::GroupStateStore::new(self.pool.clone())
-            .await?
-            .purge_group_local_state_with_id(groupId, &identifier)
-            .await?;
-        self.group_info_store.delete(groupId).await?;
-        self.group_messages_store
-            .delete_by_group_id(groupId)
-            .await?;
+        forget_group_locally(&self.group_info_store, &self.group_messages_store, groupId).await
+    }
 
+    /// Leaves a group: the server stops delivering it to this user's devices and asks the members
+    /// who may remove them to commit the removal (a device can't commit its own removal in MLS).
+    /// The group is dropped from this device at once; the user's other devices drop it when told.
+    pub async fn leave_group(&self, groupId: u64) -> anyhow::Result<()> {
+        let url = format!("{}/group/leave?groupId={}", self.firefly_base_url, groupId);
+        let token = self
+            .callbacks
+            .get_access_token()
+            .await
+            .context("token not found")?;
+        let resp = HTTP_CLIENT.post(url).bearer_auth(token).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("{}", if body.is_empty() { format!("Failed to leave group [{}]", status) } else { body });
+        }
+        forget_group_locally(&self.group_info_store, &self.group_messages_store, groupId).await?;
+        self.callbacks.on_group_updated(groupId).await;
+        Ok(())
+    }
+
+    /// Carries out the leave requests the server holds for this user's groups (members who left
+    /// while no one who may remove them was online).
+    async fn process_pending_group_leaves(&self, token: &str) -> anyhow::Result<()> {
+        let Some(mls) = self.firefly_mls_client.get() else {
+            return Ok(());
+        };
+        let url = format!("{}/group/leaves", self.firefly_base_url);
+        let resp = HTTP_CLIENT.get(url).bearer_auth(token).send().await?;
+        if !resp.status().is_success() {
+            // Servers before leave requests don't have the route.
+            return Ok(());
+        }
+        let bytes = resp.bytes().await?;
+        let requests = deserialize_proto::<firefly::GroupLeaveRequests<'_>>(&bytes)?;
+        let requests = requests
+            .requests
+            .into_iter()
+            .map(|r| (r.group_id, r.username.into_owned()))
+            .collect();
+        handle_group_leave_requests(
+            requests,
+            mls,
+            &self.group_info_store,
+            &self.group_messages_store,
+            &self.callbacks,
+        )
+        .await;
         Ok(())
     }
 
@@ -4901,6 +5036,9 @@ impl FireflyWsClient {
         let _ = self
             .add_requested_re_add_group_members(&token, address_id, device_id)
             .await;
+        if let Err(err) = self.process_pending_group_leaves(&token).await {
+            log::warn!("could not process pending group leaves: {err}");
+        }
 
         Ok(())
     }
@@ -6485,6 +6623,77 @@ async fn join_group_internal(
     Ok(())
 }
 
+/// Drops all local key material, plaintext and info of a group, not just its info row, so a
+/// seized device can't decrypt or read anything from a group it left or that was deleted.
+async fn forget_group_locally(
+    group_info_store: &GroupInfoStore,
+    group_messages_store: &GroupMessagesStore,
+    group_id: u64,
+) -> anyhow::Result<()> {
+    let identifier = group_info_store
+        .get(group_id)
+        .await
+        .map(|info| info.identifier)
+        .unwrap_or_default();
+    crate::db::group_stores::GroupStateStore::new(group_info_store.pool())
+        .await?
+        .purge_group_local_state_with_id(group_id, &identifier)
+        .await?;
+    group_info_store.delete(group_id).await?;
+    group_messages_store.delete_by_group_id(group_id).await?;
+    Ok(())
+}
+
+/// `(group, username)` asked to leave. This user's own devices drop the group; a device that may
+/// remove the user commits their removal. Several members may try at once: one commit lands and
+/// the others find the user already gone, or fail on the stale epoch and leave it to the winner.
+async fn handle_group_leave_requests(
+    requests: Vec<(u64, String)>,
+    firefly_mls_client: &Arc<FfiMlsClient>,
+    group_info_store: &GroupInfoStore,
+    group_messages_store: &GroupMessagesStore,
+    callbacks: &Arc<dyn FireflyWsClientCallback>,
+) {
+    let me = firefly_mls_client.username();
+    for (group_id, username) in requests {
+        let Ok(info) = group_info_store.get(group_id).await else {
+            continue;
+        };
+        if me.as_deref() == Some(username.as_str()) {
+            log::info!("left group {group_id} on another device");
+            if let Err(err) = forget_group_locally(group_info_store, group_messages_store, group_id).await {
+                log::warn!("could not drop group {group_id} after leaving it: {err}");
+            }
+            callbacks.on_group_updated(group_id).await;
+            continue;
+        }
+        // Spread the members who could commit this out, so usually only one does.
+        let jitter_ms = rand::rng().next_u32() as u64 % 2_000;
+        crate::rt::sleep(Duration::from_millis(jitter_ms)).await;
+        let group = match firefly_mls_client.load_group(group_id, info.identifier).await {
+            Ok(group) => group,
+            Err(err) => {
+                log::warn!("could not load group {group_id} for a leave request: {err:?}");
+                continue;
+            }
+        };
+        if !group.member_device_addresses().await.iter().any(|(_, _, u)| *u == username) {
+            continue;
+        }
+        match group.kick_member(username.clone()).await {
+            Ok(id) => {
+                log::info!("removed {username} from group {group_id}: they left");
+                let _ = group_messages_store
+                    .update_cursor(id, group_id, group.epoch().await as u32)
+                    .await;
+                callbacks.on_group_updated(group_id).await;
+            }
+            // No permission to remove them, or another member's commit landed first.
+            Err(err) => log::info!("did not remove {username} from group {group_id}: {err}"),
+        }
+    }
+}
+
 async fn on_server_message(
     msg: firefly::ServerMessage<'_>,
     pending_requests: &PendingRequests,
@@ -6807,6 +7016,35 @@ async fn on_server_message(
                         requester_device_id: request.requester_device_id,
                     })
                     .await;
+            }
+        }
+        firefly::mod_ServerMessage::OneOfmessage::groupLeaveRequests(requests) => {
+            let requests: Vec<(u64, String)> = requests
+                .requests
+                .into_iter()
+                .map(|r| (r.group_id, r.username.into_owned()))
+                .collect();
+            let mls = firefly_mls_client.clone();
+            let gis = group_info_store.clone();
+            let gms = group_message_store.clone();
+            let cb = callbacks.clone();
+            crate::rt::spawn(async move {
+                handle_group_leave_requests(requests, &mls, &gis, &gms, &cb).await;
+            });
+        }
+        firefly::mod_ServerMessage::OneOfmessage::groupUpdated(update) => {
+            if let Ok(info) = group_info_store.get(update.group_id).await {
+                if info.name != update.name || info.description != update.description {
+                    group_info_store
+                        .set(
+                            update.group_id,
+                            update.name.into_owned(),
+                            update.description.into_owned(),
+                            info.identifier,
+                        )
+                        .await?;
+                }
+                callbacks.on_group_updated(update.group_id).await;
             }
         }
         firefly::mod_ServerMessage::OneOfmessage::pong(_pong_bytes) => {}
@@ -7444,6 +7682,10 @@ impl FfiFireflyWsClient {
         self.inner.kick_group_member(groupId, username).await
     }
 
+    pub async fn leave_group(&self, groupId: u64) -> anyhow::Result<()> {
+        self.inner.leave_group(groupId).await
+    }
+
     pub async fn delete_group(&self, groupId: u64) -> anyhow::Result<()> {
         self.inner.delete_group(groupId).await
     }
@@ -7620,6 +7862,19 @@ impl FfiFireflyWsClient {
             // - it is in local_groups (meaning we are a member and have keys)
             // - OR it is pending (waiting for approval)
             // - OR the current user is the owner (so they can see and delete it)
+            if has_local_keys {
+                // Renames reach other devices through the server (see `groupUpdated`); this
+                // catches the ones a device missed while offline.
+                if let Some(local) = local_groups.iter().find(|g| g.id == group.id) {
+                    if local.name != group.name || local.description != group.description {
+                        let _ = self
+                            .inner
+                            .group_info_store
+                            .set(group.id, group.name.to_string(), group.description.to_string(), local.identifier.clone())
+                            .await;
+                    }
+                }
+            }
             if has_local_keys || is_pending || is_owner {
                 result.push(FfiGroupInfo {
                     id: group.id,
@@ -7630,6 +7885,11 @@ impl FfiFireflyWsClient {
                     has_local_state: has_local_keys,
                 });
             }
+        }
+
+        let missing: Vec<u64> = result.iter().filter(|g| !g.has_local_state && !g.pending).map(|g| g.id).collect();
+        if !missing.is_empty() {
+            self.inner.request_missing_group_re_adds(missing).await;
         }
 
         Ok(result)

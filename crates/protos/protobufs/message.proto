@@ -137,6 +137,24 @@ message GroupReAddRequests {
   repeated GroupReAddRequest requests = 1;
 }
 
+// A member asked to leave a group. Members who may remove them commit the removal; the user's
+// own devices drop the group.
+message GroupLeaveRequest {
+  uint64 group_id = 1;
+  string username = 2;
+}
+
+message GroupLeaveRequests {
+  repeated GroupLeaveRequest requests = 1;
+}
+
+// A group's name or description changed on the server.
+message GroupUpdated {
+  uint64 group_id = 1;
+  string name = 2;
+  string description = 3;
+}
+
 message GroupMemberOnlineStatus {
   uint64 address_id = 1;
   string username = 2;
@@ -273,6 +291,8 @@ message ServerMessage {
     GroupHistorySignal groupHistorySignal = 22;
     // Another device of this user asks for older direct messages.
     DirectHistoryRequest directHistoryRequest = 23;
+    GroupLeaveRequests groupLeaveRequests = 24;
+    GroupUpdated groupUpdated = 25;
   }
 }
 

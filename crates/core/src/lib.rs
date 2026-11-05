@@ -737,6 +737,19 @@ impl FireflyMlsGroup {
     }
 
     pub async fn add_member(&self, username: String, role_id: u32) -> anyhow::Result<u64> {
+        self.add_devices_of(username, Some(role_id)).await
+    }
+
+    /// Adds the other devices of this member's own account (`username`) that aren't in the group
+    /// yet, e.g. right after creating it: the creating device is its only member then. Leaves
+    /// roles alone. Returns the commit id, or 0 when there was no device to add.
+    pub async fn add_own_devices(&self, username: String) -> anyhow::Result<u64> {
+        self.add_devices_of(username, None).await
+    }
+
+    /// Adds every device of `username` not in the group yet, from their key packages; with a
+    /// role, as a new member with that role.
+    async fn add_devices_of(&self, username: String, role_id: Option<u32>) -> anyhow::Result<u64> {
         let url = format!(
             "{}/group/keyPackages?other={}&all=true",
             self.base_url, username
@@ -759,6 +772,9 @@ impl FireflyMlsGroup {
         let packages = deserialize_proto::<GroupKeyPackages>(&body)?;
 
         if packages.packages.is_empty() {
+            if role_id.is_none() {
+                return Ok(0);
+            }
             return Err(anyhow::anyhow!("No key packages found"));
         }
 
@@ -817,7 +833,7 @@ impl FireflyMlsGroup {
         }
 
         if valid_packages.is_empty() {
-            if let Some(err) = last_expired_err {
+            if let Some(err) = last_expired_err.filter(|_| role_id.is_some()) {
                 return Err(err);
             }
             log::info!("No new members to add, skipping commit");
@@ -834,13 +850,15 @@ impl FireflyMlsGroup {
             invitee_addresses.push(package.address);
         }
 
-        commit_builder = commit_builder.custom_proposal(
-            UpdateUserProposal {
-                username: username.clone(),
-                role_id,
-            }
-            .to_custom_proposal()?,
-        );
+        if let Some(role_id) = role_id {
+            commit_builder = commit_builder.custom_proposal(
+                UpdateUserProposal {
+                    username: username.clone(),
+                    role_id,
+                }
+                .to_custom_proposal()?,
+            );
+        }
 
         let commit = commit_builder.build().await?;
 

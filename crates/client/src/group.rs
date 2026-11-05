@@ -616,6 +616,14 @@ impl FfiMlsGroup {
         res
     }
 
+    /// Adds the other devices of this member's own account that aren't in the group yet (see
+    /// `firefly_core`'s `add_own_devices`). Returns the commit id, or 0 when there were none.
+    pub async fn add_own_devices(&self, username: String) -> anyhow::Result<u64> {
+        let res = self.group.add_own_devices(username).await;
+        self.persist_departures().await;
+        res
+    }
+
     /// `(address_id, device_id, username)` of the other members' leaves.
     pub async fn member_device_addresses(&self) -> Vec<(u64, u32, String)> {
         self.group.member_device_addresses().await

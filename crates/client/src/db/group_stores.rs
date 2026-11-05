@@ -563,6 +563,10 @@ pub struct GroupInfoStore {
 }
 
 impl GroupInfoStore {
+    pub fn pool(&self) -> SqlitePool {
+        self.pool.clone()
+    }
+
     pub async fn new(pool: SqlitePool) -> anyhow::Result<Self> {
         pool.execute(
             r#"

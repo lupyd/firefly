@@ -1126,6 +1126,114 @@ impl<'a> MessageWrite for GroupReAddRequests<'a> {
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Default, PartialEq, Clone)]
+pub struct GroupLeaveRequest<'a> {
+    pub group_id: u64,
+    pub username: Cow<'a, str>,
+}
+
+impl<'a> MessageRead<'a> for GroupLeaveRequest<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.group_id = r.read_uint64(bytes)?,
+                Ok(18) => msg.username = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for GroupLeaveRequest<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.group_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.group_id) as u64) }
+        + if self.username == "" { 0 } else { 1 + sizeof_len((&self.username).len()) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.group_id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.group_id))?; }
+        if self.username != "" { w.write_with_tag(18, |w| w.write_string(&**&self.username))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct GroupLeaveRequests<'a> {
+    pub requests: Vec<firefly::GroupLeaveRequest<'a>>,
+}
+
+impl<'a> MessageRead<'a> for GroupLeaveRequests<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(10) => msg.requests.push(r.read_message::<firefly::GroupLeaveRequest>(bytes)?),
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for GroupLeaveRequests<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + self.requests.iter().map(|s| 1 + sizeof_len((s).get_size())).sum::<usize>()
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        for s in &self.requests { w.write_with_tag(10, |w| w.write_message(s))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct GroupUpdated<'a> {
+    pub group_id: u64,
+    pub name: Cow<'a, str>,
+    pub description: Cow<'a, str>,
+}
+
+impl<'a> MessageRead<'a> for GroupUpdated<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.group_id = r.read_uint64(bytes)?,
+                Ok(18) => msg.name = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(26) => msg.description = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for GroupUpdated<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.group_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.group_id) as u64) }
+        + if self.name == "" { 0 } else { 1 + sizeof_len((&self.name).len()) }
+        + if self.description == "" { 0 } else { 1 + sizeof_len((&self.description).len()) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.group_id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.group_id))?; }
+        if self.name != "" { w.write_with_tag(18, |w| w.write_string(&**&self.name))?; }
+        if self.description != "" { w.write_with_tag(26, |w| w.write_string(&**&self.description))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
 pub struct GroupMemberOnlineStatus<'a> {
     pub address_id: u64,
     pub username: Cow<'a, str>,
@@ -1841,6 +1949,8 @@ impl<'a> MessageRead<'a> for ServerMessage<'a> {
                 Ok(170) => msg.message = firefly::mod_ServerMessage::OneOfmessage::groupMeetingSignal(r.read_message::<firefly::GroupMeetingSignal>(bytes)?),
                 Ok(178) => msg.message = firefly::mod_ServerMessage::OneOfmessage::groupHistorySignal(r.read_message::<firefly::GroupHistorySignal>(bytes)?),
                 Ok(186) => msg.message = firefly::mod_ServerMessage::OneOfmessage::directHistoryRequest(r.read_message::<firefly::DirectHistoryRequest>(bytes)?),
+                Ok(194) => msg.message = firefly::mod_ServerMessage::OneOfmessage::groupLeaveRequests(r.read_message::<firefly::GroupLeaveRequests>(bytes)?),
+                Ok(202) => msg.message = firefly::mod_ServerMessage::OneOfmessage::groupUpdated(r.read_message::<firefly::GroupUpdated>(bytes)?),
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -1869,6 +1979,8 @@ impl<'a> MessageWrite for ServerMessage<'a> {
             firefly::mod_ServerMessage::OneOfmessage::groupMeetingSignal(ref m) => 2 + sizeof_len((m).get_size()),
             firefly::mod_ServerMessage::OneOfmessage::groupHistorySignal(ref m) => 2 + sizeof_len((m).get_size()),
             firefly::mod_ServerMessage::OneOfmessage::directHistoryRequest(ref m) => 2 + sizeof_len((m).get_size()),
+            firefly::mod_ServerMessage::OneOfmessage::groupLeaveRequests(ref m) => 2 + sizeof_len((m).get_size()),
+            firefly::mod_ServerMessage::OneOfmessage::groupUpdated(ref m) => 2 + sizeof_len((m).get_size()),
             firefly::mod_ServerMessage::OneOfmessage::None => 0,
     }    }
 
@@ -1889,6 +2001,8 @@ impl<'a> MessageWrite for ServerMessage<'a> {
             firefly::mod_ServerMessage::OneOfmessage::groupMeetingSignal(ref m) => { w.write_with_tag(170, |w| w.write_message(m))? },
             firefly::mod_ServerMessage::OneOfmessage::groupHistorySignal(ref m) => { w.write_with_tag(178, |w| w.write_message(m))? },
             firefly::mod_ServerMessage::OneOfmessage::directHistoryRequest(ref m) => { w.write_with_tag(186, |w| w.write_message(m))? },
+            firefly::mod_ServerMessage::OneOfmessage::groupLeaveRequests(ref m) => { w.write_with_tag(194, |w| w.write_message(m))? },
+            firefly::mod_ServerMessage::OneOfmessage::groupUpdated(ref m) => { w.write_with_tag(202, |w| w.write_message(m))? },
             firefly::mod_ServerMessage::OneOfmessage::None => {},
     }        Ok(())
     }
@@ -1916,6 +2030,8 @@ pub enum OneOfmessage<'a> {
     groupMeetingSignal(firefly::GroupMeetingSignal<'a>),
     groupHistorySignal(firefly::GroupHistorySignal<'a>),
     directHistoryRequest(firefly::DirectHistoryRequest<'a>),
+    groupLeaveRequests(firefly::GroupLeaveRequests<'a>),
+    groupUpdated(firefly::GroupUpdated<'a>),
     None,
 }
 
