@@ -445,6 +445,10 @@ const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(u32::MAX as u64 / 1000);
 /// Upper bound for opening a WebSocket connection (TCP + TLS + upgrade).
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Times a group message is encrypted again after the group moved on while it was being sent.
+const STALE_EPOCH_RETRIES: u32 = 3;
+/// How long a resend waits for the commits it missed, which the server pushes to every member.
+const STALE_EPOCH_WAIT: Duration = Duration::from_secs(10);
 
 impl Connection {
     pub fn new(
@@ -3681,50 +3685,72 @@ impl FireflyWsClient {
             .context("firefly_mls_client is not initialized")?;
 
         let group_info = self.group_info_store.get(groupId).await?;
-
-        let group = firefly_mls_client
-            .load_group(groupId, group_info.identifier)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-
         let payload = serialize_proto(&message)?;
-        let encrypted = group
-            .encrypt(payload.to_vec())
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
 
-        if let Err(err) = group.save().await {
-            log::warn!("Failed to save group state after encrypt: {:?}", err);
-        }
+        let mut stale_epoch_retries = 0;
+        let uploaded_group_message = loop {
+            let group = firefly_mls_client
+                .load_group(groupId, group_info.identifier.clone())
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
 
-        let current_epoch = group.epoch().await as u32;
-        let group_message = firefly::GroupMessage {
-            id: 0,
-            groupId,
-            message: encrypted.into(),
-            epoch: current_epoch,
-        };
+            let encrypted = group
+                .encrypt(payload.to_vec())
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
 
-        let bytes = self
-            .request(firefly::Request {
+            if let Err(err) = group.save().await {
+                log::warn!("Failed to save group state after encrypt: {:?}", err);
+            }
+
+            let current_epoch = group.epoch().await as u32;
+            let group_message = firefly::GroupMessage {
                 id: 0,
-                payload: firefly::mod_Request::OneOfpayload::uploadGroupMessage(group_message),
-            })
-            .await?;
-        let response = deserialize_proto::<firefly::Response<'_>>(&bytes)?;
+                groupId,
+                message: encrypted.into(),
+                epoch: current_epoch,
+            };
 
-        if let Some(err) = response.error {
-            return Err(anyhow::anyhow!(
-                "unexpected response: [{}] {:?}",
-                err.errorCode,
-                err.error
-            ));
-        }
+            let bytes = self
+                .request(firefly::Request {
+                    id: 0,
+                    payload: firefly::mod_Request::OneOfpayload::uploadGroupMessage(group_message),
+                })
+                .await?;
+            let response = deserialize_proto::<firefly::Response<'_>>(&bytes)?;
 
-        let firefly::mod_Response::OneOfbody::groupMessageUploaded(uploaded_group_message) =
-            response.body
-        else {
-            return Err(anyhow::anyhow!("unexpected response: {:?}", response));
+            if let Some(err) = response.error {
+                // A commit landed after this message was encrypted (servers since firefly-mls
+                // 0.2.8 refuse it, as members would): catch up and encrypt it again.
+                if err.errorCode == 409 && stale_epoch_retries < STALE_EPOCH_RETRIES {
+                    stale_epoch_retries += 1;
+                    log::info!(
+                        "group {} moved past epoch {} while sending; resending once caught up",
+                        groupId,
+                        current_epoch
+                    );
+                    self.wait_for_group_epoch_past(groupId, &group_info.identifier, current_epoch)
+                        .await;
+                    continue;
+                }
+                return Err(anyhow::anyhow!(
+                    "unexpected response: [{}] {:?}",
+                    err.errorCode,
+                    err.error
+                ));
+            }
+
+            let firefly::mod_Response::OneOfbody::groupMessageUploaded(uploaded_group_message) =
+                response.body
+            else {
+                return Err(anyhow::anyhow!("unexpected response: {:?}", response));
+            };
+            break firefly::GroupMessage {
+                id: uploaded_group_message.id,
+                groupId,
+                message: Default::default(),
+                epoch: uploaded_group_message.epoch,
+            };
         };
 
         let claims = get_claims_from_token(
@@ -3757,6 +3783,21 @@ impl FireflyWsClient {
             self.callbacks.on_group_history_signal(crate::callbacks::GroupHistorySignal{group_id:groupId,signal_type:6,request_id:0,chunk_id:0,username:self.callbacks.name().to_string()}).await;
         }
         Ok(uploaded_group_message.id)
+    }
+
+    /// Waits until this device has applied the group's commits after `epoch`, or gives up after
+    /// `STALE_EPOCH_WAIT` (the resend then finds out whether it caught up).
+    async fn wait_for_group_epoch_past(&self, group_id: u64, identifier: &[u8], epoch: u32) {
+        let Some(firefly_mls_client) = self.firefly_mls_client.get() else { return };
+        const STEP: Duration = Duration::from_millis(100);
+        for _ in 0..(STALE_EPOCH_WAIT.as_millis() / STEP.as_millis()) {
+            if let Ok(group) = firefly_mls_client.load_group(group_id, identifier.to_vec()).await {
+                if group.epoch().await as u32 > epoch {
+                    return;
+                }
+            }
+            crate::rt::sleep(STEP).await;
+        }
     }
 
     pub async fn set_group_message_pin(&self, group_id:u64, message_id:u64, pinned:bool)->anyhow::Result<()> {
