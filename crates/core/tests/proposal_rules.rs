@@ -235,12 +235,22 @@ fn private_message(epoch: u64, content_type: u8) -> MlsMessage {
 
 #[test]
 fn application_messages_from_other_epochs_are_rejected() {
-    assert!(ensure_application_message_is_current(&private_message(5, 1), 5).is_ok());
-    assert!(ensure_application_message_is_current(&private_message(4, 1), 5).is_err());
-    assert!(ensure_application_message_is_current(&private_message(6, 1), 5).is_err());
+    assert!(ensure_application_message_is_current(&private_message(5, 1), 5, 5).is_ok());
+    assert!(ensure_application_message_is_current(&private_message(4, 1), 5, 5).is_err());
+    assert!(ensure_application_message_is_current(&private_message(6, 1), 5, 5).is_err());
     // handshake messages are left to mls-rs
-    assert!(ensure_application_message_is_current(&private_message(4, 3), 5).is_ok());
-    assert!(ensure_application_message_is_current(&private_message(4, 2), 5).is_ok());
+    assert!(ensure_application_message_is_current(&private_message(4, 3), 5, 5).is_ok());
+    assert!(ensure_application_message_is_current(&private_message(4, 2), 5, 5).is_ok());
+}
+
+#[test]
+fn application_messages_from_epochs_with_the_same_roster_are_accepted() {
+    // No leaf changed hands since epoch 3: messages from 3 and 4 are attributed correctly.
+    assert!(ensure_application_message_is_current(&private_message(4, 1), 5, 3).is_ok());
+    assert!(ensure_application_message_is_current(&private_message(3, 1), 5, 3).is_ok());
+    // Before the commit that changed a leaf, and from the future, they are not.
+    assert!(ensure_application_message_is_current(&private_message(2, 1), 5, 3).is_err());
+    assert!(ensure_application_message_is_current(&private_message(6, 1), 5, 3).is_err());
 }
 
 #[derive(Default)]

@@ -350,6 +350,11 @@ pub struct FireflyMlsGroup {
     /// Users whose last device left the group in a commit applied through this object, in
     /// application order. Drained by [`FireflyMlsGroup::take_departures`].
     departures: std::sync::Mutex<Vec<Departure>>,
+    /// The earliest epoch whose roster (who holds each leaf) is still the current one, as far as
+    /// this object has seen: the epoch it was loaded at, or of the last commit that changed a leaf.
+    /// Application messages from then on are attributed correctly (see
+    /// [`ensure_application_message_is_current`]).
+    roster_unchanged_since: std::sync::atomic::AtomicU64,
 }
 
 /// A user whose every device was removed from the group by an MLS-authenticated commit.
@@ -413,6 +418,24 @@ fn roster_leaves(group: &Group<FireflyClientMlsConfig>) -> Vec<RosterLeaf> {
         .collect()
 }
 
+/// The roster before a commit: its leaves for departures, and who holds each leaf.
+struct RosterBefore {
+    leaves: Vec<RosterLeaf>,
+    holders: Vec<(u32, SigningIdentity)>,
+}
+
+fn roster_holders(group: &Group<FireflyClientMlsConfig>) -> Vec<(u32, SigningIdentity)> {
+    group
+        .roster()
+        .members_iter()
+        .map(|m| (m.index, m.signing_identity))
+        .collect()
+}
+
+fn roster_before(group: &Group<FireflyClientMlsConfig>) -> RosterBefore {
+    RosterBefore { leaves: roster_leaves(group), holders: roster_holders(group) }
+}
+
 fn roster_usernames(group: &Group<FireflyClientMlsConfig>) -> Vec<String> {
     group
         .roster()
@@ -447,12 +470,14 @@ impl FireflyMlsGroup {
         base_url: Arc<str>,
         auth_token_callback: Arc<dyn FireflyAuthTokenCallback>,
     ) -> Self {
+        let epoch = group.current_epoch();
         Self {
             group: tokio::sync::Mutex::new(group),
             base_url,
             auth_token_callback,
             group_id,
             departures: Default::default(),
+            roster_unchanged_since: std::sync::atomic::AtomicU64::new(epoch),
         }
     }
 
@@ -470,10 +495,17 @@ impl FireflyMlsGroup {
             .any(|m| does_signing_identity_has_this_username(username, &m.signing_identity))
     }
 
-    fn record_departures(&self, before: &[RosterLeaf], group: &Group<FireflyClientMlsConfig>) {
+    fn record_departures(&self, before: &RosterBefore, group: &Group<FireflyClientMlsConfig>) {
+        if before.holders != roster_holders(group) {
+            self.roster_unchanged_since
+                .store(group.current_epoch(), std::sync::atomic::Ordering::Relaxed);
+        }
         let after = roster_usernames(group);
-        let departures =
-            compute_departures(before, after.iter().map(String::as_str), group.current_epoch());
+        let departures = compute_departures(
+            &before.leaves,
+            after.iter().map(String::as_str),
+            group.current_epoch(),
+        );
         if !departures.is_empty() {
             log::info!("group {} departures: {:?}", self.group_id, departures);
             self.departures
@@ -627,9 +659,13 @@ impl FireflyMlsGroup {
         let mut group = self.group.lock().await;
 
         let message = MlsMessage::from_bytes(message)?;
-        ensure_application_message_is_current(&message, group.current_epoch())?;
+        ensure_application_message_is_current(
+            &message,
+            group.current_epoch(),
+            self.roster_unchanged_since.load(std::sync::atomic::Ordering::Relaxed),
+        )?;
 
-        let before = (!is_application_message(&message)).then(|| roster_leaves(&group));
+        let before = (!is_application_message(&message)).then(|| roster_before(&group));
         let msg = group.process_incoming_message(message).await?;
         if let (Some(before), mls_rs::group::ReceivedMessage::Commit(_)) = (&before, &msg) {
             self.record_departures(before, &group);
@@ -719,7 +755,7 @@ impl FireflyMlsGroup {
             .await
         {
             Ok(id) => {
-                let before = roster_leaves(&group);
+                let before = roster_before(&group);
                 group.apply_pending_commit().await?;
                 self.record_departures(&before, &group);
 
@@ -867,7 +903,7 @@ impl FireflyMlsGroup {
             .await
         {
             Ok(id) => {
-                let before = roster_leaves(&group);
+                let before = roster_before(&group);
                 group.apply_pending_commit().await?;
                 self.record_departures(&before, &group);
                 group.write_to_storage().await?;
@@ -1079,7 +1115,7 @@ impl FireflyMlsGroup {
                     group.has_pending_commit()
                 );
 
-                let before = roster_leaves(group);
+                let before = roster_before(group);
                 let desc = group.apply_pending_commit().await?;
                 self.record_departures(&before, group);
 
@@ -1192,7 +1228,7 @@ impl FireflyMlsGroup {
     }
 }
 
-fn is_application_message(message: &MlsMessage) -> bool {
+pub fn is_application_message(message: &MlsMessage) -> bool {
     matches!(
         message.description(),
         mls_rs::MlsMessageDescription::PrivateProtocolMessage {
@@ -1207,10 +1243,14 @@ fn is_application_message(message: &MlsMessage) -> bool {
 
 /// mls-rs decrypts application messages from retained prior epochs, but senders are resolved
 /// and authorised against the current roster and rules. A leaf index can be reused after a
-/// kick, so an old-epoch message would be attributed to whoever holds that leaf now.
+/// kick, so an old-epoch message would be attributed to whoever holds that leaf now: one is
+/// accepted only from `roster_unchanged_since` on, while every leaf has had the same holder.
+/// That keeps a message sent just before a commit that changed no leaf (a rename, a channel)
+/// for the members already past it, the committer above all.
 pub fn ensure_application_message_is_current(
     message: &MlsMessage,
     current_epoch: u64,
+    roster_unchanged_since: u64,
 ) -> anyhow::Result<()> {
     if let mls_rs::MlsMessageDescription::PrivateProtocolMessage {
         epoch_id,
@@ -1218,7 +1258,7 @@ pub fn ensure_application_message_is_current(
         ..
     } = message.description()
     {
-        if epoch_id != current_epoch {
+        if epoch_id > current_epoch || epoch_id < roster_unchanged_since.min(current_epoch) {
             return Err(anyhow::anyhow!(
                 "rejecting application message from epoch {} in epoch {}",
                 epoch_id,

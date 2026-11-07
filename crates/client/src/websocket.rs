@@ -5862,7 +5862,12 @@ async fn on_group_message(
         current_epoch
     );
 
-    if msg.epoch < current_epoch as u32 {
+    // Commits from an earlier epoch are applied already. An application message from one can
+    // still be read (sent just before a commit this device applied first, its own above all);
+    // the group refuses it if a leaf changed hands since.
+    let application = mls_rs::MlsMessage::from_bytes(&msg.message)
+        .is_ok_and(|message| firefly_core::is_application_message(&message));
+    if msg.epoch < current_epoch as u32 && !application {
         log::info!("Skipping old message (group {} id {})", groupId, msg.id);
         return Ok(());
     }
