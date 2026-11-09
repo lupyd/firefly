@@ -96,9 +96,11 @@ jobs:
           export FIREFLY_BASE_URL=http://127.0.0.1:39209
           export FIREFLY_WS_URL=ws://127.0.0.1:39209
           # test-hooks lets the WebTransport tests trust the local server's certificate.
-          cargo test --features firefly-client/test-hooks
+          cargo test --no-fail-fast --features firefly-client/test-hooks
 
       - name: Build WASM and JS packages
+        # Runs even when an earlier test step failed, so one failure doesn't hide the rest.
+        if: ${{ !cancelled() }}
         run: |
           cd crates/client-node
           npm install
@@ -109,12 +111,14 @@ jobs:
           npm run build
 
       - name: Run TypeScript integration tests
+        if: ${{ !cancelled() }}
         run: |
           cd examples/chatbot
           npm install
           FIREFLY_BASE_URL=http://127.0.0.1:39209 FIREFLY_WS_URL=ws://127.0.0.1:39209/ SPAWN_SERVER=false bun test
 
       - name: Run bot and client unit tests
+        if: ${{ !cancelled() }}
         run: |
           # Links the bots to the packages built above
           bun examples/bots-setup.ts --skip-wasm
@@ -124,6 +128,7 @@ jobs:
           done
 
       - name: Run bots end-to-end test
+        if: ${{ !cancelled() }}
         run: |
           cd examples/bots-e2e
           FIREFLY_BASE_URL=http://127.0.0.1:39209 bun test --timeout 400000
