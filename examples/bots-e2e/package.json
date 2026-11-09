@@ -1,0 +1,15 @@
+{
+  "name": "firefly-bots-e2e",
+  "version": "0.0.1",
+  "private": true,
+  "description": "End-to-end test of the greetings and reminder bots against a local Firefly server",
+  "scripts": {
+    "test": "bun test --timeout 400000"
+  },
+  "dependencies": {
+    "firefly-client-js": "file:../../crates/firefly-client-js"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

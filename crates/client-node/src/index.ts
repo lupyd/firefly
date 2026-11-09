@@ -132,7 +132,18 @@ export interface KeyValueStorage {
   updateLastReceivedMessageId?(lastReceivedMessageId: number | bigint): Promise<void> | void;
 }
 
+/**
+ * Snapshot of the Signal (1:1) key stores, which otherwise live only in memory.
+ * `save` runs after every change to the identity, prekeys or sessions; `load` once at startup.
+ * The snapshot contains private keys, so store it like any other secret.
+ */
+export interface SignalStateStorage {
+  load(): Promise<Uint8Array | null | undefined> | Uint8Array | null | undefined;
+  save(snapshot: Uint8Array): Promise<void> | void;
+}
+
 export interface StorageProviders {
+  signalStateStorage?: SignalStateStorage;
   mlsKeyPackageStorage?: MlsKeyPackageStorage;
   mlsGroupStateStorage?: MlsGroupStateStorage;
   mlsPreSharedKeyStorage?: MlsPreSharedKeyStorage;

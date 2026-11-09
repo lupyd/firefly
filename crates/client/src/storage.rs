@@ -1393,6 +1393,30 @@ pub struct MemoryKeyStores {
     pub conversation_store: MemoryConversationStore,
 }
 
+const KEY_STORES_SNAPSHOT_VERSION: u32 = 1;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct IdentitySnapshot {
+    id: i64,
+    keypair: Vec<u8>,
+    registration_id: u32,
+    device_id: u8,
+    username: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct KeyStoresSnapshot {
+    version: u32,
+    identity: IdentitySnapshot,
+    identities: HashMap<String, Vec<u8>>,
+    sessions: HashMap<String, Vec<u8>>,
+    signed_prekeys: HashMap<u32, Vec<u8>>,
+    prekeys: HashMap<u32, Vec<u8>>,
+    kyber_prekeys: HashMap<u32, Vec<u8>>,
+    addresses: Vec<AddressIdAndDeviceId>,
+    conversations: HashMap<String, u64>,
+}
+
 impl MemoryKeyStores {
     pub async fn new() -> anyhow::Result<Self> {
         let identity_store = MemoryIdentityDb::new().await?;
@@ -1412,6 +1436,77 @@ impl MemoryKeyStores {
             address_store,
             conversation_store,
         })
+    }
+
+    /// Serializes every Signal store so a client without a database can survive restarts.
+    /// The snapshot contains private keys; store it like any other secret.
+    pub async fn export_snapshot(&self) -> anyhow::Result<Vec<u8>> {
+        let row = self.identity_store.get_full_identity_key_pair().await?;
+        let snapshot = KeyStoresSnapshot {
+            version: KEY_STORES_SNAPSHOT_VERSION,
+            identity: IdentitySnapshot {
+                id: row.id,
+                keypair: row.keypair.serialize().to_vec(),
+                registration_id: row.registration_id,
+                device_id: row.device_id,
+                username: row.username,
+            },
+            identities: self.identity_store.identities.read().await.clone(),
+            sessions: self.session_store.data.read().await.clone(),
+            signed_prekeys: self.signed_prekey_store.data.read().await.clone(),
+            prekeys: self.prekey_store.data.read().await.clone(),
+            kyber_prekeys: self.kyber_key_store.data.read().await.clone(),
+            addresses: self.address_store.by_id.read().await.values().cloned().collect(),
+            conversations: self
+                .conversation_store
+                .data
+                .read()
+                .await
+                .iter()
+                .map(|(k, v)| (k.clone(), v.inner))
+                .collect(),
+        };
+        Ok(serde_json::to_vec(&snapshot)?)
+    }
+
+    pub async fn from_snapshot(bytes: &[u8]) -> anyhow::Result<Self> {
+        let snapshot: KeyStoresSnapshot = serde_json::from_slice(bytes)?;
+        if snapshot.version != KEY_STORES_SNAPSHOT_VERSION {
+            anyhow::bail!("unsupported key stores snapshot version {}", snapshot.version);
+        }
+        let stores = Self {
+            identity_store: MemoryIdentityDb::default(),
+            session_store: MemorySessionDb::default(),
+            signed_prekey_store: MemorySignedPreKeyDb::default(),
+            prekey_store: MemoryPreKeyDb::default(),
+            kyber_key_store: MemoryKyberPreKeyDb::default(),
+            address_store: MemoryAddressStore::default(),
+            conversation_store: MemoryConversationStore::default(),
+        };
+        *stores.identity_store.row.write().await = Some(IdentityKeyPairRow {
+            id: snapshot.identity.id,
+            keypair: IdentityKeyPair::try_from(snapshot.identity.keypair.as_slice())?,
+            registration_id: snapshot.identity.registration_id,
+            device_id: snapshot.identity.device_id,
+            username: snapshot.identity.username,
+        });
+        *stores.identity_store.identities.write().await = snapshot.identities;
+        *stores.session_store.data.write().await = snapshot.sessions;
+        *stores.signed_prekey_store.data.write().await = snapshot.signed_prekeys;
+        *stores.prekey_store.data.write().await = snapshot.prekeys;
+        *stores.kyber_key_store.data.write().await = snapshot.kyber_prekeys;
+        for address in snapshot.addresses {
+            stores
+                .address_store
+                .add(address.address_id, &address.username, address.device_id)
+                .await?;
+        }
+        *stores.conversation_store.data.write().await = snapshot
+            .conversations
+            .into_iter()
+            .map(|(k, v)| (k, ConversationSettings::new(v)))
+            .collect();
+        Ok(stores)
     }
 
     pub async fn decrypt(
@@ -1600,5 +1695,58 @@ impl MemoryKeyStores {
             kyber_pre_key_signature: kyber_pre_key_signature.into(),
             identity_key: identity_key_pair.public_key().serialize().into(),
         })
+    }
+}
+
+#[cfg(test)]
+mod key_stores_snapshot_tests {
+    use super::*;
+
+    async fn named(username: &str, id: i64) -> MemoryKeyStores {
+        let stores = MemoryKeyStores::new().await.unwrap();
+        let device_id = stores.identity_store.get_full_identity_key_pair().await.unwrap().device_id;
+        stores.identity_store.update_registration_for_keypair(id, username, device_id).await.unwrap();
+        stores
+    }
+
+    fn address_of(username: &str, device_id: u8) -> ProtocolAddress {
+        ProtocolAddress::new(username.to_string(), DeviceId::new(device_id).unwrap())
+    }
+
+    #[tokio::test]
+    async fn restored_stores_keep_decrypting_an_existing_session() {
+        let mut alice = named("alice", 1).await;
+        let mut bob = named("bob", 2).await;
+        let alice_device = alice.identity_store.get_full_identity_key_pair().await.unwrap().device_id;
+        let bob_device = bob.identity_store.get_full_identity_key_pair().await.unwrap().device_id;
+        bob.address_store.add(1, "alice", alice_device).await.unwrap();
+
+        let bundle = bob.generate_prekey_bundle().await.unwrap();
+        alice.process_pre_key_bundle("bob".to_string(), bundle).await.unwrap();
+        let first = alice.encrypt(address_of("bob", bob_device), b"first".to_vec()).await.unwrap();
+        assert_eq!(bob.decrypt(address_of("alice", alice_device), first.cipher_text, first.ty).await.unwrap(), b"first");
+
+        let snapshot = bob.export_snapshot().await.unwrap();
+        let mut restored = MemoryKeyStores::from_snapshot(&snapshot).await.unwrap();
+
+        let restored_identity = restored.identity_store.get_full_identity_key_pair().await.unwrap();
+        let original_identity = bob.identity_store.get_full_identity_key_pair().await.unwrap();
+        assert_eq!(restored_identity.keypair.serialize(), original_identity.keypair.serialize());
+        assert_eq!((restored_identity.id, restored_identity.device_id), (2, bob_device));
+        assert_eq!(restored.address_store.get("alice").await.unwrap().len(), 1);
+
+        let second = alice.encrypt(address_of("bob", bob_device), b"second".to_vec()).await.unwrap();
+        assert_eq!(restored.decrypt(address_of("alice", alice_device), second.cipher_text, second.ty).await.unwrap(), b"second");
+
+        let reply = restored.encrypt(address_of("alice", alice_device), b"reply".to_vec()).await.unwrap();
+        assert_eq!(alice.decrypt(address_of("bob", bob_device), reply.cipher_text, reply.ty).await.unwrap(), b"reply");
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_snapshot_versions() {
+        let stores = MemoryKeyStores::new().await.unwrap();
+        let mut snapshot: serde_json::Value = serde_json::from_slice(&stores.export_snapshot().await.unwrap()).unwrap();
+        snapshot["version"] = serde_json::json!(99);
+        assert!(MemoryKeyStores::from_snapshot(&serde_json::to_vec(&snapshot).unwrap()).await.is_err());
     }
 }

@@ -1,5 +1,5 @@
-import { FireflyClientNode, protos, initLogger, MlsKeyPackageStorage, MlsGroupStateStorage, MlsPreSharedKeyStorage, UserMessageStorage, GroupMessageStorage, GroupInfoStorage, KeyValueStorage, StorageProviders, RawUserMessage, RawGroupMessage, RawGroupInfo, RawFavouriteMessage, RawFavoriteMessage, RawSearchResultItem } from 'firefly-client-node';
-export type { MlsKeyPackageStorage, MlsGroupStateStorage, MlsPreSharedKeyStorage, UserMessageStorage, GroupMessageStorage, GroupInfoStorage, KeyValueStorage, StorageProviders, RawUserMessage, RawGroupMessage, RawGroupInfo, RawFavouriteMessage, RawFavoriteMessage, RawSearchResultItem, };
+import { FireflyClientNode, protos, initLogger, MlsKeyPackageStorage, MlsGroupStateStorage, MlsPreSharedKeyStorage, UserMessageStorage, GroupMessageStorage, GroupInfoStorage, KeyValueStorage, SignalStateStorage, StorageProviders, RawUserMessage, RawGroupMessage, RawGroupInfo, RawFavouriteMessage, RawFavoriteMessage, RawSearchResultItem } from 'firefly-client-node';
+export type { MlsKeyPackageStorage, MlsGroupStateStorage, MlsPreSharedKeyStorage, UserMessageStorage, GroupMessageStorage, GroupInfoStorage, KeyValueStorage, SignalStateStorage, StorageProviders, RawUserMessage, RawGroupMessage, RawGroupInfo, RawFavouriteMessage, RawFavoriteMessage, RawSearchResultItem, };
 export { UserPermission, DEFAULT_GROUP_PERMISSIONS } from 'firefly-client-node';
 export interface ClientConfig {
     port?: number;
@@ -14,6 +14,12 @@ export interface ClientConfig {
     dbFile?: string;
     storage?: StorageProviders;
     storageProviders?: StorageProviders;
+    unattended?: boolean;
+    onSignInRequired?: (err: SignInRequiredError) => void;
+}
+export declare const EXIT_SIGN_IN_REQUIRED = 78;
+export declare class SignInRequiredError extends Error {
+    constructor(message: string);
 }
 export type BotConfig = ClientConfig;
 export interface ClientContext {
@@ -39,6 +45,24 @@ export interface BotContext {
     reply: (text: string) => Promise<void>;
 }
 export type CommandHandler = (ctx: ClientContext & BotContext) => Promise<void>;
+export interface MemberEventContext {
+    bot: FireflyClient;
+    groupId: number;
+    username: string;
+    sendToGroup: (text: string, channelId?: number) => Promise<void>;
+    sendDirect: (text: string) => Promise<void>;
+}
+export type MemberEventHandler = (ctx: MemberEventContext) => Promise<void> | void;
+export interface GroupMember {
+    username: string;
+    roleId: number;
+    permissions: number;
+}
+export interface GroupChannel {
+    id: number;
+    name: string;
+    type: number;
+}
 export declare class FireflyClient {
     private config;
     private port;
@@ -49,12 +73,19 @@ export declare class FireflyClient {
     private apiBaseUrl;
     private wsUrl;
     emulatorMode: boolean;
+    unattended: boolean;
     private clientUsername;
+    private renewing;
+    private renewTimer;
+    private renewDueAt;
+    private renewRetryMs;
     private sessionFile;
     private dbFile;
     commands: Map<string, CommandHandler>;
     messageHandlers: Array<(ctx: ClientContext & BotContext) => Promise<void> | void>;
     groupMessageHandlers: Array<(ctx: ClientContext & BotContext) => Promise<void> | void>;
+    memberJoinHandlers: MemberEventHandler[];
+    memberLeaveHandlers: MemberEventHandler[];
     client: any;
     session: {
         access_token: string | null;
@@ -66,6 +97,13 @@ export declare class FireflyClient {
     command(name: string, handler: CommandHandler): void;
     onMessage(handler: (ctx: ClientContext & BotContext) => Promise<void> | void): void;
     onGroupMessage(handler: (ctx: ClientContext & BotContext) => Promise<void> | void): void;
+    onMemberJoin(handler: MemberEventHandler): void;
+    onMemberLeave(handler: MemberEventHandler): void;
+    private _getGroupExtension;
+    getGroupMembers(groupId: number): Promise<GroupMember[]>;
+    getGroupChannels(groupId: number): Promise<GroupChannel[]>;
+    isGroupAdmin(groupId: number, username: string, permission?: number): Promise<boolean>;
+    private _emitMemberEvents;
     getGroupMembersOnlineStatus(groupId: number): Promise<any>;
     readUserMessagesUpto(other: string, uptoMessageId: bigint | number): Promise<void>;
     sendUserMessage(to: string, text: string): Promise<any>;
@@ -106,8 +144,15 @@ export declare class FireflyClient {
     private _saveSession;
     private _exchangeCodeForTokens;
     private _refreshAccessToken;
+    private _applyTokens;
     private _startOauthFlow;
     getOrRenewAccessToken(): Promise<string | null>;
+    private _renew;
+    private _doRenew;
+    private _scheduleRenewal;
+    private _renewInBackground;
+    _accessTokenForClient(): string | null;
+    private _signInRequired;
     _handleMessage({ text, sender, isGroup, groupId, channelId }: {
         text: string;
         sender: string;

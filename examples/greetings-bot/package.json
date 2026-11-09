@@ -1,0 +1,16 @@
+{
+  "name": "firefly-greetings-bot",
+  "version": "0.0.1",
+  "description": "Welcomes new members of Lupyd groups",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "firefly-client-js": "file:../../crates/firefly-client-js"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

@@ -78,6 +78,10 @@ pub trait FireflyWsClientCallback: Send + Sync {
 
     async fn on_group_updated(&self, _group_id: u64) {}
 
+    /// Called after a commit changes a group's member list, with the usernames that joined and left.
+    /// Device-only changes (re-adds of an existing member) are not reported.
+    async fn on_group_members_changed(&self, _group_id: u64, _added: Vec<String>, _removed: Vec<String>) {}
+
     async fn on_unauthenticated(&self) {}
 
     async fn on_call_signal(&self, _signal: CallSignal) {}

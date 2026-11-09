@@ -56,6 +56,21 @@ impl KeyValueStore {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::storage::KeyValueStorage for KeyValueStore {
+    async fn get(&self, key: &str) -> anyhow::Result<String> {
+        KeyValueStore::get(self, key).await
+    }
+
+    async fn set(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        KeyValueStore::set(self, key, value).await
+    }
+
+    async fn update_last_received_message_id(&self, last_received_message_id: u64) -> anyhow::Result<()> {
+        KeyValueStore::update_last_received_message_id(self, last_received_message_id).await
+    }
+}
+
 impl KeyValueStore {
     pub async fn update_last_received_message_id(
         &self,
