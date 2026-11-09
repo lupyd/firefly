@@ -36,6 +36,8 @@ When no time is given, 09:00 is used. Clock times follow your `/timezone`, which
 
 ## Running it
 
+For the full setup (bot accounts, first sign-in, running unattended on a server, backups), see [the bots setup guide](../BOTS-SETUP.md).
+
 ```bash
 bun install
 BOT_USERNAME=my_reminder_bot bun start

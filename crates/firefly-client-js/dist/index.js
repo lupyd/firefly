@@ -82,7 +82,7 @@ function openBrowser(url) {
             'xdg-open';
     (0, child_process_1.exec)(`${start} "${url}"`, (err) => {
         if (err) {
-            console.log(`Failed to open browser automatically. Please open this link manually:\n\n${url}\n`);
+            console.log('Failed to open a browser automatically; open the link above manually.');
         }
     });
 }
@@ -616,7 +616,9 @@ class FireflyClient {
                     code_challenge: challenge,
                     state: state,
                 }).toString();
-                console.log('Opening browser for Auth0 Sign In...');
+                // Always print the link: on a server the browser may not open, and the person signs in
+                // from their own computer through an SSH tunnel to this port
+                console.log(`Opening browser for Auth0 Sign In. If it doesn't open, open this link (it must reach localhost:${this.port} on this machine):\n\n${authUrl}\n`);
                 openBrowser(authUrl);
             });
         });

@@ -27,6 +27,8 @@ Messages can be up to 500 characters.
 
 ## Running it
 
+For the full setup (bot accounts, first sign-in, running unattended on a server, backups), see [the bots setup guide](../BOTS-SETUP.md).
+
 ```bash
 bun install
 BOT_USERNAME=lupyd_welcome bun start
