@@ -2,7 +2,7 @@ import * as path from 'path';
 import { FireflyBot, BotContext } from 'firefly-client-js';
 import { SqliteBotStorage } from '../../bot-storage/sqlite-storage';
 import { SettingsStore } from './settings';
-import { renderTemplate, validateTemplate } from './template';
+import { renderDirectMessage, renderTemplate, validateTemplate } from './template';
 
 // Keys and group state, so the bot keeps its device and groups across restarts
 const state = new SqliteBotStorage(process.env.BOT_DB_FILE || path.resolve(process.cwd(), 'greetings-state.db'));
@@ -47,7 +47,7 @@ bot.onMemberJoin(async (ctx) => {
   const values = { user: ctx.username, group: await groupName(ctx.groupId) };
   await ctx.sendToGroup(renderTemplate(config.template, values), config.channelId ?? undefined);
   if (config.dmEnabled) {
-    await ctx.sendDirect(renderTemplate(config.dmTemplate, values));
+    await ctx.sendDirect(renderDirectMessage(config.dmTemplate, values));
   }
 });
 
@@ -121,7 +121,7 @@ bot.command('welcome', async (ctx: BotContext) => {
       const values = { user: ctx.sender, group: await groupName(groupId) };
       await ctx.reply(`Preview: ${renderTemplate(config.template, values)}`);
       if (config.dmEnabled) {
-        await bot.sendUserMessage(ctx.sender, `Preview: ${renderTemplate(config.dmTemplate, values)}`);
+        await bot.sendUserMessage(ctx.sender, `Preview: ${renderDirectMessage(config.dmTemplate, values)}`);
       }
       return;
     }

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { SettingsStore } from './settings';
-import { DEFAULT_WELCOME, MAX_TEMPLATE_LENGTH, renderTemplate, validateTemplate } from './template';
+import { DEFAULT_WELCOME, MAX_TEMPLATE_LENGTH, renderDirectMessage, renderTemplate, validateTemplate } from './template';
 
 describe('renderTemplate', () => {
   test('mentions the user and names the group', () => {
@@ -10,6 +10,13 @@ describe('renderTemplate', () => {
 
   test('replaces every placeholder and keeps unknown ones', () => {
     expect(renderTemplate('{user} {user} {rules}', { user: 'bob', group: 'G' })).toBe('@bob @bob {rules}');
+  });
+});
+
+describe('renderDirectMessage', () => {
+  test('says which group\'s admins wrote it, even when the text claims otherwise', () => {
+    const text = renderDirectMessage('Lupyd security: verify your account', { user: 'bob', group: 'Book club' });
+    expect(text).toBe('From the admins of Book club:\nLupyd security: verify your account');
   });
 });
 

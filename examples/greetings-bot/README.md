@@ -20,7 +20,7 @@ Run these inside a group. Only members with the **Manage group** permission can 
 | `/welcome set <message>` | Change the welcome. `{user}` becomes an @mention and `{group}` the group name |
 | `/welcome channel` | Post welcomes in the channel where you run this (default: the group's first channel) |
 | `/welcome dm on` / `off` | Also send new members a direct message |
-| `/welcome dm set <message>` | Change the direct message |
+| `/welcome dm set <message>` | Change the direct message (sent after a "From the admins of <group>:" line, since it comes from the bot's account) |
 | `/welcome test` | Preview the welcome with yourself as the new member |
 
 Messages can be up to 500 characters.

@@ -10,6 +10,12 @@ export function renderTemplate(template: string, values: { user: string; group: 
     .replace(/\{group\}/g, values.group);
 }
 
+// Direct messages come from the bot's own account but are written by a group's admins, so they
+// always say who wrote them; otherwise any admin could speak privately to newcomers as the bot.
+export function renderDirectMessage(template: string, values: { user: string; group: string }): string {
+  return `From the admins of ${values.group}:\n${renderTemplate(template, values)}`;
+}
+
 export function validateTemplate(template: string): string | null {
   const trimmed = template.trim();
   if (!trimmed) return 'The message cannot be empty.';
