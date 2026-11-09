@@ -31,10 +31,13 @@ jobs:
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
+      # From the Ubuntu mirror rather than GitHub release downloads, which intermittently return
+      # 504. libsignal's prost build only needs proto2/proto3 support, which 3.21 has.
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq protobuf-compiler
+          protoc --version
 
       - name: Start PostgreSQL container
         run: |
