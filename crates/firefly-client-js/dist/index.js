@@ -499,59 +499,6 @@ class FireflyClient {
         }
         return response.json();
     }
-    // Email/password sign-in, the same grant the Lupyd apps use. Needs no browser or callback URL.
-    async _loginWithPassword(email, password) {
-        const request = async (body) => {
-            const response = await fetch(`${this.auth0Domain}/oauth/token`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    username: email,
-                    password,
-                    audience: this.auth0Audience,
-                    scope: 'openid profile email offline_access',
-                    client_id: this.auth0ClientId,
-                    ...body,
-                }),
-            });
-            return { ok: response.ok, status: response.status, text: await response.text() };
-        };
-        let result = await request({
-            grant_type: 'http://auth0.com/oauth/grant-type/password-realm',
-            realm: 'Username-Password-Authentication',
-        });
-        if (!result.ok && /unsupported_grant_type|grant_type is not supported|unauthorized_client/.test(result.text)) {
-            result = await request({ grant_type: 'password' });
-        }
-        if (!result.ok) {
-            let reason = result.text;
-            try {
-                const error = JSON.parse(result.text);
-                reason = error.error_description || error.error || reason;
-            }
-            catch { }
-            throw new Error(`Sign-in with email and password failed (${result.status}): ${reason}`);
-        }
-        const tokenResponse = JSON.parse(result.text);
-        const claims = decodeJwt(tokenResponse.access_token);
-        this.session.access_token = tokenResponse.access_token;
-        this.session.refresh_token = tokenResponse.refresh_token ?? null;
-        this.session.expires_at = Date.now() + (tokenResponse.expires_in * 1000);
-        this.session.username = claims ? claims.uname : 'client';
-        this._saveSession();
-        console.log(`Successfully authenticated as user: ${this.session.username}`);
-    }
-    // Signs in again: with email and password when configured, otherwise in the browser
-    async _signIn() {
-        const email = this.config.email || process.env.BOT_EMAIL;
-        const password = this.config.password || process.env.BOT_PASSWORD;
-        if (email && password) {
-            await this._loginWithPassword(email, password);
-        }
-        else {
-            await this._startOauthFlow();
-        }
-    }
     // Start Auth0 Flow
     _startOauthFlow() {
         return new Promise((resolve, reject) => {
@@ -647,11 +594,11 @@ class FireflyClient {
                 }
                 catch (err) {
                     console.error('Failed to refresh token, starting new login flow:', err.message);
-                    await this._signIn();
+                    await this._startOauthFlow();
                 }
             }
             else {
-                await this._signIn();
+                await this._startOauthFlow();
             }
         }
         return this.session.access_token;

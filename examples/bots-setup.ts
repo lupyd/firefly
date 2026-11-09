@@ -3,10 +3,10 @@
 // 1. Builds the WebAssembly client (crates/client-node) with wasm-pack
 // 2. Installs JS dependencies and compiles client-node and firefly-client-js
 // 3. Links the packages together so every bot uses the code just built
-// 4. Creates each bot's .env from .env.example
+// 4. Tells you which bots still need to sign in once
 //
 // Flags: --skip-wasm  reuse an existing wasm build (only re-run the TypeScript steps)
-import { existsSync, copyFileSync, lstatSync, mkdirSync, rmSync, symlinkSync, unlinkSync } from 'fs';
+import { existsSync, lstatSync, mkdirSync, rmSync, symlinkSync, unlinkSync } from 'fs';
 import { join, resolve } from 'path';
 
 const root = resolve(import.meta.dir, '..');
@@ -107,22 +107,12 @@ step('Compiling TypeScript');
 run(['node', join('node_modules', 'typescript', 'bin', 'tsc')], clientNode);
 run(['node', join('node_modules', 'typescript', 'bin', 'tsc'), '-p', '.'], framework);
 
-step('Preparing bot config');
-const needsCredentials: string[] = [];
-for (const bot of bots) {
-  const dir = join(root, 'examples', bot);
-  const env = join(dir, '.env');
-  if (!existsSync(env)) {
-    copyFileSync(join(dir, '.env.example'), env);
-    console.log(`created examples/${bot}/.env`);
-  }
-  const content = await Bun.file(env).text();
-  if (!/^BOT_EMAIL=\S+/m.test(content) || !/^BOT_PASSWORD=\S+/m.test(content)) needsCredentials.push(bot);
-}
+const SESSION_FILES: Record<string, string> = { 'greetings-bot': 'greetings-session.json', 'reminder-bot': 'reminder-session.json' };
+const notSignedIn = bots.filter((bot) => !existsSync(join(root, 'examples', bot, SESSION_FILES[bot])));
 
 console.log('\nSetup complete.');
-if (needsCredentials.length > 0) {
-  console.log('\nNext: put each bot\'s Lupyd account (email + password) into:');
-  for (const bot of needsCredentials) console.log(`  examples/${bot}/.env`);
+if (notSignedIn.length > 0) {
+  console.log('\nNext, sign each bot in once. A browser opens; sign in as the bot account:');
+  for (const bot of notSignedIn) console.log(`  cd examples/${bot} && bun start     (Ctrl+C once it says "Client is fully connected")`);
 }
 console.log('\nThen start the bots:  bun examples/run-bots.ts');

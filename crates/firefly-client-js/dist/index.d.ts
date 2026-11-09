@@ -14,8 +14,6 @@ export interface ClientConfig {
     dbFile?: string;
     storage?: StorageProviders;
     storageProviders?: StorageProviders;
-    email?: string;
-    password?: string;
 }
 export type BotConfig = ClientConfig;
 export interface ClientContext {
@@ -135,8 +133,6 @@ export declare class FireflyClient {
     private _saveSession;
     private _exchangeCodeForTokens;
     private _refreshAccessToken;
-    private _loginWithPassword;
-    private _signIn;
     private _startOauthFlow;
     getOrRenewAccessToken(): Promise<string | null>;
     _handleMessage({ text, sender, isGroup, groupId, channelId }: {

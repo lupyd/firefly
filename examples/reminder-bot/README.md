@@ -41,22 +41,15 @@ bun install
 BOT_USERNAME=my_reminder_bot bun start
 ```
 
-The bot signs in with its own Lupyd account (email and password, not a Google login). Set the credentials when starting it; `read -s` keeps the password out of your shell history:
+On first start the bot opens a browser window to sign in as its Lupyd account. Afterwards the session is kept in `reminder-session.json`, so later starts (including `bun ../run-bots.ts`) connect without signing in again.
 
-```bash
-export BOT_EMAIL=bot-account@example.com
-read -s -p "Bot password: " BOT_PASSWORD; export BOT_PASSWORD
-bun start
-```
-
-The password is only sent to the Lupyd login server and is never saved. The resulting session is kept in `reminder-session.json`, so later starts connect without signing in again. Without `BOT_EMAIL`/`BOT_PASSWORD` the bot falls back to a browser sign-in, which Lupyd login currently rejects with "Callback URL mismatch".
+Lupyd login must allow `http://localhost:38295/callback` as a callback URL for this to work; until then the sign-in page shows "Callback URL mismatch".
 
 Then add the bot to your groups, or message it directly.
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `BOT_USERNAME` | `reminder_bot` | Account name, also used in emulator mode |
-| `BOT_EMAIL` / `BOT_PASSWORD` | unset | The bot account to sign in with |
 | `BOT_SESSION_FILE` | `./reminder-session.json` | Sign-in session |
 | `BOT_DB_FILE` | `./reminder-state.db` | The bot's encryption keys and group state (SQLite, see below) |
 | `REMINDERS_DB` | `./reminders.db` | Reminders and time zones (SQLite) |

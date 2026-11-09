@@ -28,11 +28,14 @@ if (!existsSync(join(examples, 'greetings-bot', 'node_modules', 'firefly-client-
   console.error('The bots are not set up yet. Run:  bun examples/bots-setup.ts');
   process.exit(1);
 }
+// Signing in opens a browser, which the runner can't do for a bot it restarts unattended,
+// so each bot must have been signed in once by hand
+const SESSION_FILES: Record<BotName, string> = { greetings: 'greetings-session.json', reminder: 'reminder-session.json' };
 for (const name of selected) {
-  const env = join(examples, ALL[name], '.env');
-  const content = existsSync(env) ? await Bun.file(env).text() : '';
-  if (!/^BOT_EMAIL=\S+/m.test(content) || !/^BOT_PASSWORD=\S+/m.test(content)) {
-    console.error(`Fill in BOT_EMAIL and BOT_PASSWORD in examples/${ALL[name]}/.env first.`);
+  if (!existsSync(join(examples, ALL[name], SESSION_FILES[name]))) {
+    console.error(`${ALL[name]} is not signed in yet. Sign it in once (a browser opens; sign in as the bot account):`);
+    console.error(`  cd examples/${ALL[name]} && bun start`);
+    console.error('When it says "Client is fully connected", press Ctrl+C and run this again.');
     process.exit(1);
   }
 }

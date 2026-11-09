@@ -112,7 +112,7 @@ beforeAll(async () => {
   await Promise.all([greeter.start(), reminder.start()]);
   for (const person of [alice, carol, dave]) await person.client.start();
   await sleep(1000);
-}, 120_000);
+});
 
 afterAll(async () => {
   greeter.dumpLog();
