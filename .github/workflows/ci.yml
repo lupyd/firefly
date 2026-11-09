@@ -53,6 +53,16 @@ jobs:
           done
           echo "PostgreSQL is ready!"
 
+      # The server asks a subscription service before creating groups. Its built-in emulator
+      # fallback isn't compiled into the published image, so serve the same unlimited plan here.
+      - name: Start fake subscription service
+        run: |
+          nohup bun examples/bots-e2e/fake-subscriptions.ts > /tmp/fake-subscriptions.log 2>&1 &
+          for i in $(seq 1 20); do
+            curl -sf http://127.0.0.1:8088/lupyd/plans/1/constraints > /dev/null && break
+            sleep 0.5
+          done
+
       - name: Pull and start Firefly MLS Server container
         run: |
           docker pull hashtag438/firefly-mls-server:latest
@@ -62,6 +72,8 @@ jobs:
             -v ${{ github.workspace }}/initdb.sql:/app/initdb.sql \
             -v ${{ github.workspace }}/initdb.sql:/initdb.sql \
             --env-file .env.test \
+            -e SUBSCRIPTIONS_URL=http://127.0.0.1:8088 \
+            -e SUBSCRIPTIONS_AUTHORIZATION="Service test.fake" \
             hashtag438/firefly-mls-server:latest
 
           echo "Waiting for Firefly MLS Server to start..."
@@ -99,6 +111,20 @@ jobs:
           npm install
           FIREFLY_BASE_URL=http://127.0.0.1:39209 FIREFLY_WS_URL=ws://127.0.0.1:39209/ SPAWN_SERVER=false bun test
 
+      - name: Run bot and client unit tests
+        run: |
+          # Links the bots to the packages built above
+          bun examples/bots-setup.ts --skip-wasm
+          (cd crates/firefly-client-js && bun test tests/auth.test.ts)
+          for dir in greetings-bot reminder-bot bot-storage; do
+            (cd examples/$dir && bun test)
+          done
+
+      - name: Run bots end-to-end test
+        run: |
+          cd examples/bots-e2e
+          FIREFLY_BASE_URL=http://127.0.0.1:39209 bun test --timeout 400000
+
       - name: Dump Docker logs on failure
         if: failure()
         run: |
@@ -106,3 +132,5 @@ jobs:
           docker logs postgres || true
           echo "=== Firefly MLS Server Logs ==="
           docker logs firefly-server || true
+          echo "=== Fake subscription service ==="
+          cat /tmp/fake-subscriptions.log || true

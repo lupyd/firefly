@@ -3,6 +3,9 @@
 // restarted mid-test to prove they keep their keys, groups and data.
 //
 //   FIREFLY_BASE_URL=http://127.0.0.1:39209 bun test --timeout 400000
+//
+// The server needs a subscription service to create groups; the published server image has
+// no built-in fallback, so run fake-subscriptions.ts next to it (see that file and ci.yml).
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
