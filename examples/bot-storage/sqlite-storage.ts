@@ -35,7 +35,22 @@ export class SqliteBotStorage {
     } catch {
       // Windows and in-memory databases have no POSIX permissions
     }
-    this.db.run('PRAGMA journal_mode = WAL');
+    // Hold the file for as long as this bot runs. Two copies on one file would both advance
+    // the same encryption sessions and break them, so a second copy must fail to start. The
+    // OS drops the lock when the process exits, even after a crash.
+    this.db.run('PRAGMA busy_timeout = 0');
+    this.db.run('PRAGMA locking_mode = EXCLUSIVE');
+    try {
+      this.db.run('PRAGMA journal_mode = WAL');
+      this.db.run('BEGIN IMMEDIATE');
+      this.db.run('COMMIT');
+    } catch (err: any) {
+      this.db.close();
+      if (/locked|busy/i.test(String(err?.message))) {
+        throw new Error(`Another copy of this bot is already running on ${path}. Stop it first; two copies would break its encryption sessions.`);
+      }
+      throw err;
+    }
     this.db.run('CREATE TABLE IF NOT EXISTS key_value (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
     this.db.run('CREATE TABLE IF NOT EXISTS signal_state (id INTEGER PRIMARY KEY CHECK (id = 1), snapshot BLOB NOT NULL)');
     this.db.run('CREATE TABLE IF NOT EXISTS mls_key_packages (id BLOB PRIMARY KEY, data BLOB NOT NULL)');

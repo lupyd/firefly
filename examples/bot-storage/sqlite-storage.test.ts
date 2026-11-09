@@ -41,6 +41,23 @@ describe('SqliteBotStorage', () => {
     second.close();
   });
 
+  test('refuses a second copy on the same file until the first one stops', () => {
+    const path = tempDbPath();
+    const first = new SqliteBotStorage(path);
+    expect(() => new SqliteBotStorage(path)).toThrow('Another copy of this bot is already running');
+
+    // The same from a separate process, which is how a second copy would really start
+    const script = `import { SqliteBotStorage } from ${JSON.stringify(join(import.meta.dir, 'sqlite-storage.ts'))};
+      try { new SqliteBotStorage(${JSON.stringify(path)}).close(); console.log('opened'); } catch (e) { console.log(e.message); }`;
+    const run = () => Bun.spawnSync(['bun', '-e', script]).stdout.toString();
+    expect(run()).toContain('Another copy of this bot is already running');
+
+    first.close();
+    expect(run()).toContain('opened');
+    const again = new SqliteBotStorage(path);
+    again.close();
+  });
+
   test('reports missing values as null so the client falls back to its defaults', async () => {
     const storage = new SqliteBotStorage(':memory:');
     const p = storage.providers;

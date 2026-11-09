@@ -14,6 +14,12 @@ export interface ClientConfig {
     dbFile?: string;
     storage?: StorageProviders;
     storageProviders?: StorageProviders;
+    unattended?: boolean;
+    onSignInRequired?: (err: SignInRequiredError) => void;
+}
+export declare const EXIT_SIGN_IN_REQUIRED = 78;
+export declare class SignInRequiredError extends Error {
+    constructor(message: string);
 }
 export type BotConfig = ClientConfig;
 export interface ClientContext {
@@ -67,7 +73,12 @@ export declare class FireflyClient {
     private apiBaseUrl;
     private wsUrl;
     emulatorMode: boolean;
+    unattended: boolean;
     private clientUsername;
+    private renewing;
+    private renewTimer;
+    private renewDueAt;
+    private renewRetryMs;
     private sessionFile;
     private dbFile;
     commands: Map<string, CommandHandler>;
@@ -133,8 +144,15 @@ export declare class FireflyClient {
     private _saveSession;
     private _exchangeCodeForTokens;
     private _refreshAccessToken;
+    private _applyTokens;
     private _startOauthFlow;
     getOrRenewAccessToken(): Promise<string | null>;
+    private _renew;
+    private _doRenew;
+    private _scheduleRenewal;
+    private _renewInBackground;
+    _accessTokenForClient(): string | null;
+    private _signInRequired;
     _handleMessage({ text, sender, isGroup, groupId, channelId }: {
         text: string;
         sender: string;

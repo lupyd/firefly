@@ -34,6 +34,8 @@ BOT_USERNAME=lupyd_welcome bun start
 
 On first start the bot opens a browser window to sign in as its Lupyd account. Afterwards the session is kept in `greetings-session.json`, so later starts (including `bun ../run-bots.ts`) connect without signing in again.
 
+While running, the bot renews its sign-in a few minutes before it expires. Under `run-bots.ts` (or with `FIREFLY_UNATTENDED=true`) it never opens a browser: if the saved sign-in is revoked or has expired for good, the bot exits with code 78 and `run-bots.ts` stops restarting it until you sign it in again with `bun start`.
+
 Lupyd login must allow `http://localhost:38295/callback` as a callback URL for this to work; until then the sign-in page shows "Callback URL mismatch".
 
 | Variable | Default | Purpose |
@@ -54,7 +56,7 @@ The file contains the bot's private keys:
 
 - **Back it up.** If it is lost, the bot registers as a new device and must be re-added to every group.
 - **Keep it private.** Anyone with the file can read the bot's messages. It is created owner-only (mode 600) on Linux and macOS.
-- **Don't run two copies of the bot on the same file.** They would both advance the same encryption sessions and break them.
+- **Only one copy of the bot can use the file at a time.** Two copies would both advance the same encryption sessions and break them, so a second copy refuses to start while the first holds the file.
 
 ## Known limitations
 

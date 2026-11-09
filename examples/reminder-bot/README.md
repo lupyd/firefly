@@ -43,6 +43,8 @@ BOT_USERNAME=my_reminder_bot bun start
 
 On first start the bot opens a browser window to sign in as its Lupyd account. Afterwards the session is kept in `reminder-session.json`, so later starts (including `bun ../run-bots.ts`) connect without signing in again.
 
+While running, the bot renews its sign-in a few minutes before it expires. Under `run-bots.ts` (or with `FIREFLY_UNATTENDED=true`) it never opens a browser: if the saved sign-in is revoked or has expired for good, the bot exits with code 78 and `run-bots.ts` stops restarting it until you sign it in again with `bun start`.
+
 Lupyd login must allow `http://localhost:38295/callback` as a callback URL for this to work; until then the sign-in page shows "Callback URL mismatch".
 
 Then add the bot to your groups, or message it directly.
@@ -62,7 +64,7 @@ Run the tests with `bun test`.
 The bot uses two files, and both survive restarts:
 
 - **`reminders.db`** holds the reminders and time zones.
-- **`BOT_DB_FILE`** holds the bot's encryption keys, sessions and group state, written through [`../bot-storage/sqlite-storage.ts`](../bot-storage/sqlite-storage.ts). It contains private keys. Back it up, keep it private, and never run two copies of the bot on it. If it is lost, the bot registers as a new device and has to be re-added to groups.
+- **`BOT_DB_FILE`** holds the bot's encryption keys, sessions and group state, written through [`../bot-storage/sqlite-storage.ts`](../bot-storage/sqlite-storage.ts). It contains private keys. Back it up and keep it private. Only one copy of the bot can use it at a time: a second copy refuses to start. If it is lost, the bot registers as a new device and has to be re-added to groups.
 
 ## Known limitations
 

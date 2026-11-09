@@ -36,7 +36,7 @@ var __exportStar = (this && this.__exportStar) || function(m, exports) {
     for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.protos = exports.FireflyClientNode = exports.initLogger = exports.FireflyBot = exports.FireflyClient = exports.DEFAULT_GROUP_PERMISSIONS = exports.UserPermission = void 0;
+exports.protos = exports.FireflyClientNode = exports.initLogger = exports.FireflyBot = exports.FireflyClient = exports.SignInRequiredError = exports.EXIT_SIGN_IN_REQUIRED = exports.DEFAULT_GROUP_PERMISSIONS = exports.UserPermission = void 0;
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const http = __importStar(require("http"));
@@ -86,6 +86,33 @@ function openBrowser(url) {
         }
     });
 }
+// Exit code for "the saved sign-in can't be renewed; a person has to sign in again".
+// run-bots.ts stops restarting a bot that exits with it. 78 is EX_CONFIG from sysexits.h.
+exports.EXIT_SIGN_IN_REQUIRED = 78;
+class SignInRequiredError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'SignInRequiredError';
+    }
+}
+exports.SignInRequiredError = SignInRequiredError;
+// `rejected` means the auth server refused the refresh token, so retrying won't help.
+// Otherwise the failure (network, 5xx) is temporary.
+class TokenRefreshError extends Error {
+    rejected;
+    constructor(message, rejected) {
+        super(message);
+        this.rejected = rejected;
+    }
+}
+// Renew this long before the access token expires (or halfway, for very short-lived tokens)
+const REFRESH_LEAD_MS = 5 * 60_000;
+const REFRESH_RETRY_MIN_MS = 15_000;
+const REFRESH_RETRY_MAX_MS = 5 * 60_000;
+// setTimeout fires immediately for delays above 2^31-1 ms
+const MAX_TIMER_MS = 2_147_483_647;
+// How late the renewal timer may run before a request triggers the renewal itself
+const TIMER_LATE_MS = 5_000;
 class FireflyClient {
     config;
     port;
@@ -96,7 +123,12 @@ class FireflyClient {
     apiBaseUrl;
     wsUrl;
     emulatorMode;
+    unattended;
     clientUsername;
+    renewing = null;
+    renewTimer = null;
+    renewDueAt = 0;
+    renewRetryMs = REFRESH_RETRY_MIN_MS;
     sessionFile;
     dbFile;
     commands;
@@ -114,8 +146,13 @@ class FireflyClient {
         this.auth0Audience = options.auth0Audience || 'https://lupyd.com';
         this.redirectUri = `http://localhost:${this.port}/callback`;
         this.apiBaseUrl = options.apiBaseUrl || process.env.FIREFLY_BASE_URL || 'https://firefly.lupyd.com';
-        this.wsUrl = options.wsUrl || process.env.FIREFLY_BASE_WS_URL || 'wss://firefly.lupyd.com/';
+        // With only the HTTP URL changed, use the same server for the websocket rather than
+        // quietly mixing a local server with production
+        const customBase = options.apiBaseUrl || process.env.FIREFLY_BASE_URL;
+        this.wsUrl = options.wsUrl || process.env.FIREFLY_BASE_WS_URL ||
+            (customBase ? customBase.replace(/^http/, 'ws').replace(/\/?$/, '/') : 'wss://firefly.lupyd.com/');
         this.emulatorMode = options.emulatorMode !== undefined ? options.emulatorMode : (process.env.EMULATOR_MODE === 'true');
+        this.unattended = options.unattended !== undefined ? options.unattended : (process.env.FIREFLY_UNATTENDED === 'true');
         this.clientUsername = options.username || process.env.CLIENT_USERNAME || process.env.BOT_USERNAME || 'example_client';
         this.sessionFile = options.sessionFile || path.resolve(process.cwd(), 'client-session.json');
         this.dbFile = options.dbFile || path.resolve(process.cwd(), 'client-store.db');
@@ -488,16 +525,39 @@ class FireflyClient {
             client_id: this.auth0ClientId,
             refresh_token: refreshToken,
         });
-        const response = await fetch(`${this.auth0Domain}/oauth/token`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: params.toString(),
-        });
+        let response;
+        try {
+            response = await fetch(`${this.auth0Domain}/oauth/token`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: params.toString(),
+            });
+        }
+        catch (err) {
+            throw new TokenRefreshError(`Failed to reach the sign-in server: ${err.message}`, false);
+        }
         if (!response.ok) {
-            const errText = await response.text();
-            throw new Error(`Failed to refresh access token: ${errText}`);
+            const errText = await response.text().catch(() => '');
+            // 400/401/403 are the server refusing the refresh token (invalid_grant: revoked or expired)
+            const rejected = response.status === 400 || response.status === 401 || response.status === 403;
+            throw new TokenRefreshError(`Failed to refresh access token (${response.status}): ${errText}`, rejected);
         }
         return response.json();
+    }
+    // Stores a token response from a sign-in or refresh and schedules the next renewal
+    _applyTokens(tokenResponse) {
+        const claims = decodeJwt(tokenResponse.access_token);
+        this.session.access_token = tokenResponse.access_token;
+        // Refresh tokens may or may not rotate; keep the old one if none came back
+        if (tokenResponse.refresh_token) {
+            this.session.refresh_token = tokenResponse.refresh_token;
+        }
+        this.session.expires_at = Date.now() + (tokenResponse.expires_in * 1000);
+        this.session.username = claims?.uname ?? this.session.username ?? 'client';
+        this._saveSession();
+        this.client?.setAccessToken(tokenResponse.access_token);
+        this.renewRetryMs = REFRESH_RETRY_MIN_MS;
+        this._scheduleRenewal();
     }
     // Start Auth0 Flow
     _startOauthFlow() {
@@ -536,12 +596,7 @@ class FireflyClient {
                     try {
                         console.log('Exchanging authorization code for tokens...');
                         const tokenResponse = await this._exchangeCodeForTokens(code, verifier);
-                        const claims = decodeJwt(tokenResponse.access_token);
-                        this.session.access_token = tokenResponse.access_token;
-                        this.session.refresh_token = tokenResponse.refresh_token;
-                        this.session.expires_at = Date.now() + (tokenResponse.expires_in * 1000);
-                        this.session.username = claims ? claims.uname : 'client';
-                        this._saveSession();
+                        this._applyTokens(tokenResponse);
                         console.log(`Successfully authenticated as user: ${this.session.username}`);
                         resolve();
                     }
@@ -577,31 +632,96 @@ class FireflyClient {
             }
             return this.session.access_token;
         }
-        if (!this.session.access_token || Date.now() + 120000 >= this.session.expires_at) {
-            if (this.session.refresh_token) {
+        if (this.session.access_token && Date.now() + REFRESH_LEAD_MS < this.session.expires_at) {
+            if (!this.renewTimer)
+                this._scheduleRenewal();
+            return this.session.access_token;
+        }
+        return this._renew();
+    }
+    // Runs one renewal at a time; concurrent callers share it. Throws TokenRefreshError when the
+    // failure is temporary and SignInRequiredError when a person has to sign in (unattended mode).
+    _renew() {
+        if (!this.renewing) {
+            this.renewing = this._doRenew().finally(() => {
+                this.renewing = null;
+            });
+        }
+        return this.renewing;
+    }
+    async _doRenew() {
+        if (this.session.refresh_token) {
+            try {
                 console.log('Access token expired or expiring soon. Refreshing token...');
-                try {
-                    const refreshResponse = await this._refreshAccessToken(this.session.refresh_token);
-                    const claims = decodeJwt(refreshResponse.access_token);
-                    this.session.access_token = refreshResponse.access_token;
-                    if (refreshResponse.refresh_token) {
-                        this.session.refresh_token = refreshResponse.refresh_token;
-                    }
-                    this.session.expires_at = Date.now() + (refreshResponse.expires_in * 1000);
-                    this.session.username = claims ? claims.uname : 'client';
-                    this._saveSession();
-                    console.log('Access token successfully refreshed.');
-                }
-                catch (err) {
-                    console.error('Failed to refresh token, starting new login flow:', err.message);
-                    await this._startOauthFlow();
-                }
+                this._applyTokens(await this._refreshAccessToken(this.session.refresh_token));
+                console.log('Access token successfully refreshed.');
+                return this.session.access_token;
             }
-            else {
-                await this._startOauthFlow();
+            catch (err) {
+                if (!(err instanceof TokenRefreshError && err.rejected))
+                    throw err;
+                console.error(`The saved sign-in can no longer be renewed: ${err.message}`);
             }
         }
+        if (this.unattended) {
+            throw new SignInRequiredError(`${this.session.username ?? 'This client'} needs to sign in again (no valid refresh token in ${this.sessionFile})`);
+        }
+        await this._startOauthFlow();
         return this.session.access_token;
+    }
+    // Renews ahead of expiry so the Rust client, which reads the token synchronously, never gets
+    // an expired one. With no delay given, renews REFRESH_LEAD_MS before expiry.
+    _scheduleRenewal(delayMs) {
+        if (this.emulatorMode)
+            return;
+        if (this.renewTimer)
+            clearTimeout(this.renewTimer);
+        const remaining = this.session.expires_at - Date.now();
+        const delay = delayMs ?? Math.max(0, remaining - Math.min(REFRESH_LEAD_MS, remaining / 2));
+        this.renewDueAt = Date.now() + delay;
+        this.renewTimer = setTimeout(() => void this._renewInBackground(), Math.min(delay, MAX_TIMER_MS));
+        // Don't keep the process alive just for this timer
+        this.renewTimer.unref?.();
+    }
+    async _renewInBackground() {
+        if (this.renewTimer)
+            clearTimeout(this.renewTimer);
+        this.renewTimer = null;
+        try {
+            await this._renew();
+        }
+        catch (err) {
+            if (err instanceof SignInRequiredError) {
+                this._signInRequired(err);
+                return;
+            }
+            const left = Math.round((this.session.expires_at - Date.now()) / 1000);
+            console.error(`Token refresh failed: ${err.message}. Retrying in ${this.renewRetryMs / 1000}s; ` +
+                (left > 0 ? `the current token expires in ${left}s.` : 'the current token has expired.'));
+            this._scheduleRenewal(this.renewRetryMs);
+            this.renewRetryMs = Math.min(this.renewRetryMs * 2, REFRESH_RETRY_MAX_MS);
+        }
+    }
+    // The Rust client calls getAccessToken synchronously before requests, so this can't wait for a
+    // refresh. If the renewal timer ran late (the machine slept), start the renewal now so the next
+    // request gets a fresh token.
+    _accessTokenForClient() {
+        if (!this.emulatorMode &&
+            !this.renewing &&
+            this.renewTimer &&
+            Date.now() > this.renewDueAt + TIMER_LATE_MS) {
+            void this._renewInBackground();
+        }
+        return this.session.access_token;
+    }
+    _signInRequired(err) {
+        if (this.config.onSignInRequired) {
+            this.config.onSignInRequired(err);
+            return;
+        }
+        console.error(`${err.message}.`);
+        console.error('Sign in once by hand (a browser opens): run the bot without FIREFLY_UNATTENDED, e.g. `bun start` in its folder.');
+        process.exit(exports.EXIT_SIGN_IN_REQUIRED);
     }
     // Handles parsed message routing to command registry
     async _handleMessage({ text, sender, isGroup, groupId, channelId }) {
@@ -697,17 +817,20 @@ class FireflyClient {
             this._saveSession();
         }
         else {
-            await this.getOrRenewAccessToken();
+            try {
+                await this.getOrRenewAccessToken();
+            }
+            catch (err) {
+                if (err instanceof SignInRequiredError)
+                    this._signInRequired(err);
+                throw err;
+            }
         }
         console.log(`Initializing Firefly MLS Client [user: ${this.session.username}]...`);
         const callbacks = {
             name: this.session.username,
             initialToken: this.session.access_token,
-            getAccessToken: () => {
-                console.log(`[getAccessToken Callback] requested for ${this.session.username}`);
-                const token = this.session.access_token;
-                return token;
-            },
+            getAccessToken: () => this._accessTokenForClient(),
             onMessage: async (err, msgJson) => {
                 if (err) {
                     console.error("onMessage error:", err);
