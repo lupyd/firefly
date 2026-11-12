@@ -891,6 +891,9 @@ pub struct FireflyWsClient {
     /// were last updated (see `connect`).
     group_messages_since_sync_update: Arc<AtomicBool>,
     pool: SqlitePool,
+    /// Ids of requests awaiting a response. 0 is never one: messages sent without waiting for an
+    /// answer (the reply accepting a new session) carry request id 0, and a pending request with
+    /// that id would take their response for its own.
     next_request_id: AtomicU32,
     last_connection_error: std::sync::Mutex<Option<String>>,
     pub transport: TransportProtocol,
@@ -1053,7 +1056,7 @@ impl FireflyWsClient {
             firefly_mls_client: Default::default(),
 
             group_info_store,
-            next_request_id: Default::default(),
+            next_request_id: AtomicU32::new(1),
             last_connection_error: std::sync::Mutex::new(None),
             firefly_base_wt_url,
             message_requests_store,
@@ -1961,9 +1964,11 @@ impl FireflyWsClient {
         }
         {
             let (tx, rx) = oneshot::channel();
-            let id = {
-                self.next_request_id
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            let id = loop {
+                let id = self.next_request_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if id != 0 {
+                    break id;
+                }
             };
             let mut request = request;
             request.id = id;
