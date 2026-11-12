@@ -398,6 +398,9 @@ impl FireflyWsClientCallback for InternalSignalCallback {
     async fn on_device_revoked(&self) {
         self.inner.on_device_revoked().await;
     }
+    async fn on_device_limit_reached(&self, devices: Vec<RegisteredDevice>) {
+        self.inner.on_device_limit_reached(devices).await;
+    }
     async fn on_direct_history_request(&self, request: crate::callbacks::DirectHistoryRequest) {
         self.inner.on_direct_history_request(request).await;
     }
@@ -425,6 +428,62 @@ impl std::fmt::Display for DeviceRevoked {
 }
 
 impl std::error::Error for DeviceRevoked {}
+
+/// One of the account's devices, as the server lists them.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RegisteredDevice {
+    pub address_id: u64,
+    pub device_id: u32,
+    /// What the device called itself when it registered (empty for devices from before names).
+    pub name: String,
+    /// The device runs in a browser.
+    pub web: bool,
+    /// When it last connected, Unix milliseconds (about now while it is connected).
+    pub last_connected_at_ms: u64,
+}
+
+impl RegisteredDevice {
+    pub fn from_address(address: &firefly::Address<'_>) -> Self {
+        Self {
+            address_id: address.id,
+            device_id: address.deviceId,
+            name: address.name.to_string(),
+            web: address.platform == 1,
+            last_connected_at_ms: address.lastConnectedAt,
+        }
+    }
+}
+
+/// The account already has the most devices it may have (HTTP 409). This device waits until
+/// the user removes one of `devices`; the server never signs one out to make room.
+#[derive(Debug)]
+pub struct DeviceLimitReached {
+    pub devices: Vec<RegisteredDevice>,
+}
+
+impl std::fmt::Display for DeviceLimitReached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the account already has {} devices; remove one to add this device", self.devices.len())
+    }
+}
+
+impl std::error::Error for DeviceLimitReached {}
+
+/// What a device calls itself unless the app names it (`set_device_name`).
+fn default_device_name() -> String {
+    if cfg!(target_arch = "wasm32") {
+        return "Web browser".into();
+    }
+    match std::env::consts::OS {
+        "linux" => "Linux",
+        "windows" => "Windows",
+        "macos" => "macOS",
+        "android" => "Android",
+        "ios" => "iOS",
+        other => other,
+    }
+    .into()
+}
 
 pub struct Connection {
     sender_task: crate::rt::JoinHandle<()>,
@@ -904,6 +963,9 @@ pub struct FireflyWsClient {
     #[cfg(not(target_arch = "wasm32"))]
     wt_endpoints: std::sync::Mutex<(Option<quinn::Endpoint>, Option<quinn::Endpoint>)>,
     active_transport: std::sync::RwLock<Option<ActiveTransport>>,
+    device_name: std::sync::RwLock<String>,
+    /// Set while registration waits for the user to remove a device.
+    device_limit: std::sync::RwLock<Option<Vec<RegisteredDevice>>>,
 }
 
 impl FireflyWsClient {
@@ -1065,6 +1127,8 @@ impl FireflyWsClient {
             #[cfg(not(target_arch = "wasm32"))]
             wt_endpoints: Default::default(),
             active_transport: Default::default(),
+            device_name: std::sync::RwLock::new(default_device_name()),
+            device_limit: Default::default(),
         })
     }
     pub async fn initialize_with_retrying(&self) -> anyhow::Result<()> {
@@ -1096,17 +1160,35 @@ impl FireflyWsClient {
                         Err(err) if err.downcast_ref::<DeviceRevoked>().is_some() => {
                             self.on_device_revoked().await;
                         }
-                        Err(err) => {
-                            log::error!("failed to check setup: {:?}", err);
-                        }
+                        Err(err) => match err.downcast::<DeviceLimitReached>() {
+                            Ok(limit) => {
+                                let changed = {
+                                    let mut current = self.device_limit.write().unwrap();
+                                    let ids = |devices: &[RegisteredDevice]| devices.iter().map(|d| d.address_id).collect::<Vec<_>>();
+                                    let changed = current.as_deref().map(ids) != Some(ids(&limit.devices));
+                                    *current = Some(limit.devices.clone());
+                                    changed
+                                };
+                                if changed {
+                                    log::warn!("{limit}");
+                                }
+                                // On every attempt, so a listener that started late still hears it.
+                                self.callbacks.on_device_limit_reached(limit.devices).await;
+                            }
+                            Err(err) => log::error!("failed to check setup: {:?}", err),
+                        },
                     }
                 })
                 .await;
 
             if self.addressId.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+                if self.device_limit.write().unwrap().take().is_some() {
+                    self.callbacks.on_device_limit_reached(Vec::new()).await;
+                }
                 break;
             }
-            crate::rt::sleep(Duration::from_secs(2)).await;
+            let waiting_for_removal = self.device_limit.read().unwrap().is_some();
+            crate::rt::sleep(Duration::from_secs(if waiting_for_removal { 5 } else { 2 })).await;
         }
 
         {
@@ -1670,6 +1752,18 @@ impl FireflyWsClient {
 
     pub fn current_transport(&self) -> Option<ActiveTransport> {
         *self.active_transport.read().unwrap()
+    }
+
+    /// The name this device registers with, shown in the account's device list. Set it before
+    /// initializing.
+    pub fn set_device_name(&self, name: &str) {
+        *self.device_name.write().unwrap() = name.to_string();
+    }
+
+    /// The account's devices while registering this one waits for the user to remove one of
+    /// them (`None` otherwise). Also reported through `on_device_limit_reached`.
+    pub fn device_limit(&self) -> Option<Vec<RegisteredDevice>> {
+        self.device_limit.read().unwrap().clone()
     }
 
     async fn connect(&self) -> anyhow::Result<()> {
@@ -4183,6 +4277,8 @@ impl FireflyWsClient {
                     identity.device_id as u32
                 },
                 fcmToken: fcm_token.into(),
+                name: self.device_name.read().unwrap().clone().into(),
+                ..Default::default()
             };
 
             log::info!("address to upload {:?}", address);
@@ -4191,9 +4287,11 @@ impl FireflyWsClient {
                 .store(identity.id as u64, std::sync::atomic::Ordering::Relaxed);
 
             // Web devices expire sooner on the server (private windows, shared computers).
+            // `limit=wait`: past the device limit the server refuses this device (409, with the
+            // devices) instead of signing one out; it waits for the user to remove one.
             let platform = if cfg!(target_arch = "wasm32") { "web" } else { "native" };
             let response = HTTP_CLIENT
-                .post(format!("{}/user/device?platform={platform}", self.firefly_base_url))
+                .post(format!("{}/user/device?platform={platform}&limit=wait", self.firefly_base_url))
                 .body(serialize_proto(&address)?)
                 .bearer_auth(&token)
                 .send()
@@ -4201,6 +4299,16 @@ impl FireflyWsClient {
 
             if response.status() == reqwest::StatusCode::GONE {
                 return Err(DeviceRevoked.into());
+            }
+            if response.status() == reqwest::StatusCode::CONFLICT {
+                let body = response.bytes().await?;
+                let devices = deserialize_proto::<firefly::Addresses>(&body)
+                    .context("unexpected device limit response")?
+                    .addresses
+                    .iter()
+                    .map(RegisteredDevice::from_address)
+                    .collect();
+                return Err(DeviceLimitReached { devices }.into());
             }
             if !response.status().is_success() {
                 return Err(anyhow::anyhow!(
@@ -7993,6 +8101,16 @@ impl FfiFireflyWsClient {
 
     pub fn address_id(&self) -> u64 {
         self.inner.address_id()
+    }
+
+    /// See [`FireflyWsClient::set_device_name`].
+    pub fn set_device_name(&self, name: &str) {
+        self.inner.set_device_name(name);
+    }
+
+    /// See [`FireflyWsClient::device_limit`].
+    pub fn device_limit(&self) -> Option<Vec<RegisteredDevice>> {
+        self.inner.device_limit()
     }
 
     /// The address this device registered with the server earlier, read from local storage;

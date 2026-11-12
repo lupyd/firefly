@@ -50,7 +50,7 @@ impl Peer {
             realm: String::new(),
         };
         let auth = Arc::new(Auth::load(config, path).unwrap());
-        let agent = Agent::start(auth, &endpoints(), data_dir).await.unwrap();
+        let agent = Agent::start(auth, &endpoints(), data_dir, "firefly-mcp-test").await.unwrap();
         let (server_io, client_io) = tokio::io::duplex(1 << 16);
         let server = FireflyMcp::new(agent.clone(), "firefly-mcp-test");
         tokio::spawn(async move {
@@ -205,6 +205,7 @@ async fn agents_chat_directly_and_in_groups() {
         .unwrap()),
         &endpoints(),
         dir.join(&bob.username),
+        "firefly-mcp-test",
     )
     .await;
     assert!(second.err().is_some_and(|e| e.to_string().contains("already running")));

@@ -70,420 +70,215 @@ async fn wait_for_init(client: &FireflyWsClient) -> anyhow::Result<()> {
     Err(anyhow::anyhow!("Client timeout waiting for initialization"))
 }
 
-#[tokio::test]
-async fn test_address_rotation() {
-    let (base_url, ws_url) = match setup_server().await {
-        Some(urls) => urls,
-        None => return,
+/// One of an account's devices, with the direct messages it receives.
+struct Device {
+    client: Arc<FireflyWsClient>,
+    messages: mpsc::Receiver<UserMessage>,
+}
+
+/// Creates a device and starts connecting it in the background; it registers with the server
+/// when the account has room for it.
+async fn new_device(base_url: &str, ws_url: &str, username: &str, db: String) -> Device {
+    let (message_tx, messages) = mpsc::channel(100);
+    let (group_message_tx, _) = mpsc::channel(100);
+    let callbacks = TestCallbacks {
+        name: username.to_string(),
+        token: username.to_string(),
+        message_tx,
+        group_message_tx,
     };
-
-    let test_run_id = rand::random::<u32>();
-    let test_dir = format!("/tmp/firefly/rot_{}", test_run_id);
-    let _ = std::fs::create_dir_all(&test_dir);
-
-    let alice_name = format!("alice_rot_{}", test_run_id);
-    let bob_name = format!("bob_rot_{}", test_run_id);
-
-    let mut alice_clients = Vec::new();
-    let mut alice_receivers = Vec::new();
-
-    // 1. Create 5 Alice devices
-    println!("Creating 5 Alice devices...");
-    for i in 1..=5 {
-        let (msg_tx, msg_rx) = mpsc::channel(100);
-        let (gmsg_tx, _gmsg_rx) = mpsc::channel(100);
-        let callbacks = TestCallbacks {
-            name: alice_name.clone(),
-            token: alice_name.clone(),
-            message_tx: msg_tx,
-            group_message_tx: gmsg_tx,
-        };
-
-        let db = format!("{}/alice_{}.db", test_dir, i);
-
-        let client = FireflyWsClient::create(
-            base_url.clone(),
-            ws_url.clone(),
-            1000,
-            Box::new(callbacks),
-            db.clone(),
-            5000,
-        )
-        .await
-        .expect("Failed to create Alice client");
-        let client = Arc::new(client);
-
-        let client_init = client.clone();
-        tokio::spawn(async move {
-            let _ = client_init.initialize_with_retrying().await;
-        });
-
-        wait_for_init(&client)
+    let client = Arc::new(
+        FireflyWsClient::create(base_url.to_string(), ws_url.to_string(), 1000, Box::new(callbacks), db, 5000)
             .await
-            .expect(&format!("Alice client {} failed to initialize", i));
-
-        alice_clients.push(client);
-        alice_receivers.push(msg_rx);
-
-        // Small sleep to ensure different activity timestamps for rotation sorting
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-
-    // 2. Create Bob
-    println!("Creating Bob device...");
-    let (bob_msg_tx, _bob_msg_rx) = mpsc::channel(100);
-    let (bob_gmsg_tx, _bob_gmsg_rx) = mpsc::channel(100);
-    let bob_callbacks = TestCallbacks {
-        name: bob_name.clone(),
-        token: bob_name.clone(),
-        message_tx: bob_msg_tx,
-        group_message_tx: bob_gmsg_tx,
-    };
-    let bob_db = format!("{}/bob.db", test_dir);
-    let bob_client = FireflyWsClient::create(
-        base_url.clone(),
-        ws_url.clone(),
-        1000,
-        Box::new(bob_callbacks),
-        bob_db.clone(),
-        5000,
-    )
-    .await
-    .expect("Failed to create Bob client");
-    let bob_client = Arc::new(bob_client);
-    let bob_init = bob_client.clone();
-    tokio::spawn(async move {
-        let _ = bob_init.initialize_with_retrying().await;
-    });
-
-    wait_for_init(&bob_client)
-        .await
-        .expect("Bob client failed to initialize");
-
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // 3. Bob sends message to Alice
-    println!("Bob sending first message to Alice...");
-    bob_client
-        .encrypt_and_send(alice_name.clone(), b"hello 1".to_vec())
-        .await
-        .expect("Bob failed to send message");
-
-    // 4. Verify all 5 receive it
-    for i in 0..5 {
-        println!("Checking message for device {}...", i + 1);
-        let msg = tokio::time::timeout(Duration::from_secs(10), alice_receivers[i].recv())
-            .await
-            .expect(&format!("Timeout waiting for message on device {}", i + 1))
-            .unwrap();
-        assert_eq!(msg.message, b"hello 1");
-    }
-    println!("All 5 devices received the first message.");
-    // 6. Create 6th device
-    println!("Creating 6th Alice device (should trigger rotation)...");
-    let (msg_tx6, mut msg_rx6) = mpsc::channel(100);
-    let (gmsg_tx6, _gmsg_rx6) = mpsc::channel(100);
-    let callbacks6 = TestCallbacks {
-        name: alice_name.clone(),
-        token: alice_name.clone(),
-        message_tx: msg_tx6,
-        group_message_tx: gmsg_tx6,
-    };
-
-    let db6 = format!("{}/alice_6.db", test_dir);
-
-    let client6 = FireflyWsClient::create(
-        base_url.clone(),
-        ws_url.clone(),
-        1000,
-        Box::new(callbacks6),
-        db6.clone(),
-        5000,
-    )
-    .await
-    .expect("Failed to create Alice client 6");
-    let client6 = Arc::new(client6);
-
-    let client_init6 = client6.clone();
-    tokio::spawn(async move {
-        let _ = client_init6.initialize_with_retrying().await;
-    });
-
-    wait_for_init(&client6)
-        .await
-        .expect("Alice device 6 failed to initialize");
-
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // 7. Bob sends second message
-    println!("Bob sending second message to Alice...");
-    bob_client
-        .encrypt_and_send(alice_name.clone(), b"hello 2".to_vec())
-        .await
-        .expect("Bob failed to send second message");
-
-    // Check device 1 (the oldest one)
-    println!("Checking that device 1 does NOT receive the message...");
-    let res1 = tokio::time::timeout(Duration::from_secs(5), alice_receivers[0].recv()).await;
-    if let Ok(Some(ref msg)) = res1 {
-        panic!("Device 1 should NOT have received the message, but received: {:?}", String::from_utf8_lossy(&msg.message));
-    }
-    assert!(
-        res1.is_err(),
-        "Device 1 should NOT have received the message as it should be dropped"
+            .expect("failed to create client"),
     );
-
-    // Check others (2-5)
-    for i in 1..5 {
-        println!("Checking message for device {}...", i + 1);
-        let msg = tokio::time::timeout(Duration::from_secs(10), alice_receivers[i].recv())
-            .await
-            .expect(&format!("Timeout waiting for message on device {}", i + 1))
-            .unwrap();
-        assert_eq!(msg.message, b"hello 2");
-    }
-    // Check device 6
-    println!("Checking message for device 6...");
-    let msg6 = tokio::time::timeout(Duration::from_secs(10), msg_rx6.recv())
-        .await
-        .expect("Timeout waiting for message on device 6")
-        .unwrap();
-    assert_eq!(msg6.message, b"hello 2");
-
-    println!("Address rotation test passed!");
-
-    // Cleanup
-    for c in alice_clients {
-        c.dispose().await;
-    }
-    client6.dispose().await;
-    bob_client.dispose().await;
-
-    cleanup_dir(&test_dir);
+    let connecting = client.clone();
+    tokio::spawn(async move {
+        let _ = connecting.initialize_with_retrying().await;
+    });
+    Device { client, messages }
 }
 
+/// A device that registered.
+async fn started_device(base_url: &str, ws_url: &str, username: &str, db: String) -> Device {
+    let device = new_device(base_url, ws_url, username, db).await;
+    wait_for_init(&device.client).await.expect("device failed to initialize");
+    device
+}
+
+/// The account's devices as the server has them (address ids), as the apps list them.
+async fn devices_on_server(base_url: &str, username: &str) -> Vec<u64> {
+    let bytes = reqwest::Client::new()
+        .get(format!("{base_url}/user/devices"))
+        .bearer_auth(username)
+        .send()
+        .await
+        .expect("GET /user/devices")
+        .error_for_status()
+        .expect("GET /user/devices status")
+        .bytes()
+        .await
+        .unwrap();
+    let addresses = firefly_protos::deserialize_proto::<firefly_protos::firefly::Addresses>(&bytes).unwrap();
+    addresses.addresses.iter().map(|a| a.id).collect()
+}
+
+/// The user removes one of their devices (Settings > Devices in the apps).
+async fn remove_device(base_url: &str, username: &str, address_id: u64) {
+    reqwest::Client::new()
+        .delete(format!("{base_url}/user/device?id={address_id}"))
+        .bearer_auth(username)
+        .send()
+        .await
+        .expect("DELETE /user/device")
+        .error_for_status()
+        .expect("DELETE /user/device status");
+}
+
+async fn expect_message(device: &mut Device, label: &str, text: &[u8]) {
+    let message = tokio::time::timeout(Duration::from_secs(15), device.messages.recv())
+        .await
+        .unwrap_or_else(|_| panic!("{label} got no message"))
+        .unwrap();
+    assert_eq!(message.message, text, "{label}");
+}
+
+async fn expect_no_message(device: &mut Device, label: &str) {
+    if let Ok(Some(message)) = tokio::time::timeout(Duration::from_secs(5), device.messages.recv()).await {
+        panic!("{label} should get nothing, got {:?}", String::from_utf8_lossy(&message.message));
+    }
+}
+
+/// A sixth device isn't admitted, and doesn't push out an older one: it waits until the user
+/// removes one of the five (the apps list the devices with their last connection and let the
+/// user pick). Then it registers and gets what is sent to the account; the removed one doesn't.
 #[tokio::test]
-async fn test_bidirectional_multi_device_rotation_and_messaging() {
+async fn a_sixth_device_waits_until_the_user_removes_one() {
     let (base_url, ws_url) = match setup_server().await {
         Some(urls) => urls,
         None => return,
     };
+    let run = rand::random::<u32>();
+    let dir = format!("/tmp/firefly/limit_{run}");
+    let _ = std::fs::create_dir_all(&dir);
+    let alice = format!("alice_limit_{run}");
+    let bob = format!("bob_limit_{run}");
 
-    let test_run_id = rand::random::<u32>();
-    let test_dir = format!("/tmp/firefly/bidi_{}", test_run_id);
-    let _ = std::fs::create_dir_all(&test_dir);
+    let mut alices = Vec::new();
+    for i in 1..=5 {
+        alices.push(started_device(&base_url, &ws_url, &alice, format!("{dir}/alice_{i}.db")).await);
+    }
+    let bob_device = started_device(&base_url, &ws_url, &bob, format!("{dir}/bob.db")).await;
+    assert_eq!(devices_on_server(&base_url, &alice).await.len(), 5);
 
-    let alice_name = format!("alice_bidi_{}", test_run_id);
-    let bob_name = format!("bob_bidi_{}", test_run_id);
-
-    // 1. Create 3 initial Alice devices and 3 initial Bob devices
-    let mut alice_clients = Vec::new();
-    let mut alice_receivers = Vec::new();
-    for i in 1..=3 {
-        let (msg_tx, msg_rx) = mpsc::channel(100);
-        let (gmsg_tx, _gmsg_rx) = mpsc::channel(100);
-        let callbacks = TestCallbacks {
-            name: alice_name.clone(),
-            token: alice_name.clone(),
-            message_tx: msg_tx,
-            group_message_tx: gmsg_tx,
-        };
-
-        let db = format!("{}/alice_{}.db", test_dir, i);
-
-        let client = FireflyWsClient::create(
-            base_url.clone(),
-            ws_url.clone(),
-            1000,
-            Box::new(callbacks),
-            db.clone(),
-            5000,
-        )
-        .await
-        .expect("Failed to create Alice client");
-        let client = Arc::new(client);
-
-        let client_init = client.clone();
-        tokio::spawn(async move {
-            let _ = client_init.initialize_with_retrying().await;
-        });
-
-        wait_for_init(&client)
-            .await
-            .expect(&format!("Alice client {} failed to initialize", i));
-
-        alice_clients.push(client);
-        alice_receivers.push(msg_rx);
-        tokio::time::sleep(Duration::from_millis(200)).await;
+    bob_device.client.encrypt_and_send(alice.clone(), b"hello 1".to_vec()).await.unwrap();
+    for (i, device) in alices.iter_mut().enumerate() {
+        expect_message(device, &format!("alice {}", i + 1), b"hello 1").await;
     }
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
-    let mut bob_clients = Vec::new();
-    let mut bob_receivers = Vec::new();
-    for i in 1..=3 {
-        let (msg_tx, msg_rx) = mpsc::channel(100);
-        let (gmsg_tx, _gmsg_rx) = mpsc::channel(100);
-        let callbacks = TestCallbacks {
-            name: bob_name.clone(),
-            token: bob_name.clone(),
-            message_tx: msg_tx,
-            group_message_tx: gmsg_tx,
-        };
-
-        let db = format!("{}/bob_{}.db", test_dir, i);
-
-        let client = FireflyWsClient::create(
-            base_url.clone(),
-            ws_url.clone(),
-            1000,
-            Box::new(callbacks),
-            db.clone(),
-            5000,
-        )
-        .await
-        .expect("Failed to create Bob client");
-        let client = Arc::new(client);
-
-        let client_init = client.clone();
-        tokio::spawn(async move {
-            let _ = client_init.initialize_with_retrying().await;
-        });
-
-        wait_for_init(&client)
-            .await
-            .expect(&format!("Bob client {} failed to initialize", i));
-
-        bob_clients.push(client);
-        bob_receivers.push(msg_rx);
-        tokio::time::sleep(Duration::from_millis(200)).await;
+    // At the limit: the sixth device stays unregistered and nobody is pushed out.
+    let mut sixth = new_device(&base_url, &ws_url, &alice, format!("{dir}/alice_6.db")).await;
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    assert!(!sixth.client.is_initialized(), "a sixth device registered without one being removed");
+    let mut before: Vec<u64> = Vec::new();
+    for device in &alices {
+        before.push(device.client.address_id());
     }
+    before.sort();
+    let mut on_server = devices_on_server(&base_url, &alice).await;
+    on_server.sort();
+    assert_eq!(on_server, before, "the server's devices changed without the user removing one");
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // 2. Alice1 sends message to Bob (All 3 Bob devices receive)
-    println!("Alice 1 sending message to Bob...");
-    alice_clients[0]
-        .encrypt_and_send(bob_name.clone(), b"alice -> bob 1".to_vec())
-        .await
-        .expect("Alice 1 failed to send");
-
-    for i in 0..3 {
-        let msg = tokio::time::timeout(Duration::from_secs(10), bob_receivers[i].recv())
-            .await
-            .expect(&format!("Timeout waiting for message on Bob device {}", i + 1))
-            .unwrap();
-        assert_eq!(msg.message, b"alice -> bob 1");
+    bob_device.client.encrypt_and_send(alice.clone(), b"hello 2".to_vec()).await.unwrap();
+    for (i, device) in alices.iter_mut().enumerate() {
+        expect_message(device, &format!("alice {}", i + 1), b"hello 2").await;
     }
+    expect_no_message(&mut sixth, "the unregistered sixth device").await;
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // The user removes the oldest device; the sixth then registers in its place.
+    let first = alices[0].client.address_id();
+    remove_device(&base_url, &alice, first).await;
+    wait_for_init(&sixth.client).await.expect("the sixth device didn't register after one was removed");
+    let sixth_id = sixth.client.address_id();
+    let on_server = devices_on_server(&base_url, &alice).await;
+    assert_eq!(on_server.len(), 5, "{on_server:?}");
+    assert!(on_server.contains(&sixth_id) && !on_server.contains(&first), "{on_server:?}");
 
-    // 3. Bob1 replies to Alice (All 3 Alice devices receive)
-    println!("Bob 1 sending reply to Alice...");
-    bob_clients[0]
-        .encrypt_and_send(alice_name.clone(), b"bob -> alice 1".to_vec())
-        .await
-        .expect("Bob 1 failed to send");
-
-    for i in 0..3 {
-        let msg = tokio::time::timeout(Duration::from_secs(10), alice_receivers[i].recv())
-            .await
-            .expect(&format!("Timeout waiting for message on Alice device {}", i + 1))
-            .unwrap();
-        assert_eq!(msg.message, b"bob -> alice 1");
+    bob_device.client.encrypt_and_send(alice.clone(), b"hello 3".to_vec()).await.unwrap();
+    for (i, device) in alices.iter_mut().enumerate().skip(1) {
+        expect_message(device, &format!("alice {}", i + 1), b"hello 3").await;
     }
+    expect_message(&mut sixth, "alice 6", b"hello 3").await;
+    expect_no_message(&mut alices[0], "the removed device").await;
 
-    // 4. Add Bob devices 4, 5, 6 (Device 1 should be rotated out of active 5)
-    println!("Adding Bob devices 4, 5, 6 (triggering rotation of Bob 1)...");
-    for i in 4..=6 {
-        let (msg_tx, msg_rx) = mpsc::channel(100);
-        let (gmsg_tx, _gmsg_rx) = mpsc::channel(100);
-        let callbacks = TestCallbacks {
-            name: bob_name.clone(),
-            token: bob_name.clone(),
-            message_tx: msg_tx,
-            group_message_tx: gmsg_tx,
-        };
-
-        let db = format!("{}/bob_{}.db", test_dir, i);
-
-        let client = FireflyWsClient::create(
-            base_url.clone(),
-            ws_url.clone(),
-            1000,
-            Box::new(callbacks),
-            db.clone(),
-            5000,
-        )
-        .await
-        .expect("Failed to create Bob client");
-        let client = Arc::new(client);
-
-        let client_init = client.clone();
-        tokio::spawn(async move {
-            let _ = client_init.initialize_with_retrying().await;
-        });
-
-        wait_for_init(&client)
-            .await
-            .expect(&format!("Bob client {} failed to initialize", i));
-
-        bob_clients.push(client);
-        bob_receivers.push(msg_rx);
-        tokio::time::sleep(Duration::from_millis(200)).await;
+    for device in alices {
+        device.client.dispose().await;
     }
-
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // 5. Alice 2 sends message to Bob -> Server will notice Bob1 is gone and return new active Bob devices
-    println!("Alice 2 sending message to Bob after Bob rotation...");
-    alice_clients[1]
-        .encrypt_and_send(bob_name.clone(), b"alice -> bob 2".to_vec())
-        .await
-        .expect("Alice 2 failed to send");
-
-    // Bob 1 (index 0) must NOT receive (dropped)
-    let res_dropped = tokio::time::timeout(Duration::from_secs(4), bob_receivers[0].recv()).await;
-    assert!(res_dropped.is_err(), "Bob 1 should have been rotated out and receive nothing");
-
-    // Active Bob devices (indices 1..6 -> Bob 2, 3, 4, 5, 6) must receive
-    for i in 1..6 {
-        let msg = tokio::time::timeout(Duration::from_secs(10), bob_receivers[i].recv())
-            .await
-            .expect(&format!("Timeout waiting for message on active Bob device {}", i + 1))
-            .unwrap();
-        assert_eq!(msg.message, b"alice -> bob 2");
-    }
-
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // 6. Bob 6 replies to Alice -> All active Alice devices receive
-    println!("Bob 6 sending reply to Alice...");
-    bob_clients[5]
-        .encrypt_and_send(alice_name.clone(), b"bob 6 -> alice".to_vec())
-        .await
-        .expect("Bob 6 failed to send");
-
-    for i in 0..3 {
-        let msg = tokio::time::timeout(Duration::from_secs(10), alice_receivers[i].recv())
-            .await
-            .expect(&format!("Timeout waiting for message on Alice device {}", i + 1))
-            .unwrap();
-        assert_eq!(msg.message, b"bob 6 -> alice");
-    }
-
-    println!("Bidirectional multi-device rotation test passed successfully!");
-
-    // Cleanup
-    for c in alice_clients {
-        c.dispose().await;
-    }
-    for c in bob_clients {
-        c.dispose().await;
-    }
-
-    cleanup_dir(&test_dir);
+    sixth.client.dispose().await;
+    bob_device.client.dispose().await;
+    cleanup_dir(&dir);
 }
+
+/// Both people keep talking while one replaces a device at the limit: the other side's next
+/// message reaches the new device and not the removed one, and the new device can answer.
+#[tokio::test]
+async fn conversation_continues_after_replacing_a_device_at_the_limit() {
+    let (base_url, ws_url) = match setup_server().await {
+        Some(urls) => urls,
+        None => return,
+    };
+    let run = rand::random::<u32>();
+    let dir = format!("/tmp/firefly/limit_bidi_{run}");
+    let _ = std::fs::create_dir_all(&dir);
+    let alice = format!("alice_bidi_{run}");
+    let bob = format!("bob_bidi_{run}");
+
+    let mut alices = Vec::new();
+    for i in 1..=2 {
+        alices.push(started_device(&base_url, &ws_url, &alice, format!("{dir}/alice_{i}.db")).await);
+    }
+    let mut bobs = Vec::new();
+    for i in 1..=5 {
+        bobs.push(started_device(&base_url, &ws_url, &bob, format!("{dir}/bob_{i}.db")).await);
+    }
+
+    alices[0].client.encrypt_and_send(bob.clone(), b"hi bob".to_vec()).await.unwrap();
+    for (i, device) in bobs.iter_mut().enumerate() {
+        expect_message(device, &format!("bob {}", i + 1), b"hi bob").await;
+    }
+    bobs[0].client.encrypt_and_send(alice.clone(), b"hi alice".to_vec()).await.unwrap();
+    for (i, device) in alices.iter_mut().enumerate() {
+        expect_message(device, &format!("alice {}", i + 1), b"hi alice").await;
+    }
+
+    // Bob gets a new phone: it waits until he removes his first device.
+    let mut new_phone = new_device(&base_url, &ws_url, &bob, format!("{dir}/bob_6.db")).await;
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    assert!(!new_phone.client.is_initialized(), "a sixth device registered without one being removed");
+    let first = bobs[0].client.address_id();
+    remove_device(&base_url, &bob, first).await;
+    wait_for_init(&new_phone.client).await.expect("the new device didn't register after one was removed");
+
+    // Alice's devices were last told about Bob's old device list; the server points them at the new one.
+    alices[1].client.encrypt_and_send(bob.clone(), b"welcome back".to_vec()).await.unwrap();
+    expect_message(&mut new_phone, "bob's new phone", b"welcome back").await;
+    for (i, device) in bobs.iter_mut().enumerate().skip(1) {
+        expect_message(device, &format!("bob {}", i + 1), b"welcome back").await;
+    }
+    expect_no_message(&mut bobs[0], "bob's removed device").await;
+
+    new_phone.client.encrypt_and_send(alice.clone(), b"from my new phone".to_vec()).await.unwrap();
+    for (i, device) in alices.iter_mut().enumerate() {
+        expect_message(device, &format!("alice {}", i + 1), b"from my new phone").await;
+    }
+
+    for device in alices.into_iter().chain(bobs) {
+        device.client.dispose().await;
+    }
+    new_phone.client.dispose().await;
+    cleanup_dir(&dir);
+}
+
 
 #[tokio::test]
 async fn test_key_packages_and_pre_keys_not_deleted_on_reconnect() {

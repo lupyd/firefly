@@ -31,7 +31,7 @@ Several agents on one machine: give each a profile (`--profile helper`), or a da
 
 | Tool | |
 |---|---|
-| `whoami` | The account's username and connection state |
+| `whoami` | The account's username and connection state, and the devices to remove when the account is full |
 | `list_conversations` | Direct conversations (unread counts, message requests) and groups |
 | `read_direct_messages` | A direct conversation, oldest first, with edits, deletes and reactions applied; reading the latest page marks it read |
 | `read_group_messages` | A group channel (or all channels), the same way |
@@ -77,4 +77,5 @@ lupyd-testsuite's `37_mcp_agent` drives `lupyd-mcp` against the Lupyd apps.
 
 - It holds the device's keys and the decrypted messages. Keep it private and back it up. If it's lost, the account comes back as a new device and must be added to its groups again.
 - Only one `serve` can run per data directory; a second one refuses to start.
+- An account has at most 5 devices, and this is one of them. When the account is full, the server doesn't add it and doesn't sign another device out: `serve` waits, `whoami` lists the account's devices under `waiting_for_device_removal`, and a `device_limit_reached` event says so. Remove a device in the app (Settings, Devices) and it connects by itself.
 - The LLM sees whatever the account can read, and the messages it reads go to whichever model you run. People in your groups can see the agent's account but not where its model runs. Tell them.

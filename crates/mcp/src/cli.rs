@@ -168,7 +168,7 @@ async fn execute(cli: Cli, defaults: Defaults) -> anyhow::Result<()> {
             let auth = Arc::new(Auth::load(cli.common.auth(&defaults)?, session_path)?);
             // Fail before the MCP client connects when the sign-in is gone.
             auth.access_token().await?;
-            let agent = Agent::start(auth, &cli.common.endpoints(&defaults)?, data_dir).await?;
+            let agent = Agent::start(auth, &cli.common.endpoints(&defaults)?, data_dir, defaults.name).await?;
             log::info!("serving {} over stdio", agent.username);
             let service = FireflyMcp::new(agent.clone(), defaults.name).serve(rmcp::transport::stdio()).await?;
             tokio::select! {

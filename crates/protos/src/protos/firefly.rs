@@ -1391,6 +1391,9 @@ pub struct Address<'a> {
     pub username: Cow<'a, str>,
     pub fcmToken: Cow<'a, str>,
     pub deviceId: u32,
+    pub name: Cow<'a, str>,
+    pub platform: u32,
+    pub lastConnectedAt: u64,
 }
 
 impl<'a> MessageRead<'a> for Address<'a> {
@@ -1402,6 +1405,9 @@ impl<'a> MessageRead<'a> for Address<'a> {
                 Ok(18) => msg.username = r.read_string(bytes).map(Cow::Borrowed)?,
                 Ok(34) => msg.fcmToken = r.read_string(bytes).map(Cow::Borrowed)?,
                 Ok(24) => msg.deviceId = r.read_uint32(bytes)?,
+                Ok(42) => msg.name = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(48) => msg.platform = r.read_uint32(bytes)?,
+                Ok(56) => msg.lastConnectedAt = r.read_uint64(bytes)?,
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -1417,6 +1423,9 @@ impl<'a> MessageWrite for Address<'a> {
         + if self.username == "" { 0 } else { 1 + sizeof_len((&self.username).len()) }
         + if self.fcmToken == "" { 0 } else { 1 + sizeof_len((&self.fcmToken).len()) }
         + if self.deviceId == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.deviceId) as u64) }
+        + if self.name == "" { 0 } else { 1 + sizeof_len((&self.name).len()) }
+        + if self.platform == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.platform) as u64) }
+        + if self.lastConnectedAt == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.lastConnectedAt) as u64) }
     }
 
     fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
@@ -1424,6 +1433,9 @@ impl<'a> MessageWrite for Address<'a> {
         if self.username != "" { w.write_with_tag(18, |w| w.write_string(&**&self.username))?; }
         if self.fcmToken != "" { w.write_with_tag(34, |w| w.write_string(&**&self.fcmToken))?; }
         if self.deviceId != 0u32 { w.write_with_tag(24, |w| w.write_uint32(*&self.deviceId))?; }
+        if self.name != "" { w.write_with_tag(42, |w| w.write_string(&**&self.name))?; }
+        if self.platform != 0u32 { w.write_with_tag(48, |w| w.write_uint32(*&self.platform))?; }
+        if self.lastConnectedAt != 0u64 { w.write_with_tag(56, |w| w.write_uint64(*&self.lastConnectedAt))?; }
         Ok(())
     }
 }

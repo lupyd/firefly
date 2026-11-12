@@ -102,6 +102,11 @@ pub trait FireflyWsClientCallback: Send + Sync {
     /// The user removed this device from another one: the client stopped and forgot its
     /// registration; the app should sign this device out (revoking its own session).
     async fn on_device_revoked(&self) {}
+    /// Registering this device waits because the account has the most devices it may have:
+    /// ask the user to remove one of `devices` (from here or another device); registration
+    /// then continues by itself. Repeated on every attempt (every few seconds) while it waits,
+    /// and called once with an empty list when it registered.
+    async fn on_device_limit_reached(&self, _devices: Vec<crate::websocket::RegisteredDevice>) {}
     /// Answer with `send_direct_history_page` from the local message store.
     async fn on_direct_history_request(&self, _request: DirectHistoryRequest) {}
     /// Store the messages (they are older than what this device has).

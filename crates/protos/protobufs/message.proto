@@ -182,6 +182,12 @@ message Address {
   string username = 2;
   string fcmToken = 4;
   uint32 deviceId = 3;
+  // What the device calls itself ("Linux", "Android", "Web browser", "lupyd-mcp"), sent when it registers.
+  string name = 5;
+  // In the device list: 0 native, 1 web.
+  uint32 platform = 6;
+  // In the device list: when it last connected, Unix milliseconds (now while connected).
+  uint64 lastConnectedAt = 7;
 }
 
 message Addresses {

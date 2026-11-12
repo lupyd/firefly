@@ -256,8 +256,16 @@ async fn test_pinned_messages_persist_across_1to1_address_rotation() {
         assert_eq!(extract_user_message_text(&pinned_list[0].message), "Secret note #1");
     }
 
-    // 5. Create 6th Alice device (triggers address rotation: Device 1 rotated out)
-    println!("Creating 6th Alice device (triggering address rotation of device 1)...");
+    // 5. The account is full: the user removes device 1, then adds a 6th device in its place
+    // (the server never signs a device out to make room).
+    println!("Removing Alice device 1, then creating a 6th device...");
+    let removed = reqwest::Client::new()
+        .delete(format!("{}/user/device?id={}", base_url, alice_clients[0].address_id()))
+        .bearer_auth(&alice_name)
+        .send()
+        .await
+        .expect("DELETE /user/device");
+    assert!(removed.status().is_success(), "removing device 1: {}", removed.status());
     let (msg_tx6, mut msg_rx6) = mpsc::channel(100);
     let (gmsg_tx6, _gmsg_rx6) = mpsc::channel(100);
     let mem_pool6 = SqlitePool::connect(":memory:").await.unwrap();

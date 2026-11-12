@@ -326,6 +326,7 @@ async fn register_all_endpoints(
                     username: member_name.clone().into(),
                     deviceId: 0,
                     fcmToken: "".into(),
+                    ..Default::default()
                 };
                 let body = firefly_protos::serialize_proto(&addr_req)?;
                 let resp = client

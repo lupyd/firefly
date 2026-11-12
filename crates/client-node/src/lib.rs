@@ -1412,6 +1412,7 @@ impl FireflyClientNode {
                 username: username.clone().into(),
                 deviceId: if identity.id == 0 { 0 } else { identity.device_id as u32 },
                 fcmToken: "".into(),
+                ..Default::default()
             };
 
             let device_url = format!("{}/user/device", base_url);

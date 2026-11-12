@@ -66,6 +66,10 @@ pub struct WhoAmI {
     /// Disconnected, Initializing, Retrying, Connected or CheckingSetup.
     pub connection: String,
     pub device_id: u32,
+    /// Set while this device waits to be added: the account already has the most devices it may
+    /// have. Its owner must remove one of these in the app; nothing works until then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting_for_device_removal: Option<Vec<crate::events::DeviceView>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -419,6 +423,11 @@ impl FireflyMcp {
             username: self.agent.username.clone(),
             connection: format!("{:?}", self.agent.client.get_connection_state()),
             device_id: self.agent.client.get_device_id().await,
+            waiting_for_device_removal: self
+                .agent
+                .client
+                .device_limit()
+                .map(|devices| devices.iter().map(crate::events::DeviceView::from).collect()),
         }))
     }
 

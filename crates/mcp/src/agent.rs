@@ -8,11 +8,11 @@ use anyhow::Context;
 use firefly_client::callbacks::FireflyWsClientCallback;
 use firefly_client::db::messages::MessagesStore;
 use firefly_client::storage::{GroupMessage, UserMessage};
-use firefly_client::websocket::FfiFireflyWsClient;
+use firefly_client::websocket::{FfiFireflyWsClient, RegisteredDevice};
 
 use crate::auth::Auth;
 use crate::content::{decode_direct, decode_group};
-use crate::events::{EventContent, EventKind, EventLog};
+use crate::events::{DeviceView, EventContent, EventKind, EventLog};
 
 #[derive(Debug, Clone)]
 pub struct Endpoints {
@@ -32,6 +32,8 @@ struct Callback {
     auth: Arc<Auth>,
     events: Arc<EventLog>,
     store: Arc<OnceLock<MessagesStore>>,
+    /// The devices last reported by `on_device_limit_reached`.
+    limit_reported: std::sync::Mutex<Vec<u64>>,
 }
 
 impl Callback {
@@ -127,6 +129,24 @@ impl FireflyWsClientCallback for Callback {
             reason: "this device was removed from the account; run login again".into(),
         });
     }
+
+    async fn on_device_limit_reached(&self, devices: Vec<RegisteredDevice>) {
+        // Repeated while it waits: report each new list once.
+        let ids: Vec<u64> = devices.iter().map(|d| d.address_id).collect();
+        if std::mem::replace(&mut *self.limit_reported.lock().unwrap(), ids.clone()) == ids {
+            return;
+        }
+        if devices.is_empty() {
+            log::info!("a device was removed; this device is registered now");
+            return;
+        }
+        log::warn!(
+            "{} already has {} devices, so this one can't be added yet. Remove one in the app (Settings, Devices); this device then connects by itself.",
+            self.username,
+            devices.len()
+        );
+        self.events.push(EventKind::DeviceLimitReached { devices: devices.iter().map(DeviceView::from).collect() });
+    }
 }
 
 pub struct Agent {
@@ -153,13 +173,20 @@ fn lock_data_dir(dir: &Path) -> anyhow::Result<std::fs::File> {
 
 impl Agent {
     /// Opens the account's device in `data_dir` and starts connecting in the background.
-    pub async fn start(auth: Arc<Auth>, endpoints: &Endpoints, data_dir: PathBuf) -> anyhow::Result<Arc<Self>> {
+    /// `device_name` is what the account's device list calls it.
+    pub async fn start(auth: Arc<Auth>, endpoints: &Endpoints, data_dir: PathBuf, device_name: &str) -> anyhow::Result<Arc<Self>> {
         std::fs::create_dir_all(&data_dir)?;
         let lock = lock_data_dir(&data_dir)?;
         let username = auth.username().await;
         let events = Arc::new(EventLog::default());
         let store_slot = Arc::new(OnceLock::new());
-        let callback = Callback { username: username.clone(), auth, events: events.clone(), store: store_slot.clone() };
+        let callback = Callback {
+            username: username.clone(),
+            auth,
+            events: events.clone(),
+            store: store_slot.clone(),
+            limit_reported: Default::default(),
+        };
         let client = FfiFireflyWsClient::create_with_endpoints(
             endpoints.api_url.clone(),
             endpoints.ws_url.clone(),
@@ -171,6 +198,7 @@ impl Agent {
         )
         .await
         .context("can't open the Firefly client")?;
+        client.set_device_name(device_name);
         let store = client.messages_store();
         let _ = store_slot.set(store.clone());
         if let Err(e) = client.load_all_groups().await {

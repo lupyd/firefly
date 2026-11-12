@@ -41,6 +41,30 @@ pub enum EventKind {
     GroupUpdated { group_id: u64 },
     /// The account was signed out or this device was removed; run `login` again.
     SignedOut { reason: String },
+    /// The account already has the most devices it may have, so this device isn't added (and
+    /// can't send or receive) until its owner removes one of these in the app. It then connects
+    /// by itself.
+    DeviceLimitReached { devices: Vec<DeviceView> },
+}
+
+/// One of the account's devices.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DeviceView {
+    pub device_id: u32,
+    /// What it called itself ("Android", "Web browser", ...); empty for older devices.
+    pub name: String,
+    pub web: bool,
+    /// RFC 3339, UTC.
+    pub last_connected: String,
+}
+
+impl From<&firefly_client::websocket::RegisteredDevice> for DeviceView {
+    fn from(device: &firefly_client::websocket::RegisteredDevice) -> Self {
+        let last_connected = chrono::DateTime::from_timestamp_millis(device.last_connected_at_ms as i64)
+            .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+            .unwrap_or_default();
+        Self { device_id: device.device_id, name: device.name.clone(), web: device.web, last_connected }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
