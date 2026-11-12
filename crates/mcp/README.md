@@ -41,7 +41,7 @@ Several agents on one machine: give each a profile (`--profile helper`), or a da
 | `edit_message`, `delete_message`, `react` | On the account's own messages / any message |
 | `search_messages` | Full-text search over the messages on this device |
 | `respond_to_message_request` | Accept or decline a message request (replying also accepts) |
-| `create_group`, `add_group_member`, `remove_group_member`, `leave_group`, `create_join_link`, `join_group_via_link` | Group membership, as far as the group's permissions allow |
+| `create_group`, `create_channel`, `add_group_member`, `remove_group_member`, `leave_group`, `create_join_link`, `join_group_via_link` | Groups and membership, as far as the group's permissions allow (a new group has no channels until one is added) |
 
 Message ids are the server's time in microseconds. Attachments show as a count; their contents aren't available.
 
@@ -62,6 +62,16 @@ Message ids are the server's time in microseconds. Attachments show as a count; 
 | `--auth0-domain`, `--auth0-client-id`, `--auth0-audience`, `--auth0-realm` | `AUTH0_DOMAIN`, … | The tenant the server trusts |
 
 Exit code 78 means the account must sign in again: a wrong password, or a revoked or expired refresh token.
+
+## Tests
+
+`tests/e2e.rs` runs two servers against a firefly-mls in emulator mode (CI's `cargo test` step):
+
+```bash
+EMULATOR_MODE=true FIREFLY_BASE_URL=http://127.0.0.1:39209 cargo test -p firefly-mcp --features firefly-client/test-hooks
+```
+
+lupyd-testsuite's `37_mcp_agent` drives `lupyd-mcp` against the Lupyd apps.
 
 ## Look after the data directory
 

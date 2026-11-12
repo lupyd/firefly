@@ -24,3 +24,7 @@ schemars = "1.2.3"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
+
+[dev-dependencies]
+dotenv.workspace = true
+rmcp = { version = "3.9.0", features = ["client", "server", "macros"] }

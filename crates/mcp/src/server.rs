@@ -25,6 +25,9 @@ machine. Message ids are the server's time in microseconds; pass them as reply_t
 
 type ToolResult<T> = Result<Json<T>, String>;
 
+/// `FireflyGroupChannel.type` of a text channel, the apps' default.
+const TEXT_CHANNEL: u8 = 1;
+
 fn err(e: impl std::fmt::Display) -> String {
     format!("{e:#}")
 }
@@ -279,6 +282,17 @@ pub struct CreateGroup {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateChannel {
+    pub group_id: u64,
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ChannelCreated {
+    pub channel_id: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct AddMember {
     pub group_id: u64,
     pub username: String,
@@ -332,6 +346,7 @@ fn invite_code(link: &str) -> &str {
 
 struct Extension {
     name: String,
+    default_permissions: u32,
     channels: Vec<ChannelInfo>,
     roles: Vec<RoleInfo>,
     members: Vec<MemberInfo>,
@@ -343,6 +358,7 @@ impl FireflyMcp {
         let ext = firefly_protos::deserialize_proto::<firefly_protos::firefly::FireflyGroupExtension>(&bytes).map_err(err)?;
         Ok(Extension {
             name: ext.name.to_string(),
+            default_permissions: ext.default_permissions,
             channels: ext.channels.iter().map(|c| ChannelInfo { id: c.id, name: c.name.to_string() }).collect(),
             roles: ext
                 .roles
@@ -370,7 +386,7 @@ impl FireflyMcp {
 
     async fn first_channel(&self, group_id: u64) -> Result<u32, String> {
         let ext = self.extension(group_id).await?;
-        ext.channels.first().map(|c| c.id).ok_or_else(|| "this group has no channels".to_string())
+        ext.channels.first().map(|c| c.id).ok_or_else(|| "this group has no channels yet; add one with create_channel".to_string())
     }
 
     /// Sends an edit, delete or reaction to where the message is.
@@ -599,6 +615,19 @@ impl FireflyMcp {
     async fn create_group(&self, Parameters(p): Parameters<CreateGroup>) -> ToolResult<GroupSummary> {
         let group = self.agent.client.create_group(p.name, p.description.unwrap_or_default(), 0).await.map_err(err)?;
         Ok(Json(GroupSummary { group_id: group.id, name: group.name, description: group.description }))
+    }
+
+    #[tool(description = "Add a text channel to a group (needs the group's permission to manage channels). New groups have none until one is added.")]
+    async fn create_channel(&self, Parameters(p): Parameters<CreateChannel>) -> ToolResult<ChannelCreated> {
+        // As the apps do: the next free id, a text channel, the group's default permissions.
+        let ext = self.extension(p.group_id).await?;
+        let channel_id = ext.channels.iter().map(|c| c.id).max().unwrap_or(0) + 1;
+        self.agent
+            .client
+            .update_group_channel(p.group_id, channel_id, false, p.name, TEXT_CHANNEL, ext.default_permissions)
+            .await
+            .map_err(err)?;
+        Ok(Json(ChannelCreated { channel_id }))
     }
 
     #[tool(description = "Add someone to a group (needs the group's permission to manage members).")]
