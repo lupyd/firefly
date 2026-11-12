@@ -1,0 +1,26 @@
+[package]
+name = "firefly-mcp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+chrono = "0.4.45"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+dirs = "7.0.0"
+env_logger.workspace = true
+firefly-client.workspace = true
+firefly-core.workspace = true
+firefly-protos.workspace = true
+log.workspace = true
+quick-protobuf.workspace = true
+rand.workspace = true
+reqwest = { workspace = true, features = ["rustls-tls", "json"] }
+rmcp = { version = "3.9.0", features = ["server", "transport-io", "macros", "schemars"] }
+rpassword = "7.5.5"
+schemars = "1.2.3"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
