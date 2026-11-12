@@ -775,10 +775,31 @@ impl KeyStores {
         let identity_key_pair = full_identity_key_pair.keypair;
         let registration_id = full_identity_key_pair.registration_id;
 
+        // Saving replaces a key with the same id, and a peer may still be about to use the old
+        // one (its PreKey message would then fail with a bad MAC), so take ids not in use.
         const MAX_KEY_ID: u32 = 32000;
-        let pre_key_id = rng.next_u32() % MAX_KEY_ID;
-        let kyber_key_id = rng.next_u32() % MAX_KEY_ID;
-        let signed_pre_key_id = rng.next_u32() % MAX_KEY_ID;
+        const ATTEMPTS: usize = 64;
+        let mut pre_key_id = rng.next_u32() % MAX_KEY_ID;
+        for _ in 0..ATTEMPTS {
+            if self.prekey_store.get_pre_key(PreKeyId::from(pre_key_id)).await.is_err() {
+                break;
+            }
+            pre_key_id = rng.next_u32() % MAX_KEY_ID;
+        }
+        let mut kyber_key_id = rng.next_u32() % MAX_KEY_ID;
+        for _ in 0..ATTEMPTS {
+            if self.kyber_key_store.get_kyber_pre_key(KyberPreKeyId::from(kyber_key_id)).await.is_err() {
+                break;
+            }
+            kyber_key_id = rng.next_u32() % MAX_KEY_ID;
+        }
+        let mut signed_pre_key_id = rng.next_u32() % MAX_KEY_ID;
+        for _ in 0..ATTEMPTS {
+            if self.signed_prekey_store.get_signed_pre_key(SignedPreKeyId::from(signed_pre_key_id)).await.is_err() {
+                break;
+            }
+            signed_pre_key_id = rng.next_u32() % MAX_KEY_ID;
+        }
 
         let pre_key = KeyPair::generate(&mut rng);
 
