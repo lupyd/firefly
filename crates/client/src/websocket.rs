@@ -1361,6 +1361,9 @@ impl FireflyWsClient {
     #[cfg(not(target_arch = "wasm32"))]
     async fn connect_ws(&self, base_ws: &str, query: &str) -> anyhow::Result<WsStream> {
         let url = format!("{}/?{}", base_ws.trim_end_matches('/'), query);
+        // tokio-tungstenite's wss:// uses the process-wide rustls provider, which panics when
+        // none is installed (the apps install one at startup; firefly-mcp and other hosts don't).
+        let _ = rustls::crypto::ring::default_provider().install_default();
         // On a network that drops packets the TCP handshake alone can take minutes to fail,
         // which would hold up reconnecting once the network is back.
         let connected = crate::rt::timeout(WS_CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&url))
