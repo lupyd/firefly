@@ -3,6 +3,7 @@ export type { MlsKeyPackageStorage, MlsGroupStateStorage, MlsPreSharedKeyStorage
 export { UserPermission, DEFAULT_GROUP_PERMISSIONS } from 'firefly-client-node';
 export interface ClientConfig {
     port?: number;
+    redirector?: string;
     auth0Domain?: string;
     auth0ClientId?: string;
     auth0Audience?: string;
@@ -69,6 +70,7 @@ export declare class FireflyClient {
     private auth0Domain;
     private auth0ClientId;
     private auth0Audience;
+    private redirector;
     private redirectUri;
     private apiBaseUrl;
     private wsUrl;

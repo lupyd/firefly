@@ -119,7 +119,8 @@ class FireflyClient {
     auth0Domain;
     auth0ClientId;
     auth0Audience;
-    redirectUri;
+    redirector;
+    redirectUri = '';
     apiBaseUrl;
     wsUrl;
     emulatorMode;
@@ -140,11 +141,11 @@ class FireflyClient {
     session;
     constructor(options = {}) {
         this.config = options;
-        this.port = options.port || 38295;
+        this.port = options.port ?? (Number(process.env.FIREFLY_AUTH_PORT) || 0);
         this.auth0Domain = options.auth0Domain || 'https://auth.lupyd.com';
         this.auth0ClientId = options.auth0ClientId || 'GnfEyGY0JdD0Oige2HSpeErcaWLrvObm';
         this.auth0Audience = options.auth0Audience || 'https://lupyd.com';
-        this.redirectUri = `http://localhost:${this.port}/callback`;
+        this.redirector = options.redirector ?? process.env.FIREFLY_AUTH_REDIRECTOR ?? 'https://lr.lupyd.com';
         this.apiBaseUrl = options.apiBaseUrl || process.env.FIREFLY_BASE_URL || 'https://firefly.lupyd.com';
         // With only the HTTP URL changed, use the same server for the websocket rather than
         // quietly mixing a local server with production
@@ -565,7 +566,7 @@ class FireflyClient {
             const { verifier, challenge } = generatePkce();
             const state = base64url(crypto.randomBytes(16));
             const server = http.createServer(async (req, res) => {
-                const reqUrl = new URL(req.url || '', `http://localhost:${this.port}`);
+                const reqUrl = new URL(req.url || '', 'http://127.0.0.1');
                 if (reqUrl.pathname === '/callback') {
                     const code = reqUrl.searchParams.get('code');
                     const returnedState = reqUrl.searchParams.get('state');
@@ -605,7 +606,16 @@ class FireflyClient {
                     }
                 }
             });
+            server.on('error', (err) => reject(new Error(`Can't listen for the sign-in callback on 127.0.0.1:${this.port}: ${err?.message ?? err}`)));
             server.listen(this.port, '127.0.0.1', () => {
+                // Port 0 means the system picked a free one
+                const addr = server.address();
+                const port = addr && typeof addr === "object" ? addr.port : this.port;
+                const loopback = `http://127.0.0.1:${port}/callback`;
+                // Auth0 only redirects to lr.lupyd.com, which forwards loopback callbacks on any port
+                this.redirectUri = this.redirector
+                    ? `${this.redirector}?l_redirect_to=${encodeURIComponent(loopback)}`
+                    : loopback;
                 const authUrl = `${this.auth0Domain}/authorize?` + new URLSearchParams({
                     client_id: this.auth0ClientId,
                     audience: this.auth0Audience,
@@ -618,7 +628,7 @@ class FireflyClient {
                 }).toString();
                 // Always print the link: on a server the browser may not open, and the person signs in
                 // from their own computer through an SSH tunnel to this port
-                console.log(`Opening browser for Auth0 Sign In. If it doesn't open, open this link (it must reach localhost:${this.port} on this machine):\n\n${authUrl}\n`);
+                console.log(`Opening browser for Auth0 Sign In, waiting on 127.0.0.1:${port}. If it doesn't open, open this link in a browser on this machine, or through an SSH tunnel to port ${port} (fix the port with FIREFLY_AUTH_PORT):\n\n${authUrl}\n`);
                 openBrowser(authUrl);
             });
         });
