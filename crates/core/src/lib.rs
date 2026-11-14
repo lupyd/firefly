@@ -1228,6 +1228,43 @@ impl FireflyMlsGroup {
     }
 }
 
+/// Reasons a member's device disputes a commit (`GroupCommitReport.reason`). The server can't
+/// check any of these (it holds no epoch secrets), and each is the committer's doing: a bad tag
+/// fails for every member alike, a path secret that doesn't decrypt or match only for the members
+/// it was encrypted to. 0 means the device applied the commit.
+pub const COMMIT_APPLIED: u32 = 0;
+pub const COMMIT_DISPUTE_MEMBERSHIP_TAG: u32 = 1;
+pub const COMMIT_DISPUTE_CONFIRMATION_TAG: u32 = 2;
+pub const COMMIT_DISPUTE_PATH_SECRET: u32 = 3;
+
+/// Whether processing a commit failed for a reason a member disputes (see [`COMMIT_APPLIED`]).
+/// Other failures (an identity the device's clock already finds expired, storage, ...) are this
+/// device's own and never undo a commit for everyone.
+pub fn commit_dispute_reason(err: &anyhow::Error) -> Option<u32> {
+    match err.downcast_ref::<mls_rs::error::MlsError>()? {
+        mls_rs::error::MlsError::InvalidMembershipTag => Some(COMMIT_DISPUTE_MEMBERSHIP_TAG),
+        mls_rs::error::MlsError::InvalidConfirmationTag => Some(COMMIT_DISPUTE_CONFIRMATION_TAG),
+        // The path secret encrypted to this member doesn't decrypt (HPKE), or doesn't derive the
+        // public keys the commit put in the tree.
+        mls_rs::error::MlsError::PubKeyMismatch | mls_rs::error::MlsError::CryptoProviderError(_) => {
+            Some(COMMIT_DISPUTE_PATH_SECRET)
+        }
+        _ => None,
+    }
+}
+
+/// The epoch a commit was made in (the group's epoch before it), or None for anything else.
+pub fn commit_epoch(message: &MlsMessage) -> Option<u64> {
+    match message.description() {
+        mls_rs::MlsMessageDescription::PublicProtocolMessage {
+            epoch_id,
+            content_type: mls_rs::group::ContentType::Commit,
+            ..
+        } => Some(epoch_id),
+        _ => None,
+    }
+}
+
 pub fn is_application_message(message: &MlsMessage) -> bool {
     matches!(
         message.description(),

@@ -2997,6 +2997,7 @@ impl FireflyWsClient {
                     &self.key_value_store,
                     &self.callbacks,
                     false,
+                    &CommitReports::new(&self.firefly_base_url, addressId),
                 )
                 .await
                 {
@@ -4137,6 +4138,7 @@ impl FireflyWsClient {
 
         log::info!("joined group: {}", invite.groupId);
         group.save().await.map_err(|e| anyhow::anyhow!(e))?;
+        forget_applied_commit(&self.key_value_store, groupId).await;
 
         let url = format!("{}/group?id={}", self.firefly_base_url, groupId);
         let response = HTTP_CLIENT.get(url).bearer_auth(token).send().await?;
@@ -5953,6 +5955,178 @@ async fn sync_group_members(
     crate::members::sync_group_members(group, key_value_store, callbacks.as_ref()).await;
 }
 
+/// Where this device reports how commits went (see firefly-core's `COMMIT_APPLIED`).
+#[derive(Clone)]
+pub(crate) struct CommitReports {
+    base_url: String,
+    address_id: u64,
+}
+
+impl CommitReports {
+    pub(crate) fn new(base_url: &str, address_id: u64) -> Self {
+        Self { base_url: base_url.to_string(), address_id }
+    }
+
+    /// Sends a `GroupCommitReport` in the background. Servers without commit disputes answer
+    /// 404, which changes nothing.
+    fn send(
+        &self,
+        callbacks: &Arc<dyn FireflyWsClientCallback>,
+        group_id: u64,
+        commit_id: u64,
+        epoch: u32,
+        reason: u32,
+    ) {
+        if self.address_id == 0 || commit_id == 0 {
+            return;
+        }
+        let this = self.clone();
+        let callbacks = callbacks.clone();
+        crate::rt::spawn(async move {
+            match this.report(&callbacks, group_id, commit_id, epoch, reason).await {
+                Ok(status) if reason != firefly_core::COMMIT_APPLIED => log::info!(
+                    "group {group_id}: dispute of commit {commit_id} answered {status}"
+                ),
+                Ok(_) => {}
+                Err(err) => log::warn!("group {group_id}: reporting commit {commit_id} failed: {err:#}"),
+            }
+        });
+    }
+
+    async fn report(
+        &self,
+        callbacks: &Arc<dyn FireflyWsClientCallback>,
+        group_id: u64,
+        commit_id: u64,
+        epoch: u32,
+        reason: u32,
+    ) -> anyhow::Result<reqwest::StatusCode> {
+        let token = callbacks.get_access_token().await.context("token not found")?;
+        let body = serialize_proto(&firefly::GroupCommitReport {
+            group_id,
+            commit_id,
+            epoch,
+            address: self.address_id,
+            reason,
+        })?;
+        let response = HTTP_CLIENT
+            .post(format!("{}/group/commit/report", self.base_url))
+            .bearer_auth(token)
+            .body(body)
+            .send()
+            .await?;
+        Ok(response.status())
+    }
+
+    /// This device can't follow the group any more: ask its members to add it again (the usual
+    /// re-add; a Welcome then replaces the local group state). At most every 5 minutes per group.
+    async fn ask_to_be_re_added(
+        &self,
+        callbacks: &Arc<dyn FireflyWsClientCallback>,
+        key_value_store: &KeyValueStore,
+        group_id: u64,
+    ) {
+        const INTERVAL_MS: u64 = 5 * 60_000;
+        let key = format!("group_commit_readd_asked_at:{group_id}");
+        let now = crate::utils::get_current_timestamp_millis_since_epoch();
+        let last = key_value_store
+            .get(&key)
+            .await
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        if now.saturating_sub(last) < INTERVAL_MS || self.address_id == 0 {
+            return;
+        }
+        let _ = key_value_store.set(&key, &now.to_string()).await;
+        let result: anyhow::Result<()> = async {
+            let token = callbacks.get_access_token().await.context("token not found")?;
+            let response = HTTP_CLIENT
+                .post(format!("{}/group/reAdd?address_id={}", self.base_url, self.address_id))
+                .bearer_auth(token)
+                .body(serde_json::to_vec(&[group_id])?)
+                .send()
+                .await?;
+            if !response.status().is_success() {
+                anyhow::bail!("[{}] {}", response.status(), response.text().await.unwrap_or_default());
+            }
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => log::info!("group {group_id}: asked to be re-added"),
+            Err(err) => log::warn!("group {group_id}: asking to be re-added failed: {err:#}"),
+        }
+    }
+}
+
+fn applied_commit_key(group_id: u64) -> String {
+    format!("group_commit_applied:{group_id}")
+}
+
+fn commit_digest(message: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(message))
+}
+
+/// Remembers which commit took the group to `epoch` on this device.
+async fn remember_applied_commit(key_value_store: &KeyValueStore, group_id: u64, epoch: u64, message: &[u8]) {
+    let value = format!("{epoch}:{}", commit_digest(message));
+    if let Err(err) = key_value_store.set(&applied_commit_key(group_id), &value).await {
+        log::warn!("group {group_id}: remembering the applied commit failed: {err:#}");
+    }
+}
+
+/// After joining from a Welcome: no commit of this device's led to its epoch.
+async fn forget_applied_commit(key_value_store: &KeyValueStore, group_id: u64) {
+    if let Err(err) = key_value_store.set(&applied_commit_key(group_id), "").await {
+        log::warn!("group {group_id}: clearing the applied commit failed: {err:#}");
+    }
+}
+
+/// Whether this device applied a commit other than `message` to reach `epoch`. Unknown (e.g. the
+/// device's own commits, a Welcome, or ones applied before this was recorded) counts as no.
+async fn applied_other_commit(key_value_store: &KeyValueStore, group_id: u64, epoch: u64, message: &[u8]) -> bool {
+    let Ok(value) = key_value_store.get(&applied_commit_key(group_id)).await else {
+        return false;
+    };
+    let Some((stored_epoch, digest)) = value.split_once(':') else {
+        return false;
+    };
+    stored_epoch.parse::<u64>().ok() == Some(epoch) && digest != commit_digest(message)
+}
+
+/// The server withdrew a commit (see `GroupCommitWithdrawn`). A device that applied it is past the
+/// group's epoch for good and asks to be re-added.
+async fn on_group_commit_withdrawn(
+    withdrawn: &firefly::GroupCommitWithdrawn,
+    firefly_mls_client: &FfiMlsClient,
+    group_info_store: &GroupInfoStore,
+    key_value_store: &KeyValueStore,
+    callbacks: &Arc<dyn FireflyWsClientCallback>,
+    reports: &CommitReports,
+) -> anyhow::Result<()> {
+    let group_id = withdrawn.group_id;
+    let Ok(info) = group_info_store.get(group_id).await else {
+        return Ok(());
+    };
+    let group = firefly_mls_client
+        .load_group(group_id, info.identifier)
+        .await
+        .map_err(|err| anyhow::anyhow!(err))?;
+    let epoch = group.epoch().await;
+    log::info!(
+        "group {group_id}: commit {} withdrawn, group back at epoch {}, this device at {epoch}",
+        withdrawn.commit_id,
+        withdrawn.epoch
+    );
+    if epoch > withdrawn.epoch as u64 {
+        reports.ask_to_be_re_added(callbacks, key_value_store, group_id).await;
+    }
+    callbacks.on_group_updated(group_id).await;
+    Ok(())
+}
+
 async fn on_group_message(
     msg: &firefly::GroupMessage<'_>,
     firefly_mls_client: &FfiMlsClient,
@@ -5962,6 +6136,7 @@ async fn on_group_message(
     key_value_store: &KeyValueStore,
     callbacks: &Arc<dyn FireflyWsClientCallback>,
     is_commit: bool,
+    reports: &CommitReports,
 ) -> anyhow::Result<()> {
     let _ = key_value_store
         .update_last_received_message_id(msg.id)
@@ -5996,8 +6171,27 @@ async fn on_group_message(
     // Commits from an earlier epoch are applied already. An application message from one can
     // still be read (sent just before a commit this device applied first, its own above all);
     // the group refuses it if a leaf changed hands since.
-    let application = mls_rs::MlsMessage::from_bytes(&msg.message)
-        .is_ok_and(|message| firefly_core::is_application_message(&message));
+    let parsed = mls_rs::MlsMessage::from_bytes(&msg.message).ok();
+    let application = parsed
+        .as_ref()
+        .is_some_and(|message| firefly_core::is_application_message(message));
+    // For a commit, the epoch it was made in (msg.epoch is the epoch it led to, or for copies
+    // kept with the messages the epoch it was made in).
+    let commit_epoch = parsed.as_ref().and_then(firefly_core::commit_epoch);
+    if let Some(made_in) = commit_epoch {
+        if made_in + 1 == current_epoch {
+            // The commit that led to this device's epoch. If this device applied a different
+            // one, it is on a branch the group dropped (that commit was withdrawn).
+            if applied_other_commit(key_value_store, groupId, current_epoch, &msg.message).await {
+                log::warn!(
+                    "group {} epoch {}: this device applied a different commit than the group's {}; asking to be re-added",
+                    groupId, current_epoch, msg.id
+                );
+                reports.ask_to_be_re_added(callbacks, key_value_store, groupId).await;
+            }
+            return Ok(());
+        }
+    }
     if msg.epoch < current_epoch as u32 && !application {
         log::info!("Skipping old message (group {} id {})", groupId, msg.id);
         return Ok(());
@@ -6020,7 +6214,23 @@ async fn on_group_message(
             group_message_store.update_cursor(msg.id, groupId, group.epoch().await as u32).await?;
             return Ok(());
         }
-        Err(err) => return Err(err),
+        Err(err) => {
+            // A commit made in this device's epoch that it can't process for a reason the server
+            // can't check (a bad tag or path secret): dispute it, so the group can drop it
+            // instead of leaving this device behind for good.
+            if let (Some(made_in), Some(reason)) =
+                (commit_epoch, firefly_core::commit_dispute_reason(&err))
+            {
+                if made_in == current_epoch {
+                    log::warn!(
+                        "group {} commit {} (epoch {}) can't be processed ({:?}); disputing it",
+                        groupId, msg.id, made_in, err
+                    );
+                    reports.send(callbacks, groupId, msg.id, made_in as u32, reason);
+                }
+            }
+            return Err(err);
+        }
     };
 
     let epoch = group.epoch().await as u32;
@@ -6149,6 +6359,14 @@ async fn on_group_message(
             }
         }
         crate::group::FireflyMlsReceivedMessage::Commit => {
+            remember_applied_commit(key_value_store, groupId, epoch as u64, &msg.message).await;
+            // Confirms the commit to the server: it may no longer be withdrawn. Ids are server
+            // microsecond times; the server counts commits older than a week as confirmed anyway.
+            let week_us = 7 * 24 * 60 * 60 * 1_000_000u64;
+            let recent = get_current_timestamp_microseconds_since_epoch().saturating_sub(msg.id) < week_us;
+            if let (Some(made_in), true) = (commit_epoch, recent) {
+                reports.send(callbacks, groupId, msg.id, made_in as u32, firefly_core::COMMIT_APPLIED);
+            }
             group_message_store
                 .update_cursor(msg.id, msg.groupId, epoch)
                 .await?;
@@ -6758,6 +6976,8 @@ async fn join_group_internal(
     .await?;
 
     log::info!("joined group from invite: {}", invite.groupId);
+    // The group state now comes from the Welcome, not from commits this device applied.
+    forget_applied_commit(key_value_store, group_id).await;
     group.save().await.map_err(|e| anyhow::anyhow!(e))?;
 
     let url = format!("{}/group?id={}", firefly_base_url, group_id);
@@ -6940,6 +7160,7 @@ async fn on_server_message(
                 key_value_store,
                 callbacks,
                 false,
+                &CommitReports::new(firefly_base_url, address_id),
             )
             .await
             {
@@ -6974,6 +7195,7 @@ async fn on_server_message(
                     key_value_store,
                     callbacks,
                     true,
+                    &CommitReports::new(firefly_base_url, address_id),
                 )
                 .await
                 {
@@ -7030,6 +7252,7 @@ async fn on_server_message(
                     key_value_store,
                     callbacks,
                     true,
+                    &CommitReports::new(firefly_base_url, address_id),
                 )
                 .await
                 {
@@ -7234,6 +7457,20 @@ async fn on_server_message(
                         .await?;
                 }
                 callbacks.on_group_updated(update.group_id).await;
+            }
+        }
+        firefly::mod_ServerMessage::OneOfmessage::groupCommitWithdrawn(withdrawn) => {
+            if let Err(err) = on_group_commit_withdrawn(
+                &withdrawn,
+                firefly_mls_client,
+                group_info_store,
+                key_value_store,
+                callbacks,
+                &CommitReports::new(firefly_base_url, address_id),
+            )
+            .await
+            {
+                log::warn!("handling a withdrawn commit failed: {err:#}");
             }
         }
         firefly::mod_ServerMessage::OneOfmessage::pong(_pong_bytes) => {}
