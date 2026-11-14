@@ -21,7 +21,7 @@ use crate::utils::get_current_timestamp_millis_since_epoch;
 
 /// Highest migration version defined in `run_migrations`. Bump this whenever a migration is
 /// appended, otherwise the fast path will skip the new migration on already-upgraded databases.
-pub const LATEST_MIGRATION_VERSION: i64 = 8;
+pub const LATEST_MIGRATION_VERSION: i64 = 9;
 
 /// Rows per batch for data backfills (keeps memory and lock hold times bounded).
 const MIGRATION_BATCH_SIZE: i64 = 500;
@@ -536,6 +536,56 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
         let now = get_current_timestamp_millis_since_epoch() as i64;
         crate::sql::query("INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (8, 'group_departed_members_v8', ?)")
+            .bind(now)
+            .execute(pool)
+            .await?;
+    }
+
+    // Migration v9: which of the account's other devices this device trusts with its history
+    // (see `own_devices`). The account's devices this device already exchanged messages with
+    // (an address and an identity key here) are trusted now, pinned to that key; devices only
+    // the server knows of are trusted on the next connect. Additive: older app versions ignore
+    // the table.
+    let v9_applied: Option<i64> =
+        crate::sql::query_scalar("SELECT 1 FROM _schema_migrations WHERE version = 9")
+            .fetch_optional(pool)
+            .await?;
+    if v9_applied.is_none() {
+        pool.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS own_device_trust (
+                address_id INTEGER PRIMARY KEY,
+                device_id INTEGER NOT NULL,
+                identity_key BLOB,
+                state INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            "#,
+        )
+        .await?;
+        let now = get_current_timestamp_millis_since_epoch() as i64;
+        if table_exists(pool, "identity_keypair").await?
+            && table_exists(pool, "addresses").await?
+            && table_exists(pool, "identities").await?
+            && get_table_columns(pool, "identity_keypair").await?.contains("username")
+        {
+            crate::sql::query(
+                r#"
+                INSERT OR IGNORE INTO own_device_trust (address_id, device_id, identity_key, state, updated_at)
+                SELECT a.id, a.device_id,
+                       (SELECT i.identity_key FROM identities i WHERE i.address = a.username || '.' || a.device_id),
+                       1, ?
+                FROM addresses a
+                WHERE a.username = (SELECT username FROM identity_keypair LIMIT 1)
+                  AND a.username <> ''
+                  AND a.id <> (SELECT id FROM identity_keypair LIMIT 1)
+                "#,
+            )
+            .bind(now)
+            .execute(pool)
+            .await?;
+        }
+        crate::sql::query("INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (9, 'own_device_trust_v9', ?)")
             .bind(now)
             .execute(pool)
             .await?;

@@ -296,9 +296,22 @@ impl FireflyMlsClient {
         group_id: u64,
         welcome_message: Vec<u8>,
     ) -> anyhow::Result<FireflyMlsGroup> {
+        Ok(self.join_group_with_adder(group_id, welcome_message).await?.0)
+    }
+
+    /// Like [`Self::join_group`], also returning the username of the member whose commit added
+    /// this device (the signer of the Welcome's GroupInfo), or None when it can't be read.
+    pub async fn join_group_with_adder(
+        &self,
+        group_id: u64,
+        welcome_message: Vec<u8>,
+    ) -> anyhow::Result<(FireflyMlsGroup, Option<String>)> {
         let welcome_message: MlsMessage = MlsMessage::mls_decode(&mut welcome_message.as_slice())?;
 
-        let (group, _) = self.client.join_group(None, &welcome_message, None).await?;
+        let (group, info) = self.client.join_group(None, &welcome_message, None).await?;
+        let adder = group
+            .member_at_index(info.sender)
+            .and_then(|member| get_username_from_signing_identity(&member.signing_identity).ok());
         // the Welcome is the only point a group context is taken without our MlsRules vetting it
         let extension = group
             .context()
@@ -308,11 +321,9 @@ impl FireflyMlsClient {
         if !extension.deserialize()?.is_valid() {
             return Err(anyhow::anyhow!("welcome carries an invalid firefly group extension"));
         }
-        Ok(FireflyMlsGroup::new(
-            group_id,
-            group,
-            self.base_url.clone(),
-            self.auth_token_callbacks.clone(),
+        Ok((
+            FireflyMlsGroup::new(group_id, group, self.base_url.clone(), self.auth_token_callbacks.clone()),
+            adder,
         ))
     }
 
@@ -636,6 +647,28 @@ impl FireflyMlsGroup {
             }
         }
         Ok(true)
+    }
+
+    /// Whether `username` may pin messages in every channel (the owner always may): only such a
+    /// member's pin snapshot capability is applied by a device that is not being handed history.
+    pub async fn can_pin_everywhere(&self, username: &str) -> anyhow::Result<bool> {
+        let group = self.group.lock().await;
+        let extension = group
+            .context()
+            .extensions()
+            .get_as::<FireflyGroupExtension>()?
+            .context("no firefly extension on group")?;
+        let wrapper = extension.deserialize()?;
+        if wrapper.get_role_of_user(username).unwrap_or(0) == 1 {
+            return Ok(true);
+        }
+        let pin = config::UserPermission::PinMessage as u32;
+        Ok(rules::has_permission(rules::FireflyMlsRules::message_permissions(&wrapper, username, 0), pin)
+            && wrapper
+                .inner()
+                .channels
+                .iter()
+                .all(|ch| rules::has_permission(rules::FireflyMlsRules::message_permissions(&wrapper, username, ch.id), pin)))
     }
 
     pub async fn is_owner(&self) -> anyhow::Result<bool> {

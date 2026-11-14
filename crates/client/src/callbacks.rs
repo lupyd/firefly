@@ -62,6 +62,16 @@ pub struct DirectHistoryPage {
     pub has_more: bool,
 }
 
+/// Another device of this account that the user has not approved (see
+/// `FireflyWsClient::trust_own_device`) asked for the account's history or the direct-backup
+/// key, or announced itself. Nothing is shared with it until the user trusts it here or on
+/// another trusted device.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OwnDeviceTrustRequest {
+    pub address_id: u64,
+    pub device_id: u32,
+}
+
 #[async_trait::async_trait]
 pub trait FireflyWsClientCallback: Send + Sync {
     fn name(&self) -> &str;
@@ -111,5 +121,11 @@ pub trait FireflyWsClientCallback: Send + Sync {
     async fn on_direct_history_request(&self, _request: DirectHistoryRequest) {}
     /// Store the messages (they are older than what this device has).
     async fn on_direct_history_page(&self, _page: DirectHistoryPage) {}
+    /// Ask the user whether to trust this device of theirs (answer with `trust_own_device` or
+    /// `reject_own_device`). Repeated at most once a minute per device while it keeps asking.
+    async fn on_own_device_trust_request(&self, _request: OwnDeviceTrustRequest) {}
+    /// The user trusted or rejected a device (here or on another trusted device): close any
+    /// prompt about it and refresh device lists.
+    async fn on_own_device_trust_changed(&self) {}
 }
 

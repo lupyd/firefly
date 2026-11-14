@@ -531,6 +531,9 @@ message UserMessageInner {
     DirectPinSnapshotSecret directPinSnapshot = 8;
     // Only between devices of the same user, only to the device that asked.
     DirectHistoryPage directHistory = 9;
+    // Only between devices of the same user (inside a selfMessage): which of the account's
+    // devices the user trusts with its history, or a new device asking to be trusted.
+    OwnDeviceTrust ownDeviceTrust = 11;
   }
 
   fixed32 nonce = 10;
@@ -922,6 +925,21 @@ message DirectBackupBinding {
 }
 
 // ONLY valid inside a decrypted SelfUserMessage from the same account.
+message OwnDeviceTrustEntry {
+  uint64 address_id = 1;
+  uint32 device_id = 2;
+  // The device's Signal identity key the user approved (empty when not known yet).
+  bytes identity_key = 3;
+  bool trusted = 4;
+}
+
+message OwnDeviceTrust {
+  uint32 version = 1;
+  // The sender asks the user's other devices to be trusted (entries empty).
+  bool request = 2;
+  repeated OwnDeviceTrustEntry entries = 3;
+}
+
 message DirectBackupKeySync {
   uint32 version = 1;
   string epoch = 2;

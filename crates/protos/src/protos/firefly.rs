@@ -3232,6 +3232,7 @@ impl<'a> MessageRead<'a> for UserMessageInner<'a> {
                 Ok(58) => msg.message = firefly::mod_UserMessageInner::OneOfmessage::backupKeySync(r.read_message::<firefly::DirectBackupKeySync>(bytes)?),
                 Ok(66) => msg.message = firefly::mod_UserMessageInner::OneOfmessage::directPinSnapshot(r.read_message::<firefly::DirectPinSnapshotSecret>(bytes)?),
                 Ok(74) => msg.message = firefly::mod_UserMessageInner::OneOfmessage::directHistory(r.read_message::<firefly::DirectHistoryPage>(bytes)?),
+                Ok(90) => msg.message = firefly::mod_UserMessageInner::OneOfmessage::ownDeviceTrust(r.read_message::<firefly::OwnDeviceTrust>(bytes)?),
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -3254,6 +3255,7 @@ impl<'a> MessageWrite for UserMessageInner<'a> {
             firefly::mod_UserMessageInner::OneOfmessage::backupKeySync(ref m) => 1 + sizeof_len((m).get_size()),
             firefly::mod_UserMessageInner::OneOfmessage::directPinSnapshot(ref m) => 1 + sizeof_len((m).get_size()),
             firefly::mod_UserMessageInner::OneOfmessage::directHistory(ref m) => 1 + sizeof_len((m).get_size()),
+            firefly::mod_UserMessageInner::OneOfmessage::ownDeviceTrust(ref m) => 1 + sizeof_len((m).get_size()),
             firefly::mod_UserMessageInner::OneOfmessage::None => 0,
     }    }
 
@@ -3268,6 +3270,7 @@ impl<'a> MessageWrite for UserMessageInner<'a> {
             firefly::mod_UserMessageInner::OneOfmessage::backupKeySync(ref m) => { w.write_with_tag(58, |w| w.write_message(m))? },
             firefly::mod_UserMessageInner::OneOfmessage::directPinSnapshot(ref m) => { w.write_with_tag(66, |w| w.write_message(m))? },
             firefly::mod_UserMessageInner::OneOfmessage::directHistory(ref m) => { w.write_with_tag(74, |w| w.write_message(m))? },
+            firefly::mod_UserMessageInner::OneOfmessage::ownDeviceTrust(ref m) => { w.write_with_tag(90, |w| w.write_message(m))? },
             firefly::mod_UserMessageInner::OneOfmessage::None => {},
     }        Ok(())
     }
@@ -3287,6 +3290,7 @@ pub enum OneOfmessage<'a> {
     backupKeySync(firefly::DirectBackupKeySync<'a>),
     directPinSnapshot(firefly::DirectPinSnapshotSecret<'a>),
     directHistory(firefly::DirectHistoryPage<'a>),
+    ownDeviceTrust(firefly::OwnDeviceTrust<'a>),
     None,
 }
 
@@ -5612,6 +5616,90 @@ impl<'a> MessageWrite for DirectBackupBinding<'a> {
         if self.chunk_id != "" { w.write_with_tag(34, |w| w.write_string(&**&self.chunk_id))?; }
         if self.start != 0u64 { w.write_with_tag(40, |w| w.write_uint64(*&self.start))?; }
         if self.count != 0u32 { w.write_with_tag(48, |w| w.write_uint32(*&self.count))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct OwnDeviceTrustEntry<'a> {
+    pub address_id: u64,
+    pub device_id: u32,
+    pub identity_key: Cow<'a, [u8]>,
+    pub trusted: bool,
+}
+
+impl<'a> MessageRead<'a> for OwnDeviceTrustEntry<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.address_id = r.read_uint64(bytes)?,
+                Ok(16) => msg.device_id = r.read_uint32(bytes)?,
+                Ok(26) => msg.identity_key = r.read_bytes(bytes).map(Cow::Borrowed)?,
+                Ok(32) => msg.trusted = r.read_bool(bytes)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for OwnDeviceTrustEntry<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.address_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.address_id) as u64) }
+        + if self.device_id == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.device_id) as u64) }
+        + if self.identity_key == Cow::Borrowed(b"") { 0 } else { 1 + sizeof_len((&self.identity_key).len()) }
+        + if self.trusted == false { 0 } else { 1 + sizeof_varint(*(&self.trusted) as u64) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.address_id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.address_id))?; }
+        if self.device_id != 0u32 { w.write_with_tag(16, |w| w.write_uint32(*&self.device_id))?; }
+        if self.identity_key != Cow::Borrowed(b"") { w.write_with_tag(26, |w| w.write_bytes(&**&self.identity_key))?; }
+        if self.trusted != false { w.write_with_tag(32, |w| w.write_bool(*&self.trusted))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct OwnDeviceTrust<'a> {
+    pub version: u32,
+    pub request: bool,
+    pub entries: Vec<firefly::OwnDeviceTrustEntry<'a>>,
+}
+
+impl<'a> MessageRead<'a> for OwnDeviceTrust<'a> {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.version = r.read_uint32(bytes)?,
+                Ok(16) => msg.request = r.read_bool(bytes)?,
+                Ok(26) => msg.entries.push(r.read_message::<firefly::OwnDeviceTrustEntry>(bytes)?),
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl<'a> MessageWrite for OwnDeviceTrust<'a> {
+    fn get_size(&self) -> usize {
+        0
+        + if self.version == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.version) as u64) }
+        + if self.request == false { 0 } else { 1 + sizeof_varint(*(&self.request) as u64) }
+        + self.entries.iter().map(|s| 1 + sizeof_len((s).get_size())).sum::<usize>()
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.version != 0u32 { w.write_with_tag(8, |w| w.write_uint32(*&self.version))?; }
+        if self.request != false { w.write_with_tag(16, |w| w.write_bool(*&self.request))?; }
+        for s in &self.entries { w.write_with_tag(26, |w| w.write_message(s))?; }
         Ok(())
     }
 }

@@ -15,6 +15,7 @@ pub mod keyvalue;
 pub mod message_requests;
 pub mod messages;
 pub mod migrations;
+pub mod own_devices;
 pub mod search;
 pub mod stores;
 
