@@ -5143,6 +5143,7 @@ impl FireflyWsClient {
             &self.group_info_store,
             &self.group_messages_store,
             &self.callbacks,
+            &self.firefly_base_url,
         )
         .await;
         Ok(())
@@ -7191,12 +7192,40 @@ async fn forget_group_locally(
 /// `(group, username)` asked to leave. This user's own devices drop the group; a device that may
 /// remove the user commits their removal. Several members may try at once: one commit lands and
 /// the others find the user already gone, or fail on the stale epoch and leave it to the winner.
+/// Whether the server still holds `username`'s leave request for `group_id`. It deletes a request
+/// as soon as the user is out of the roster, so a request another device (often another of our
+/// own) already carried out is gone. Unknown (server unreachable, older server) counts as still
+/// pending, as before.
+async fn leave_request_pending(
+    firefly_base_url: &str,
+    callbacks: &Arc<dyn FireflyWsClientCallback>,
+    group_id: u64,
+    username: &str,
+) -> bool {
+    let Some(token) = callbacks.get_access_token().await else { return true };
+    let Ok(resp) = HTTP_CLIENT
+        .get(format!("{firefly_base_url}/group/leaves"))
+        .bearer_auth(token)
+        .send()
+        .await
+    else {
+        return true;
+    };
+    if !resp.status().is_success() {
+        return true;
+    }
+    let Ok(bytes) = resp.bytes().await else { return true };
+    let Ok(requests) = deserialize_proto::<firefly::GroupLeaveRequests<'_>>(&bytes) else { return true };
+    requests.requests.iter().any(|r| r.group_id == group_id && r.username == username)
+}
+
 async fn handle_group_leave_requests(
     requests: Vec<(u64, String)>,
     firefly_mls_client: &Arc<FfiMlsClient>,
     group_info_store: &GroupInfoStore,
     group_messages_store: &GroupMessagesStore,
     callbacks: &Arc<dyn FireflyWsClientCallback>,
+    firefly_base_url: &str,
 ) {
     let me = firefly_mls_client.username();
     for (group_id, username) in requests {
@@ -7222,6 +7251,12 @@ async fn handle_group_leave_requests(
             }
         };
         if !group.member_device_addresses().await.iter().any(|(_, _, u)| *u == username) {
+            continue;
+        }
+        // During the jitter another member (or another of our own devices) may have removed them
+        // and someone may have added them back: a stale request must not remove them again.
+        if !leave_request_pending(firefly_base_url, callbacks, group_id, &username).await {
+            log::info!("leave request of {username} in group {group_id} was already carried out");
             continue;
         }
         match group.kick_member(username.clone()).await {
@@ -7600,8 +7635,9 @@ async fn on_server_message(
             let gis = group_info_store.clone();
             let gms = group_message_store.clone();
             let cb = callbacks.clone();
+            let base_url = firefly_base_url.to_string();
             crate::rt::spawn(async move {
-                handle_group_leave_requests(requests, &mls, &gis, &gms, &cb).await;
+                handle_group_leave_requests(requests, &mls, &gis, &gms, &cb, &base_url).await;
             });
         }
         firefly::mod_ServerMessage::OneOfmessage::groupUpdated(update) => {
