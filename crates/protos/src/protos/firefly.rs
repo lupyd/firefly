@@ -1018,6 +1018,94 @@ impl<'a> MessageWrite for GroupCommits<'a> {
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Default, PartialEq, Clone)]
+pub struct GroupCommitReport {
+    pub group_id: u64,
+    pub commit_id: u64,
+    pub epoch: u32,
+    pub address: u64,
+    pub reason: u32,
+}
+
+impl<'a> MessageRead<'a> for GroupCommitReport {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.group_id = r.read_uint64(bytes)?,
+                Ok(17) => msg.commit_id = r.read_fixed64(bytes)?,
+                Ok(24) => msg.epoch = r.read_uint32(bytes)?,
+                Ok(32) => msg.address = r.read_uint64(bytes)?,
+                Ok(40) => msg.reason = r.read_uint32(bytes)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl MessageWrite for GroupCommitReport {
+    fn get_size(&self) -> usize {
+        0
+        + if self.group_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.group_id) as u64) }
+        + if self.commit_id == 0u64 { 0 } else { 1 + 8 }
+        + if self.epoch == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.epoch) as u64) }
+        + if self.address == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.address) as u64) }
+        + if self.reason == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.reason) as u64) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.group_id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.group_id))?; }
+        if self.commit_id != 0u64 { w.write_with_tag(17, |w| w.write_fixed64(*&self.commit_id))?; }
+        if self.epoch != 0u32 { w.write_with_tag(24, |w| w.write_uint32(*&self.epoch))?; }
+        if self.address != 0u64 { w.write_with_tag(32, |w| w.write_uint64(*&self.address))?; }
+        if self.reason != 0u32 { w.write_with_tag(40, |w| w.write_uint32(*&self.reason))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct GroupCommitWithdrawn {
+    pub group_id: u64,
+    pub commit_id: u64,
+    pub epoch: u32,
+}
+
+impl<'a> MessageRead<'a> for GroupCommitWithdrawn {
+    fn from_reader(r: &mut BytesReader, bytes: &'a [u8]) -> Result<Self> {
+        let mut msg = Self::default();
+        while !r.is_eof() {
+            match r.next_tag(bytes) {
+                Ok(8) => msg.group_id = r.read_uint64(bytes)?,
+                Ok(17) => msg.commit_id = r.read_fixed64(bytes)?,
+                Ok(24) => msg.epoch = r.read_uint32(bytes)?,
+                Ok(t) => { r.read_unknown(bytes, t)?; }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(msg)
+    }
+}
+
+impl MessageWrite for GroupCommitWithdrawn {
+    fn get_size(&self) -> usize {
+        0
+        + if self.group_id == 0u64 { 0 } else { 1 + sizeof_varint(*(&self.group_id) as u64) }
+        + if self.commit_id == 0u64 { 0 } else { 1 + 8 }
+        + if self.epoch == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.epoch) as u64) }
+    }
+
+    fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
+        if self.group_id != 0u64 { w.write_with_tag(8, |w| w.write_uint64(*&self.group_id))?; }
+        if self.commit_id != 0u64 { w.write_with_tag(17, |w| w.write_fixed64(*&self.commit_id))?; }
+        if self.epoch != 0u32 { w.write_with_tag(24, |w| w.write_uint32(*&self.epoch))?; }
+        Ok(())
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Default, PartialEq, Clone)]
 pub struct GroupCommitSyncRequest {
     pub group_id: u64,
     pub epoch: u32,
@@ -1963,6 +2051,7 @@ impl<'a> MessageRead<'a> for ServerMessage<'a> {
                 Ok(186) => msg.message = firefly::mod_ServerMessage::OneOfmessage::directHistoryRequest(r.read_message::<firefly::DirectHistoryRequest>(bytes)?),
                 Ok(194) => msg.message = firefly::mod_ServerMessage::OneOfmessage::groupLeaveRequests(r.read_message::<firefly::GroupLeaveRequests>(bytes)?),
                 Ok(202) => msg.message = firefly::mod_ServerMessage::OneOfmessage::groupUpdated(r.read_message::<firefly::GroupUpdated>(bytes)?),
+                Ok(242) => msg.message = firefly::mod_ServerMessage::OneOfmessage::groupCommitWithdrawn(r.read_message::<firefly::GroupCommitWithdrawn>(bytes)?),
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -1993,6 +2082,7 @@ impl<'a> MessageWrite for ServerMessage<'a> {
             firefly::mod_ServerMessage::OneOfmessage::directHistoryRequest(ref m) => 2 + sizeof_len((m).get_size()),
             firefly::mod_ServerMessage::OneOfmessage::groupLeaveRequests(ref m) => 2 + sizeof_len((m).get_size()),
             firefly::mod_ServerMessage::OneOfmessage::groupUpdated(ref m) => 2 + sizeof_len((m).get_size()),
+            firefly::mod_ServerMessage::OneOfmessage::groupCommitWithdrawn(ref m) => 2 + sizeof_len((m).get_size()),
             firefly::mod_ServerMessage::OneOfmessage::None => 0,
     }    }
 
@@ -2015,6 +2105,7 @@ impl<'a> MessageWrite for ServerMessage<'a> {
             firefly::mod_ServerMessage::OneOfmessage::directHistoryRequest(ref m) => { w.write_with_tag(186, |w| w.write_message(m))? },
             firefly::mod_ServerMessage::OneOfmessage::groupLeaveRequests(ref m) => { w.write_with_tag(194, |w| w.write_message(m))? },
             firefly::mod_ServerMessage::OneOfmessage::groupUpdated(ref m) => { w.write_with_tag(202, |w| w.write_message(m))? },
+            firefly::mod_ServerMessage::OneOfmessage::groupCommitWithdrawn(ref m) => { w.write_with_tag(242, |w| w.write_message(m))? },
             firefly::mod_ServerMessage::OneOfmessage::None => {},
     }        Ok(())
     }
@@ -2044,6 +2135,7 @@ pub enum OneOfmessage<'a> {
     directHistoryRequest(firefly::DirectHistoryRequest<'a>),
     groupLeaveRequests(firefly::GroupLeaveRequests<'a>),
     groupUpdated(firefly::GroupUpdated<'a>),
+    groupCommitWithdrawn(firefly::GroupCommitWithdrawn),
     None,
 }
 

@@ -122,6 +122,32 @@ message GroupCommits {
   repeated GroupCommit commits = 1;
 }
 
+// POST /group/commit/report (servers with commit disputes; older ones answer 404). A device
+// tells the server how a commit went for it. The server can't check a commit's membership or
+// confirmation tag, nor the path secrets encrypted to each member (it holds no epoch secrets), so
+// a commit that is broken in one of those ways would otherwise move the server on while the
+// members stay behind. `reason` 0 means the device applied the commit (it confirms the commit);
+// any other value disputes it (see COMMIT_DISPUTE_* in firefly-core). A commit nobody but its
+// committer's devices confirmed is withdrawn once disputed, and the group goes back to `epoch`.
+message GroupCommitReport {
+  uint64 group_id = 1;
+  fixed64 commit_id = 2;
+  // The epoch the commit was made in: the reporting device's epoch before the commit.
+  uint32 epoch = 3;
+  // The reporting device.
+  uint64 address = 4;
+  uint32 reason = 5;
+}
+
+// The server withdrew the commit `commit_id`, which moved the group from `epoch` to `epoch` + 1;
+// the group is back at `epoch`. A device that applied it must be added again (it asks with
+// /group/reAdd, and the server asks the members for the committer's devices).
+message GroupCommitWithdrawn {
+  uint64 group_id = 1;
+  fixed64 commit_id = 2;
+  uint32 epoch = 3;
+}
+
 message GroupCommitSyncRequest {
   uint64 group_id = 1;
   uint32 epoch = 2;
@@ -299,6 +325,9 @@ message ServerMessage {
     DirectHistoryRequest directHistoryRequest = 23;
     GroupLeaveRequests groupLeaveRequests = 24;
     GroupUpdated groupUpdated = 25;
+    // A commit the group could not process was withdrawn (servers with commit disputes). Older clients
+    // ignore it.
+    GroupCommitWithdrawn groupCommitWithdrawn = 30;
   }
 }
 
