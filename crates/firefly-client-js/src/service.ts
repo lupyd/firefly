@@ -1,6 +1,5 @@
 // import { crockfordDecode, ULID } from "ulid";
 import {
-  GroupMessages,
   GroupMessage,
   GroupKeyPackages,
   GroupInvite,
@@ -78,30 +77,6 @@ export class FireflyService {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
-  }
-
-  async getGroupMessages(opts: {
-    groupId?: number;
-    startAfter?: bigint;
-    limit?: number;
-  }) {
-    if (!opts.groupId) throw new Error("groupId required");
-    if (opts.startAfter && opts.startAfter < 0n)
-      throw new Error("invalid startAfter");
-
-    const url = new URL("/group/messages", this.baseUrl);
-    if (opts.groupId != null)
-      url.searchParams.set("groupId", String(opts.groupId));
-    if (opts.startAfter)
-      url.searchParams.set("startAfter", opts.startAfter.toString());
-    if (opts.limit != null)
-      url.searchParams.set(
-        "limit",
-        String(Math.max(1, Math.min(1000, Math.floor(opts.limit)))),
-      );
-
-    const res = await this.req(url.pathname + url.search);
-    return GroupMessages.decode(new Uint8Array(await res.arrayBuffer()));
   }
 
   async getKeyPackages() {
