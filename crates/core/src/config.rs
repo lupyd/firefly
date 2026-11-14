@@ -35,16 +35,26 @@ pub fn verify_signed_token<'a, 'b>(
     keys: JsonWebKeys<'b>,
     signed_token: &'a SignedToken<'a>,
 ) -> anyhow::Result<AuthToken<'a>> {
+    verify_signed_token_at(keys, signed_token, Some(get_current_timestamp_in_secs()))
+}
+
+/// Verifies the token's signature, and that it is still valid at `valid_at` (unix seconds);
+/// `None` skips the expiry check.
+pub fn verify_signed_token_at<'a, 'b>(
+    keys: JsonWebKeys<'b>,
+    signed_token: &'a SignedToken<'a>,
+    valid_at: Option<u64>,
+) -> anyhow::Result<AuthToken<'a>> {
     let auth_token = deserialize_proto::<AuthToken>(&signed_token.payload)?;
 
-    let now = get_current_timestamp_in_secs();
-
-    if !*crate::utils::EMULATOR_MODE && auth_token.valid_until < get_current_timestamp_in_secs() {
-        return Err(anyhow::anyhow!(
-            "token expired valid_until {}: now {}",
-            auth_token.valid_until,
-            now
-        ));
+    if let Some(now) = valid_at {
+        if !*crate::utils::EMULATOR_MODE && auth_token.valid_until < now {
+            return Err(anyhow::anyhow!(
+                "token expired valid_until {}: now {}",
+                auth_token.valid_until,
+                now
+            ));
+        }
     }
 
     let verifier_key = keys
@@ -297,6 +307,22 @@ impl MlsCredential for FireflyCredential {
     }
 }
 
+/// When a member's credential must be valid for [`IdentityProvider::validate_member`].
+///
+/// - Validating the whole tree of a group being joined (or created): never mind expiry. Every
+///   leaf in it was checked when it entered the group; a member whose credential has expired
+///   since (one away for longer than its lifetime) must not keep everyone else from joining.
+///   Signatures are still checked.
+/// - A received commit: at the commit's server time (see `utils::with_commit_time`), so every
+///   member decides as the server did, however late or skewed its own clock is.
+/// - Anything else (a commit this device builds, a key package): now.
+pub fn member_valid_at(context: &MemberValidationContext<'_>) -> Option<u64> {
+    match context {
+        MemberValidationContext::ForNewGroup { .. } => None,
+        _ => Some(crate::utils::credential_check_time_secs()),
+    }
+}
+
 #[derive(Clone)]
 pub struct FireflyIdentityProvider {
     base_url: Arc<str>,
@@ -427,10 +453,19 @@ impl FireflyIdentityProvider {
         &self,
         signed_token: &'a SignedToken<'a>,
     ) -> anyhow::Result<AuthToken<'a>> {
+        self.verify_at(signed_token, Some(get_current_timestamp_in_secs())).await
+    }
+
+    /// [`verify_signed_token_at`] against the current JWKS.
+    pub async fn verify_at<'a>(
+        &self,
+        signed_token: &'a SignedToken<'a>,
+        valid_at: Option<u64>,
+    ) -> anyhow::Result<AuthToken<'a>> {
         let jwks = self.get_keys().await?;
         let keys: JsonWebKeys = serde_json::from_str(&jwks)?;
 
-        let result = verify_signed_token(keys, signed_token)?;
+        let result = verify_signed_token_at(keys, signed_token, valid_at)?;
 
         Ok(result)
     }
@@ -495,12 +530,12 @@ impl IdentityProvider for FireflyIdentityProvider {
         &'life0 self,
         signing_identity: &'life1 SigningIdentity,
         _timestamp: Option<MlsTime>,
-        _context: MemberValidationContext<'life2>,
+        context: MemberValidationContext<'life2>,
     ) -> Result<(), Self::Error> {
         let credential = FireflyCredential::from_signing_identity(signing_identity)?;
 
         let signed_token: SignedToken = credential.signed_token()?;
-        let auth_token = match self.verify(&signed_token).await {
+        let auth_token = match self.verify_at(&signed_token, member_valid_at(&context)).await {
             Ok(t) => t,
             Err(e) => {
                 log::error!("validate_member failed: verify failed: {}", e);

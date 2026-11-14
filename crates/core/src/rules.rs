@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use firefly_protos::{
     deserialize_proto,
@@ -25,8 +25,8 @@ use crate::{
         FireflyCredential, FireflyError, UpdateChannelProposal, UpdateRoleInChannelProposal,
         UpdateRoleProposal, UpdateUserProposal, UserPermission, is_valid_name,
     },
-    extension::{FireflyGroupExtension, FireflyGroupExtensionWrapper},
-    utils::get_current_timestamp_in_secs,
+    extension::{FireflyGroupExtension, FireflyGroupExtensionWrapper, OWNER_ROLE_ID},
+    utils::{expiry_reference_time_secs, get_current_timestamp_in_secs},
 };
 pub const MAX_DEVICES_ALLOWED: usize = 5;
 
@@ -278,87 +278,12 @@ impl MlsRules for FireflyMlsRules {
         current_context: &GroupContext,
         proposals: ProposalBundle,
     ) -> Result<ProposalBundle, Self::Error> {
-        let committer_signing_identity = match source {
-            CommitSource::ExistingMember(member) => member.signing_identity,
-            CommitSource::NewMember(signing_identity) => signing_identity,
-        };
-
-        let committer_credential =
-            FireflyCredential::from_signing_identity(&committer_signing_identity)?;
-
-        let committer_signed_token = committer_credential.signed_token()?;
-        let _committer_auth_token =
-            deserialize_proto::<AuthToken>(&committer_signed_token.payload)?;
-
-        let current_extension_original = match current_context
-            .extensions()
-            .get_as::<FireflyGroupExtension>()?
-        {
-            Some(ext) => ext,
-            None => return Err("No Firefly Group Extension Found".into()),
-        };
-
-        let mut members_removed = HashMap::<String, Vec<(u32, AuthToken)>>::new(); // not remove + add, kicked out
-        let mut extension_updated = false;
-        let mut filtered_proposals = ProposalBundle::default();
-        let mut current_extension = current_extension_original.deserialize()?;
-
-        for proposal in proposals.into_proposals() {
-            let mut implied_removes = Vec::new();
-            let result = check_proposal(
-                &proposal,
-                current_roster,
-                &mut current_extension,
-                &mut members_removed,
-                &mut implied_removes,
-            );
-
-            match result {
-                Ok(updated) => {
-                    extension_updated |= updated;
-                    for index in implied_removes {
-                        filtered_proposals.add(
-                            Proposal::Remove(RemoveProposal::removing(index)?),
-                            Sender::Member(0),
-                            mls_rs::mls_rules::ProposalSource::Local,
-                        );
-                    }
-                    filtered_proposals.add(proposal.proposal, proposal.sender, proposal.source);
-                }
-                Err(err) if should_drop_invalid_proposal(direction, &proposal.source) => {
-                    // a cached proposal anyone can broadcast must not block every future commit
-                    log::warn!("dropping invalid by-reference proposal from commit: {}", err);
-                }
-                Err(err) => return Err(err),
-            }
-        }
-
-        if !members_removed.is_empty() {
-            for (username, members) in members_removed {
-                // means we removing every device of the member, hence the user is leaving the group, but if
-                if get_device_count(current_roster, &username) == members.len() {
-                    current_extension.delete_member(&username);
-                    extension_updated = true;
-                }
-            }
-        }
-
-        if extension_updated {
-            let new_extension = FireflyGroupExtension::new(current_extension)?;
-            if !new_extension.equal(&current_extension_original) {
-                let mut new_extensions = current_context.extensions().clone();
-                new_extensions.set_from(new_extension)?;
-                let gce_proposal = Proposal::GroupContextExtensions(new_extensions);
-                filtered_proposals.add(
-                    gce_proposal,
-                    Sender::Member(0),
-                    mls_rs::mls_rules::ProposalSource::Local,
-                );
-                info!("Added Group Extension Update");
-            }
-        }
-
-        return Ok(filtered_proposals);
+        // A received commit is held to the rules every deployed client applies, or a member could
+        // refuse a commit the others (and the server) took and be stranded at its epoch. The
+        // stricter rules ([`StrictRules`]) bind what this client sends and what the server
+        // accepts (`FireflyServerMlsRules`), which is where they take effect.
+        let strict = direction == CommitDirection::Send;
+        filter_proposals_with(direction, source, current_roster, current_context, proposals, strict)
     }
 
     #[doc = " This is called when preparing a commit to determine various options: whether to enforce an update"]
@@ -392,6 +317,326 @@ impl MlsRules for FireflyMlsRules {
             false,
             mls_rs::client_builder::PaddingMode::None,
         ))
+    }
+}
+
+/// [`MlsRules::filter_proposals`] for both rule sets: `strict` adds [`StrictRules`] on top of
+/// the rules every member applies to a received commit.
+pub fn filter_proposals_with(
+    direction: CommitDirection,
+    source: CommitSource,
+    current_roster: &Roster,
+    current_context: &GroupContext,
+    proposals: ProposalBundle,
+    strict: bool,
+) -> Result<ProposalBundle, FireflyError> {
+    let committer_signing_identity = match source {
+        CommitSource::ExistingMember(member) => member.signing_identity,
+        CommitSource::NewMember(signing_identity) => signing_identity,
+    };
+
+    let committer_credential =
+        FireflyCredential::from_signing_identity(&committer_signing_identity)?;
+
+    let committer_signed_token = committer_credential.signed_token()?;
+    let _committer_auth_token =
+        deserialize_proto::<AuthToken>(&committer_signed_token.payload)?;
+
+    let current_extension_original = match current_context
+        .extensions()
+        .get_as::<FireflyGroupExtension>()?
+    {
+        Some(ext) => ext,
+        None => return Err("No Firefly Group Extension Found".into()),
+    };
+
+    let mut members_removed = HashMap::<String, Vec<(u32, AuthToken)>>::new(); // not remove + add, kicked out
+    let mut extension_updated = false;
+    let mut filtered_proposals = ProposalBundle::default();
+    let mut current_extension = current_extension_original.deserialize()?;
+    let strict_rules = if strict {
+        Some(StrictRules::new(current_roster, &current_extension, &proposals))
+    } else {
+        None
+    };
+
+    for proposal in proposals.into_proposals() {
+        let mut implied_removes = Vec::new();
+        let result = match &strict_rules {
+            Some(rules) => rules.check(&proposal, current_roster, &current_extension),
+            None => Ok(()),
+        }
+        .and_then(|()| check_proposal(
+            &proposal,
+            current_roster,
+            &mut current_extension,
+            &mut members_removed,
+            &mut implied_removes,
+        ));
+
+        match result {
+            Ok(updated) => {
+                extension_updated |= updated;
+                for index in implied_removes {
+                    filtered_proposals.add(
+                        Proposal::Remove(RemoveProposal::removing(index)?),
+                        Sender::Member(0),
+                        mls_rs::mls_rules::ProposalSource::Local,
+                    );
+                }
+                filtered_proposals.add(proposal.proposal, proposal.sender, proposal.source);
+            }
+            Err(err) if should_drop_invalid_proposal(direction, &proposal.source) => {
+                // a cached proposal anyone can broadcast must not block every future commit
+                log::warn!("dropping invalid by-reference proposal from commit: {}", err);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    if !members_removed.is_empty() {
+        for (username, members) in members_removed {
+            // means we removing every device of the member, hence the user is leaving the group, but if
+            if get_device_count(current_roster, &username) == members.len() {
+                current_extension.delete_member(&username);
+                extension_updated = true;
+            }
+        }
+    }
+
+    if extension_updated {
+        let new_extension = FireflyGroupExtension::new(current_extension)?;
+        if !new_extension.equal(&current_extension_original) {
+            let mut new_extensions = current_context.extensions().clone();
+            new_extensions.set_from(new_extension)?;
+            let gce_proposal = Proposal::GroupContextExtensions(new_extensions);
+            filtered_proposals.add(
+                gce_proposal,
+                Sender::Member(0),
+                mls_rs::mls_rules::ProposalSource::Local,
+            );
+            info!("Added Group Extension Update");
+        }
+    }
+
+    return Ok(filtered_proposals);
+}
+
+/// A member whose every device has been expired for this long (it has not been online for its
+/// credential lifetime and this much more) may have its last device removed even if it is the
+/// owner, by a member allowed to manage members. Until then the owner's last device stays, so
+/// the owner role (held in the group extension only while the owner has a device) is never lost
+/// to a few weeks offline. See [`StrictRules`].
+pub const OWNER_LAST_DEVICE_GRACE_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// One leaf of the roster, as [`StrictRules`] sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RosterDevice {
+    pub index: u32,
+    pub username: String,
+    pub valid_until: u64,
+}
+
+impl RosterDevice {
+    pub fn from_roster(roster: &Roster) -> Vec<RosterDevice> {
+        deserialize_identities(roster)
+            .map(|(member, token)| RosterDevice {
+                index: member.index,
+                username: token.username.into_owned(),
+                valid_until: token.valid_until,
+            })
+            .collect()
+    }
+}
+
+/// Rules on top of those every member applies to a received commit. They bind only commits this
+/// client builds and commits the server accepts, never what a member accepts from others:
+/// deployed clients apply the older rules, and commits accepted under them are still in every
+/// backlog, so refusing one on receipt would strand the member at that epoch. Since the server
+/// refuses commits that break them, honest members only ever receive commits that keep them.
+///
+/// - Only an owner (a holder of `OWNER_ROLE_ID`) may remove a device of an owner whose
+///   credential is live, whatever role or permissions the remover holds.
+/// - Another member may remove an owner's expired devices, oldest first, but never the owner's
+///   last device in the group, unless it holds ManageMember and every one of the owner's
+///   devices has been expired for [`OWNER_LAST_DEVICE_GRACE_SECS`]. (Removing a user's last
+///   device drops their entry from the group extension, which for the owner deletes the owner
+///   role for good: nothing can grant it again.)
+/// - Only an owner may give `OWNER_ROLE_ID` to anyone, change an owner's role, or change or
+///   delete `OWNER_ROLE_ID` (in the group or in a channel).
+///
+/// Expiry is judged against the current time: the server's clock for the server, which is what
+/// decides; the committer's for its own commits, which the server checks again.
+pub struct StrictRules {
+    owners: HashSet<String>,
+    devices: Vec<RosterDevice>,
+    removed: HashSet<u32>,
+    now: u64,
+}
+
+impl StrictRules {
+    pub fn new(
+        roster: &Roster,
+        extension: &FireflyGroupExtensionWrapper,
+        proposals: &ProposalBundle,
+    ) -> Self {
+        Self::from_parts(
+            extension,
+            RosterDevice::from_roster(roster),
+            proposals.remove_proposals().iter().map(|p| p.proposal.to_remove()),
+            get_current_timestamp_in_secs(),
+        )
+    }
+
+    /// `removed`: every leaf the commit removes explicitly.
+    pub fn from_parts(
+        extension: &FireflyGroupExtensionWrapper,
+        devices: Vec<RosterDevice>,
+        removed: impl IntoIterator<Item = u32>,
+        now: u64,
+    ) -> Self {
+        let owners = extension
+            .inner()
+            .members
+            .iter()
+            .filter(|m| m.role == OWNER_ROLE_ID)
+            .map(|m| m.username.to_string())
+            .collect();
+        Self { owners, devices, removed: removed.into_iter().collect(), now }
+    }
+
+    fn is_owner(&self, username: &str) -> bool {
+        self.owners.contains(username)
+    }
+
+    /// Checks one proposal of the commit; `extension` is the group extension as updated by the
+    /// proposals before it.
+    pub fn check(
+        &self,
+        proposal: &ProposalInfo<Proposal>,
+        roster: &Roster,
+        extension: &FireflyGroupExtensionWrapper,
+    ) -> Result<(), FireflyError> {
+        let Sender::Member(sender_index) = proposal.sender else {
+            return Err("Sender has to be member".into());
+        };
+        let sender = get_username_from_signing_identity(
+            &roster.member_with_index(sender_index)?.signing_identity,
+        )?;
+        match &proposal.proposal {
+            Proposal::Remove(remove) => {
+                let permissions = sender_permissions(extension, &sender)?;
+                self.check_remove(&sender, permissions, remove.to_remove())
+            }
+            Proposal::Custom(custom) => self.check_custom(&sender, custom, extension),
+            _ => Ok(()),
+        }
+    }
+
+    pub fn check_remove(
+        &self,
+        sender: &str,
+        sender_permissions: u32,
+        index: u32,
+    ) -> Result<(), FireflyError> {
+        let Some(target) = self.devices.iter().find(|d| d.index == index) else {
+            return Err(format!("no member at leaf {index}").into());
+        };
+        if target.username == sender || !self.is_owner(&target.username) || self.is_owner(sender) {
+            return Ok(());
+        }
+        if target.valid_until >= self.now {
+            return Err(format!(
+                "rejected remove proposal, only the owner can remove a live device of the owner {}",
+                target.username
+            )
+            .into());
+        }
+        let owner_devices = || self.devices.iter().filter(|d| d.username == target.username);
+        if owner_devices().any(|d| !self.removed.contains(&d.index)) {
+            // expired, and the owner keeps a device in the group
+            return Ok(());
+        }
+        let newest = owner_devices().map(|d| d.valid_until).max().unwrap_or(0);
+        if has_permission(sender_permissions, UserPermission::ManageMember as u32)
+            && newest.saturating_add(OWNER_LAST_DEVICE_GRACE_SECS) < self.now
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "rejected remove proposal, the owner {}'s last device stays in the group",
+            target.username
+        )
+        .into())
+    }
+
+    pub fn check_custom(
+        &self,
+        sender: &str,
+        proposal: &CustomProposal,
+        extension: &FireflyGroupExtensionWrapper,
+    ) -> Result<(), FireflyError> {
+        if self.is_owner(sender) {
+            return Ok(());
+        }
+        let proposal_type = proposal.proposal_type();
+        let touches_owner = if proposal_type == UpdateUserProposal::proposal_type() {
+            let update = UpdateUserProposal::from_custom_proposal(proposal)?;
+            update.role_id == OWNER_ROLE_ID
+                || self.is_owner(&update.username)
+                || extension.is_owner(&update.username)
+        } else if proposal_type == UpdateRoleProposal::proposal_type() {
+            UpdateRoleProposal::from_custom_proposal(proposal)?.role_id == OWNER_ROLE_ID
+        } else if proposal_type == UpdateRoleInChannelProposal::proposal_type() {
+            UpdateRoleInChannelProposal::from_custom_proposal(proposal)?.role_proposal.role_id
+                == OWNER_ROLE_ID
+        } else {
+            false
+        };
+        if touches_owner {
+            return Err(format!(
+                "rejected proposal from {sender}, only the owner can change the owner role or who holds it"
+            )
+            .into());
+        }
+        Ok(())
+    }
+}
+
+/// The server's rules: [`FireflyMlsRules`] plus [`StrictRules`] for every commit it accepts.
+#[derive(Clone)]
+pub struct FireflyServerMlsRules;
+
+#[async_trait::async_trait]
+impl MlsRules for FireflyServerMlsRules {
+    type Error = FireflyError;
+
+    async fn filter_proposals(
+        &self,
+        direction: CommitDirection,
+        source: CommitSource,
+        current_roster: &Roster,
+        current_context: &GroupContext,
+        proposals: ProposalBundle,
+    ) -> Result<ProposalBundle, Self::Error> {
+        filter_proposals_with(direction, source, current_roster, current_context, proposals, true)
+    }
+
+    fn commit_options(
+        &self,
+        new_roster: &Roster,
+        new_context: &GroupContext,
+        proposals: &ProposalBundle,
+    ) -> Result<CommitOptions, Self::Error> {
+        FireflyMlsRules.commit_options(new_roster, new_context, proposals)
+    }
+
+    fn encryption_options(
+        &self,
+        current_roster: &Roster,
+        current_context: &GroupContext,
+    ) -> Result<EncryptionOptions, Self::Error> {
+        FireflyMlsRules.encryption_options(current_roster, current_context)
     }
 }
 
@@ -486,7 +731,8 @@ fn check_proposal(
                 // 1. A device whose token has expired (valid_until < now), OR
                 // 2. An older device when multiple devices exist for the user, leaving the most recent device.
                 let target_devices = get_devices_already_in(current_roster, &auth_token.username);
-                let is_inactive_token = auth_token.valid_until < get_current_timestamp_in_secs();
+                // judged at the commit's server time when it is known (see utils::with_commit_time)
+                let is_inactive_token = auth_token.valid_until < expiry_reference_time_secs();
                 let is_stale_device = if target_devices.len() > 1 {
                     let most_recent_valid_until = target_devices
                         .iter()

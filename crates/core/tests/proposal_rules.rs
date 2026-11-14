@@ -367,3 +367,107 @@ async fn substituted_key_packages_are_rejected() {
     assert!(ensure_key_package_belongs_to(&kp, "mallory", 11).is_err());
     assert!(ensure_key_package_belongs_to(&kp, "bob", 12).is_err());
 }
+
+// ---- StrictRules: what this client sends and the server accepts (M-3) ----
+
+use firefly_core::rules::{OWNER_LAST_DEVICE_GRACE_SECS, RosterDevice, StrictRules};
+
+const MANAGE_MEMBER: u32 = UserPermission::ManageMember as u32;
+const NOW: u64 = 1_800_000_000;
+
+fn device(index: u32, username: &str, valid_until: u64) -> RosterDevice {
+    RosterDevice { index, username: username.into(), valid_until }
+}
+
+/// owner: leaves 0 (older) and 1; alice: leaf 2; mod: leaf 3.
+fn roster(owner_0: u64, owner_1: u64) -> Vec<RosterDevice> {
+    vec![
+        device(0, OWNER, owner_0),
+        device(1, OWNER, owner_1),
+        device(2, "alice", NOW + 1000),
+        device(3, MOD, NOW + 1000),
+    ]
+}
+
+fn may_remove(devices: Vec<RosterDevice>, sender: &str, perms: u32, removed: &[u32]) -> bool {
+    let strict = StrictRules::from_parts(&group(), devices, removed.iter().copied(), NOW);
+    removed.iter().all(|index| strict.check_remove(sender, perms, *index).is_ok())
+}
+
+#[test]
+fn only_the_owner_removes_the_owners_live_devices() {
+    let live = roster(NOW + 10, NOW + 20);
+    // leaf 0 is "stale" (older than the owner's newest) but live
+    assert!(!may_remove(live.clone(), "alice", SEE | ADD, &[0]));
+    assert!(!may_remove(live.clone(), MOD, u32::MAX, &[0]));
+    assert!(!may_remove(live.clone(), MOD, u32::MAX, &[1]));
+    assert!(may_remove(live.clone(), OWNER, u32::MAX, &[0, 1]));
+}
+
+#[test]
+fn the_owners_expired_devices_go_oldest_first_but_the_last_stays() {
+    let expired = roster(NOW - 20, NOW - 10);
+    assert!(may_remove(expired.clone(), "alice", SEE | ADD, &[0]));
+    assert!(may_remove(expired.clone(), "alice", SEE | ADD, &[1]));
+    assert!(!may_remove(expired.clone(), "alice", SEE | ADD, &[0, 1]));
+    // ManageMember alone doesn't make the last device removable within the grace period
+    assert!(!may_remove(expired.clone(), MOD, MANAGE_MEMBER | SEE, &[0, 1]));
+    // an expired and a live device: the expired one can go, the live one never
+    let mixed = roster(NOW - 20, NOW + 10);
+    assert!(may_remove(mixed.clone(), "alice", SEE | ADD, &[0]));
+    assert!(!may_remove(mixed, "alice", SEE | ADD, &[1]));
+}
+
+#[test]
+fn an_abandoned_owners_last_device_is_removable_by_a_member_manager_only() {
+    let long_gone = NOW - OWNER_LAST_DEVICE_GRACE_SECS - 1;
+    let abandoned = roster(long_gone - 5, long_gone);
+    assert!(may_remove(abandoned.clone(), MOD, MANAGE_MEMBER | SEE, &[0, 1]));
+    assert!(!may_remove(abandoned.clone(), "alice", SEE | ADD, &[0, 1]));
+    // one second short of the grace: still kept
+    let almost = roster(NOW - OWNER_LAST_DEVICE_GRACE_SECS - 5, NOW - OWNER_LAST_DEVICE_GRACE_SECS);
+    assert!(!may_remove(almost, MOD, MANAGE_MEMBER | SEE, &[0, 1]));
+}
+
+#[test]
+fn removals_of_non_owners_are_left_to_the_shared_rules() {
+    let devices = roster(NOW + 10, NOW + 20);
+    assert!(may_remove(devices.clone(), "alice", SEE | ADD, &[3]));
+    assert!(may_remove(devices.clone(), MOD, 0, &[2]));
+    // and anyone removes their own
+    assert!(may_remove(devices, "alice", 0, &[2]));
+}
+
+fn custom(p: impl MlsCustomProposal) -> mls_rs::group::proposal::CustomProposal {
+    p.to_custom_proposal().unwrap()
+}
+
+#[test]
+fn only_the_owner_changes_the_owner_role_or_who_holds_it() {
+    let ext = group();
+    let strict = StrictRules::from_parts(&ext, roster(NOW + 10, NOW + 20), [], NOW);
+    let role = |role_id, delete| UpdateRoleProposal { name: "x".into(), role_id, permissions: SEE, delete, color: 0 };
+    let user = |username: &str, role_id| firefly_core::config::UpdateUserProposal { username: username.into(), role_id };
+    let in_channel = |role_id| UpdateRoleInChannelProposal { channel_id: 7, role_proposal: role(role_id, false) };
+    for p in [
+        custom(user(OWNER, 2)),
+        custom(user(OWNER, 0)),
+        custom(user("alice", 1)),
+        custom(role(1, false)),
+        custom(role(1, true)),
+        custom(in_channel(1)),
+    ] {
+        assert!(strict.check_custom(MOD, &p, &ext).is_err());
+        assert!(strict.check_custom(OWNER, &p, &ext).is_ok());
+    }
+    // everything else is unchanged
+    for p in [custom(user("alice", 2)), custom(role(2, false)), custom(in_channel(2)), custom(UpdateChannelProposal {
+        id: 9,
+        delete: false,
+        name: "c".into(),
+        channel_ty: 1,
+        default_permissions: SEE,
+    })] {
+        assert!(strict.check_custom(MOD, &p, &ext).is_ok());
+    }
+}

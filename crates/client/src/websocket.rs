@@ -5953,6 +5953,42 @@ async fn sync_group_members(
     crate::members::sync_group_members(group, key_value_store, callbacks.as_ref()).await;
 }
 
+/// A device that can't apply a commit the server accepted (its credential checks fail on it, or
+/// it computes a different group state) asks to be re-added: a member replaces its leaf and it
+/// joins again from a Welcome, keeping its local history. At most every few hours per group.
+async fn request_re_add_for_stuck_group(
+    group: &FfiMlsGroup,
+    key_value_store: &KeyValueStore,
+    callbacks: &Arc<dyn FireflyWsClientCallback>,
+    commit_id: u64,
+    err: &anyhow::Error,
+) {
+    const INTERVAL_SECS: u64 = 6 * 60 * 60;
+    let group_id = group.group_id();
+    log::error!(
+        "group {group_id} is stuck at epoch {}: commit {commit_id} can't be applied: {err:#}",
+        group.epoch().await
+    );
+    let key = format!("stuck-group-re-add-requested:{group_id}");
+    let now = crate::utils::get_current_timestamp_seconds_since_epoch();
+    let last = key_value_store.get(&key).await.unwrap_or_default().parse::<u64>().unwrap_or(0);
+    if now.saturating_sub(last) < INTERVAL_SECS {
+        return;
+    }
+    let Some(token) = callbacks.get_access_token().await else {
+        return;
+    };
+    match group.request_own_re_add(&token).await {
+        Ok(()) => {
+            log::info!("asked to be re-added to group {group_id}");
+            if let Err(err) = key_value_store.set(&key, &now.to_string()).await {
+                log::warn!("could not record the re-add request for group {group_id}: {err:#}");
+            }
+        }
+        Err(err) => log::warn!("asking to be re-added to group {group_id} failed: {err:#}"),
+    }
+}
+
 async fn on_group_message(
     msg: &firefly::GroupMessage<'_>,
     firefly_mls_client: &FfiMlsClient,
@@ -6012,7 +6048,8 @@ async fn on_group_message(
         return Ok(());
     }
 
-    let message = match group.process(msg.message.to_vec()).await {
+    let server_time = firefly_core::utils::server_id_time_secs(msg.id);
+    let message = match group.process_at(msg.message.to_vec(), server_time).await {
         Ok(message) => message,
         Err(err) if err.downcast_ref::<firefly_core::rules::MessagePermissionDenied>().is_some() => {
             // Consume rejected messages without storing plaintext or emitting callbacks.
@@ -6020,7 +6057,19 @@ async fn on_group_message(
             group_message_store.update_cursor(msg.id, groupId, group.epoch().await as u32).await?;
             return Ok(());
         }
-        Err(err) => return Err(err),
+        Err(err) => {
+            // The next commit (framed in our epoch; the server labels it with either epoch)
+            // failed for good: this device is stuck at its epoch, and every later message of
+            // the group fails too.
+            let framed_epoch = mls_rs::MlsMessage::from_bytes(&msg.message).ok().and_then(|m| m.epoch());
+            if !application
+                && framed_epoch == Some(current_epoch)
+                && firefly_core::is_permanent_commit_failure(&err)
+            {
+                request_re_add_for_stuck_group(&group, key_value_store, callbacks, msg.id, &err).await;
+            }
+            return Err(err);
+        }
     };
 
     let epoch = group.epoch().await as u32;

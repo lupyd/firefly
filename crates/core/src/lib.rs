@@ -402,7 +402,8 @@ pub fn compute_departures<'a>(
     departed
 }
 
-fn roster_leaves(group: &Group<FireflyClientMlsConfig>) -> Vec<RosterLeaf> {
+/// `now`: the time expiry is judged at (the commit's server time when known).
+fn roster_leaves(group: &Group<FireflyClientMlsConfig>, now: u64) -> Vec<RosterLeaf> {
     group
         .roster()
         .members_iter()
@@ -411,7 +412,8 @@ fn roster_leaves(group: &Group<FireflyClientMlsConfig>) -> Vec<RosterLeaf> {
             // An unparsable expiry counts as live: fail closed (not re-addable).
             let expired = FireflyCredential::from_signing_identity(&m.signing_identity)
                 .ok()
-                .map(|c| c.is_expired().is_some())
+                .and_then(|c| c.valid_until_secs().ok())
+                .map(|valid_until| valid_until <= now)
                 .unwrap_or(false);
             Some(RosterLeaf { username, expired })
         })
@@ -433,7 +435,11 @@ fn roster_holders(group: &Group<FireflyClientMlsConfig>) -> Vec<(u32, SigningIde
 }
 
 fn roster_before(group: &Group<FireflyClientMlsConfig>) -> RosterBefore {
-    RosterBefore { leaves: roster_leaves(group), holders: roster_holders(group) }
+    roster_before_at(group, crate::utils::get_current_timestamp_in_secs())
+}
+
+fn roster_before_at(group: &Group<FireflyClientMlsConfig>, now: u64) -> RosterBefore {
+    RosterBefore { leaves: roster_leaves(group, now), holders: roster_holders(group) }
 }
 
 fn roster_usernames(group: &Group<FireflyClientMlsConfig>) -> Vec<String> {
@@ -656,6 +662,19 @@ impl FireflyMlsGroup {
     }
 
     pub async fn process(&self, message: &[u8]) -> anyhow::Result<FireflyMlsReceivedMessage> {
+        self.process_at(message, None).await
+    }
+
+    /// Processes a message the server delivered with the given server time (unix seconds; for
+    /// group messages, `utils::server_id_time_secs` of its id). A commit is then validated as of
+    /// that time, not this device's clock: credential expiry is a property of when the server
+    /// accepted the commit, and every member must reach the same verdict on it however late it
+    /// processes it (see `utils::with_commit_time`).
+    pub async fn process_at(
+        &self,
+        message: &[u8],
+        server_time_secs: Option<u64>,
+    ) -> anyhow::Result<FireflyMlsReceivedMessage> {
         let mut group = self.group.lock().await;
 
         let message = MlsMessage::from_bytes(message)?;
@@ -665,8 +684,17 @@ impl FireflyMlsGroup {
             self.roster_unchanged_since.load(std::sync::atomic::Ordering::Relaxed),
         )?;
 
-        let before = (!is_application_message(&message)).then(|| roster_before(&group));
-        let msg = group.process_incoming_message(message).await?;
+        let before = (!is_application_message(&message)).then(|| {
+            roster_before_at(
+                &group,
+                server_time_secs.unwrap_or_else(crate::utils::get_current_timestamp_in_secs),
+            )
+        });
+        let msg = crate::utils::with_commit_time(
+            server_time_secs,
+            group.process_incoming_message(message),
+        )
+        .await?;
         if let (Some(before), mls_rs::group::ReceivedMessage::Commit(_)) = (&before, &msg) {
             self.record_departures(before, &group);
         }
@@ -956,7 +984,7 @@ impl FireflyMlsGroup {
                 .max()
                 .unwrap_or(0)
         };
-        let indices: Vec<u32> = tokens
+        let candidates: Vec<u32> = tokens
             .iter()
             .filter(|(index, t)| {
                 let expired = t.valid_until.saturating_add(EXPIRY_MARGIN_SECS) < now;
@@ -971,6 +999,7 @@ impl FireflyMlsGroup {
             })
             .map(|(index, _)| *index)
             .collect();
+        let indices = removable_under_strict_rules(&group, my_username, candidates, now)?;
         if indices.is_empty() {
             return Ok(None);
         }
@@ -980,6 +1009,12 @@ impl FireflyMlsGroup {
         }
         let commit = builder.build().await?;
         self.send_commit_to_server_and_apply_commit(&mut *group, commit).await.map(Some)
+    }
+
+    /// The address of this device's own leaf, from its credential.
+    pub async fn own_address_id(&self) -> anyhow::Result<u64> {
+        let group = self.group.lock().await;
+        Ok(get_auth_token_from_signing_identity(group.current_member_signing_identity()?)?.address_id)
     }
 
     pub async fn kick_member(&self, username: &str) -> anyhow::Result<u64> {
@@ -1225,6 +1260,69 @@ impl FireflyMlsGroup {
         let message = deserialize_proto::<GroupMessage>(&response_body)?;
 
         return Ok(message.id);
+    }
+}
+
+/// Of `candidates` (leaf indices, oldest first preferred), those this member can remove in one
+/// commit under [`rules::StrictRules`], which the server enforces: a commit including any other
+/// would be refused as a whole.
+fn removable_under_strict_rules(
+    group: &Group<FireflyClientMlsConfig>,
+    my_username: &str,
+    mut candidates: Vec<u32>,
+    now: u64,
+) -> anyhow::Result<Vec<u32>> {
+    let extension = group
+        .context()
+        .extensions()
+        .get_as::<FireflyGroupExtension>()?
+        .context("no firefly extension on group")?;
+    let extension = extension.deserialize()?;
+    let devices = rules::RosterDevice::from_roster(&group.roster());
+    let valid_until = |index: u32| {
+        devices.iter().find(|d| d.index == index).map(|d| d.valid_until).unwrap_or(0)
+    };
+    candidates.sort_by_key(|index| valid_until(*index));
+    let role = extension.get_role_of_user(my_username).unwrap_or(0);
+    let permissions = extension.get_permissions_from_role_id(role).unwrap_or(0);
+    let mut chosen: Vec<u32> = Vec::new();
+    for candidate in candidates {
+        let mut trial = chosen.clone();
+        trial.push(candidate);
+        let strict = rules::StrictRules::from_parts(&extension, devices.clone(), trial.iter().copied(), now);
+        if trial.iter().all(|index| strict.check_remove(my_username, permissions, *index).is_ok()) {
+            chosen = trial;
+        } else {
+            log::info!("leaving leaf {candidate} in the group: the group rules keep it");
+        }
+    }
+    Ok(chosen)
+}
+
+/// Whether processing a commit failed for good: the commit is invalid as this member sees it
+/// (a credential, a rule, the key schedule), so trying again will fail the same way and the
+/// member is stranded at its epoch until it is re-added. Failures to reach the key server or
+/// storage are not permanent.
+pub fn is_permanent_commit_failure(err: &anyhow::Error) -> bool {
+    let Some(mls) = err.chain().find_map(|e| e.downcast_ref::<mls_rs::error::MlsError>()) else {
+        return false;
+    };
+    use mls_rs::error::MlsError;
+    match mls {
+        MlsError::GroupStorageError(_)
+        | MlsError::KeyPackageRepoError(_)
+        | MlsError::PskStoreError(_)
+        | MlsError::CryptoProviderError(_) => false,
+        MlsError::IdentityProviderError(_) => {
+            // a JWKS fetch that failed (offline, server down) is retried; anything else is the
+            // credential itself
+            let text = format!("{err:#}");
+            !(text.contains("failed to fetch fresh jwks")
+                || text.contains("unexpected status code")
+                || text.contains("error sending request"))
+        }
+        MlsError::InvalidEpoch | MlsError::CantProcessMessageFromSelf => false,
+        _ => true,
     }
 }
 

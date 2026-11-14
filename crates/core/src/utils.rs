@@ -153,3 +153,60 @@ pub fn string_to_number(s: &str) -> Option<u64> {
 
     Some(n)
 }
+
+/// How much later than the server a receiver may judge a credential's expiry. The server checks
+/// a commit against its own clock when accepting it, and the message id the receiver is handed
+/// comes from the database clock a moment later; a receiver must never refuse what the server
+/// accepted over that gap.
+pub const RECEIVE_EXPIRY_GRACE_SECS: u64 = 10 * 60;
+
+tokio::task_local! {
+    /// Server time (unix seconds) of the commit being processed, set by
+    /// [`with_commit_time`] while a received commit is applied.
+    static COMMIT_TIME_SECS: u64;
+}
+
+/// Runs `fut` (the processing of one received message) with `commit_time_secs` as the time
+/// credential expiry is judged against, instead of this device's clock. Every member then
+/// decides a commit's validity at the same instant (the server's), so a member that processes
+/// it days later or whose clock is wrong reaches the same result as everyone else.
+pub async fn with_commit_time<F: std::future::Future>(commit_time_secs: Option<u64>, fut: F) -> F::Output {
+    match commit_time_secs {
+        Some(secs) => COMMIT_TIME_SECS.scope(secs, fut).await,
+        None => fut.await,
+    }
+}
+
+/// The server time of the received commit being processed, if known.
+pub fn commit_time_secs() -> Option<u64> {
+    COMMIT_TIME_SECS.try_with(|t| *t).ok()
+}
+
+/// Server message ids are the database clock in microseconds since the epoch. Returns that time
+/// in seconds when `id` looks like one (2020..2100), `None` otherwise.
+pub fn server_id_time_secs(id: u64) -> Option<u64> {
+    const MIN_SECS: u64 = 1_577_836_800; // 2020-01-01
+    const MAX_SECS: u64 = 4_102_444_800; // 2100-01-01
+    let secs = id / 1_000_000;
+    (MIN_SECS..MAX_SECS).contains(&secs).then_some(secs)
+}
+
+/// The instant a credential must still be valid at to be accepted: the commit's server time
+/// (less [`RECEIVE_EXPIRY_GRACE_SECS`]) while a received commit is processed, else now.
+pub fn credential_check_time_secs() -> u64 {
+    match commit_time_secs() {
+        Some(t) => t.saturating_sub(RECEIVE_EXPIRY_GRACE_SECS),
+        None => get_current_timestamp_in_secs(),
+    }
+}
+
+/// The instant a credential counts as expired by, for the rules that let any member remove an
+/// expired device: the commit's server time (plus [`RECEIVE_EXPIRY_GRACE_SECS`]) while a
+/// received commit is processed, else now. Lenient on receive in the same direction as
+/// [`credential_check_time_secs`]: a receiver accepts whatever the server accepted.
+pub fn expiry_reference_time_secs() -> u64 {
+    match commit_time_secs() {
+        Some(t) => t.saturating_add(RECEIVE_EXPIRY_GRACE_SECS),
+        None => get_current_timestamp_in_secs(),
+    }
+}

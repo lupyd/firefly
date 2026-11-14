@@ -195,3 +195,50 @@ fn test_name_validation() {
     assert!(!is_valid_name("   "));
     assert!(is_valid_name("a"));
 }
+
+// ---- Expiry judged at the commit's server time (M-4) ----
+
+use firefly_core::config::member_valid_at;
+use firefly_core::utils::{
+    RECEIVE_EXPIRY_GRACE_SECS, commit_time_secs, credential_check_time_secs,
+    expiry_reference_time_secs, get_current_timestamp_in_secs, server_id_time_secs, with_commit_time,
+};
+use mls_rs_core::identity::MemberValidationContext;
+
+#[test]
+fn server_ids_carry_the_servers_time() {
+    // group_messages.id defaults to now_us(): microseconds since the epoch
+    assert_eq!(server_id_time_secs(1_763_100_000_123_456), Some(1_763_100_000));
+    assert_eq!(server_id_time_secs(0), None);
+    assert_eq!(server_id_time_secs(42), None);
+    assert_eq!(server_id_time_secs(u64::MAX), None);
+}
+
+#[tokio::test]
+async fn commit_time_scopes_the_expiry_checks() {
+    let now = get_current_timestamp_in_secs();
+    assert_eq!(commit_time_secs(), None);
+    assert!(credential_check_time_secs().abs_diff(now) <= 1);
+    assert!(expiry_reference_time_secs().abs_diff(now) <= 1);
+
+    let t = 1_700_000_000;
+    with_commit_time(Some(t), async {
+        assert_eq!(commit_time_secs(), Some(t));
+        // lenient both ways: a receiver never refuses what the server accepted
+        assert_eq!(credential_check_time_secs(), t - RECEIVE_EXPIRY_GRACE_SECS);
+        assert_eq!(expiry_reference_time_secs(), t + RECEIVE_EXPIRY_GRACE_SECS);
+        // and across awaits within the same task
+        tokio::task::yield_now().await;
+        assert_eq!(commit_time_secs(), Some(t));
+    })
+    .await;
+    assert_eq!(commit_time_secs(), None);
+    with_commit_time(None, async { assert_eq!(commit_time_secs(), None) }).await;
+}
+
+#[test]
+fn joining_a_group_does_not_judge_existing_members_expiry() {
+    assert_eq!(member_valid_at(&MemberValidationContext::None).map(|t| t > 0), Some(true));
+    // ForNewGroup needs a GroupContext; the integration test in owner_protection.rs joins a
+    // group whose owner's credential has expired.
+}

@@ -14,12 +14,12 @@ use crate::{
         UpdateRoleProposal, UpdateUserProposal,
     },
     extension::FireflyGroupExtension,
-    rules::FireflyMlsRules,
+    rules::FireflyServerMlsRules,
 };
 
 pub type FireflyServerConfig = WithIdentityProvider<
     FireflyIdentityProvider,
-    WithCryptoProvider<RustCryptoProvider, WithMlsRules<FireflyMlsRules, ExternalBaseConfig>>,
+    WithCryptoProvider<RustCryptoProvider, WithMlsRules<FireflyServerMlsRules, ExternalBaseConfig>>,
 >;
 
 pub fn make_server() -> ExternalClient<FireflyServerConfig> {
@@ -32,7 +32,7 @@ pub fn make_server() -> ExternalClient<FireflyServerConfig> {
                 .into(),
         ))
         .cache_proposals(true)
-        .mls_rules(FireflyMlsRules)
+        .mls_rules(FireflyServerMlsRules)
         .crypto_provider(crypto_provider)
         .custom_proposal_types([
             UpdateUserProposal::proposal_type(),

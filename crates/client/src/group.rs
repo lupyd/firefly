@@ -342,7 +342,6 @@ impl FireflyAuthTokenCallback for AuthCallback {
 
 pub struct FfiMlsGroup {
     group: FireflyMlsGroup,
-    #[allow(unused)]
     base_url: Arc<str>,
     departure_store: Arc<dyn GroupDepartureStorage>,
 }
@@ -579,7 +578,17 @@ impl FfiMlsGroup {
     }
 
     pub async fn process(&self, message: Vec<u8>) -> anyhow::Result<FireflyMlsReceivedMessage> {
-        let result = self.group.process(&message).await;
+        self.process_at(message, None).await
+    }
+
+    /// [`Self::process`] for a message the server delivered at `server_time_secs` (see
+    /// `firefly_core::FireflyMlsGroup::process_at`).
+    pub async fn process_at(
+        &self,
+        message: Vec<u8>,
+        server_time_secs: Option<u64>,
+    ) -> anyhow::Result<FireflyMlsReceivedMessage> {
+        let result = self.group.process_at(&message, server_time_secs).await;
         self.persist_departures().await;
         let result = result?;
         Ok(match result {
@@ -633,6 +642,28 @@ impl FfiMlsGroup {
         let res = self.group.remove_gone_devices(my_username, gone).await;
         self.persist_departures().await;
         res
+    }
+
+    /// Asks the server to have this device re-added to the group: a member then replaces its
+    /// leaf (same address) with a fresh one and sends it a Welcome, and it joins at the current
+    /// epoch. The way out for a device that can't apply a commit the server accepted.
+    pub async fn request_own_re_add(&self, token: &str) -> anyhow::Result<()> {
+        let address_id = self.group.own_address_id().await?;
+        let url = format!("{}/group/reAdd?address_id={}", self.base_url, address_id);
+        let response = crate::utils::HTTP_CLIENT
+            .post(url)
+            .bearer_auth(token)
+            .body(serde_json::to_vec(&[self.group.group_id()])?)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "unexpected status code: [{}]: {}",
+                response.status(),
+                response.text().await?
+            ));
+        }
+        Ok(())
     }
 
     pub async fn kick_member(&self, username: String) -> anyhow::Result<u64> {
