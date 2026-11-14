@@ -26,14 +26,50 @@ pub struct AuthConfig {
 }
 
 impl AuthConfig {
-    fn token_url(&self) -> String {
+    fn endpoint(&self, path: &str) -> String {
         let domain = self.domain.trim_end_matches('/');
         if domain.starts_with("http://") || domain.starts_with("https://") {
-            format!("{domain}/oauth/token")
+            format!("{domain}{path}")
         } else {
-            format!("https://{domain}/oauth/token")
+            format!("https://{domain}{path}")
         }
     }
+
+    fn token_url(&self) -> String {
+        self.endpoint("/oauth/token")
+    }
+
+    fn revoke_url(&self) -> String {
+        self.endpoint("/oauth/revoke")
+    }
+}
+
+/// Signs out: revokes the session's refresh token with the sign-in server (refresh tokens never
+/// expire on their own) and deletes the session file. The file is deleted even if the server
+/// can't be reached; the error is returned so the user knows the token may still be valid.
+pub async fn logout(config: &AuthConfig, path: &Path) -> anyhow::Result<bool> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    let revoked: anyhow::Result<()> = async {
+        let session: Session = serde_json::from_slice(&bytes)?;
+        let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
+        let response = http
+            .post(config.revoke_url())
+            .json(&serde_json::json!({ "client_id": config.client_id, "token": session.refresh_token }))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(anyhow!("[{}] {}", response.status(), response.text().await.unwrap_or_default()));
+        }
+        Ok(())
+    }
+    .await;
+    std::fs::remove_file(path)?;
+    revoked.context("the session was removed, but revoking its refresh token failed")?;
+    Ok(true)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,6 +248,7 @@ mod tests {
             realm: String::new(),
         };
         assert_eq!(config("auth.example.com").token_url(), "https://auth.example.com/oauth/token");
+        assert_eq!(config("auth.example.com").revoke_url(), "https://auth.example.com/oauth/revoke");
         assert_eq!(config("https://auth.example.com/").token_url(), "https://auth.example.com/oauth/token");
     }
 }

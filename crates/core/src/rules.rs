@@ -218,7 +218,7 @@ fn get_device_count(roster: &Roster, username: &str) -> usize {
         .count()
 }
 
-fn get_devices_already_in(roster: &Roster, username: &str) -> Vec<(Member, AuthToken<'static>)> {
+pub fn get_devices_already_in(roster: &Roster, username: &str) -> Vec<(Member, AuthToken<'static>)> {
     roster
         .members_iter()
         .filter_map(|x| {
@@ -529,8 +529,26 @@ impl StrictRules {
                 self.check_remove(&sender, permissions, remove.to_remove())
             }
             Proposal::Custom(custom) => self.check_custom(&sender, custom, extension),
+            Proposal::Add(add) => self.check_add(add),
             _ => Ok(()),
         }
+    }
+
+    /// No Add for a user who already has [`MAX_DEVICES_ALLOWED`] devices in the group: the
+    /// rules would evict their oldest device implicitly (computed by every member, so it can't
+    /// be changed), and that may be a live one. Committers remove the user's inactive devices
+    /// in an earlier commit first.
+    pub fn check_add(&self, add: &mls_rs::group::proposal::AddProposal) -> Result<(), FireflyError> {
+        let addee = get_auth_token_from_signing_identity(add.key_package().signing_identity())?;
+        let count = self.devices.iter().filter(|d| d.username == addee.username).count();
+        if count >= MAX_DEVICES_ALLOWED {
+            return Err(format!(
+                "rejected add, {} already has {MAX_DEVICES_ALLOWED} devices in the group; remove inactive ones first",
+                addee.username
+            )
+            .into());
+        }
+        Ok(())
     }
 
     pub fn check_remove(

@@ -153,10 +153,10 @@ async fn execute(cli: Cli, defaults: Defaults) -> anyhow::Result<()> {
             eprintln!("Signed in as {} ({}). Data: {}", session.username, session.email, data_dir.display());
         }
         Command::Logout => {
-            match std::fs::remove_file(&session_path) {
-                Ok(()) => eprintln!("Signed out ({} removed).", session_path.display()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => eprintln!("Not signed in."),
-                Err(e) => return Err(e.into()),
+            if crate::auth::logout(&cli.common.auth(&defaults)?, &session_path).await? {
+                eprintln!("Signed out: refresh token revoked, {} removed.", session_path.display());
+            } else {
+                eprintln!("Not signed in.");
             }
         }
         Command::Status => {

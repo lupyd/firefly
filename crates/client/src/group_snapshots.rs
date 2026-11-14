@@ -289,11 +289,14 @@ impl FireflyWsClient {
         kind: u32,
         id: &str,
     ) -> anyhow::Result<Option<(String, Vec<u8>)>> {
-        // No bearer/cookie/key in this download request, even for the API origin.
-        let response = crate::utils::no_redirect_client(Some(Duration::from_secs(30)))?
-            .get(self.snapshot_url(g, kind, id))
-            .send()
-            .await?;
+        // Only the API origin is ever asked (no redirects), which serves snapshots to members:
+        // send the access token so it can check membership.
+        let mut request = crate::utils::no_redirect_client(Some(Duration::from_secs(30)))?
+            .get(self.snapshot_url(g, kind, id));
+        if let Some(token) = self.callbacks.get_access_token().await {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }

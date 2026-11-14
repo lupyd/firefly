@@ -767,7 +767,51 @@ impl FireflyMlsGroup {
         Ok(out)
     }
 
+    /// Before adding devices of `username`: if they already have [`rules::MAX_DEVICES_ALLOWED`]
+    /// devices in the group, first commit the removal of the inactive ones (expired, or no longer
+    /// among the account's devices on the server). The group rules would otherwise evict their
+    /// oldest device implicitly, which the server refuses: every member computes that eviction
+    /// locally, so it can't be changed without splitting old and new clients.
+    async fn make_room_for(&self, username: &str) -> anyhow::Result<()> {
+        let (count, mine) = {
+            let group = self.group.lock().await;
+            let count = rules::get_devices_already_in(&group.roster(), username).len();
+            let mine = get_username_from_signing_identity(group.current_member_signing_identity()?)?;
+            (count, mine)
+        };
+        if count < rules::MAX_DEVICES_ALLOWED {
+            return Ok(());
+        }
+        let url = format!("{}/group/keyPackages?other={}&all=true", self.base_url, username);
+        let token = self.auth_token_callback.token().await?;
+        let response = HTTP_CLIENT.get(url).bearer_auth(&token).send().await?;
+        anyhow::ensure!(response.status().is_success(), "unexpected status code: [{}]", response.status());
+        let current: Vec<u64> = deserialize_proto::<GroupKeyPackages>(&response.bytes().await?)?
+            .packages
+            .iter()
+            .map(|p| p.address)
+            .collect();
+        let gone: Vec<u64> = {
+            let group = self.group.lock().await;
+            rules::get_devices_already_in(&group.roster(), username)
+                .iter()
+                .map(|(_, t)| t.address_id)
+                .filter(|address| !current.contains(address))
+                .collect()
+        };
+        log::info!("{username} is at the device limit in this group; removing inactive devices {gone:?} first");
+        self.remove_gone_devices(&mine, &gone).await?;
+        let group = self.group.lock().await;
+        anyhow::ensure!(
+            rules::get_devices_already_in(&group.roster(), username).len() < rules::MAX_DEVICES_ALLOWED,
+            "{username} already has {} active devices in this group",
+            rules::MAX_DEVICES_ALLOWED
+        );
+        Ok(())
+    }
+
     pub async fn re_add_member(&self, username: String, address_id: u64) -> anyhow::Result<u64> {
+        self.make_room_for(&username).await?;
         let url = format!(
             "{}/group/keyPackages?other={}&address={}",
             self.base_url, username, address_id
@@ -847,6 +891,7 @@ impl FireflyMlsGroup {
     /// Adds every device of `username` not in the group yet, from their key packages; with a
     /// role, as a new member with that role.
     async fn add_devices_of(&self, username: String, role_id: Option<u32>) -> anyhow::Result<u64> {
+        self.make_room_for(&username).await?;
         let url = format!(
             "{}/group/keyPackages?other={}&all=true",
             self.base_url, username
@@ -1129,7 +1174,48 @@ impl FireflyMlsGroup {
         &self,
         proposals: impl Iterator<Item = UpdateUserProposal>,
     ) -> anyhow::Result<u64> {
-        self.commit_custom_proposals(proposals).await
+        // Role 0 (back to the default role) was never applied by the group rules, and changing
+        // how every member applies it would split old and new clients. Resetting is done by the
+        // owner instead, with the group extension carried in the commit (applied the same by
+        // every version).
+        let (resets, updates): (Vec<_>, Vec<_>) = proposals.partition(|p| p.role_id == 0);
+        let mut last = 0;
+        if !resets.is_empty() {
+            last = self.reset_roles_to_default(resets.iter().map(|p| p.username.to_string())).await?;
+        }
+        if !updates.is_empty() {
+            last = self.commit_custom_proposals(updates.into_iter()).await?;
+        }
+        Ok(last)
+    }
+
+    /// Owner only: puts users back on the group's default role by committing the group extension
+    /// without their role entries. Owners can't be reset this way. Returns 0 if nobody had a role.
+    pub async fn reset_roles_to_default(&self, usernames: impl Iterator<Item = String>) -> anyhow::Result<u64> {
+        let mut group = self.group.lock().await;
+        let me = get_username_from_signing_identity(group.current_member_signing_identity()?)?;
+        let current = group
+            .context()
+            .extensions()
+            .get_as::<FireflyGroupExtension>()?
+            .context("no firefly extension on group")?;
+        let mut extension = current.deserialize()?;
+        anyhow::ensure!(
+            extension.is_owner(&me),
+            "only the group owner can set a member back to the default role"
+        );
+        let mut changed = false;
+        for username in usernames {
+            anyhow::ensure!(!extension.is_owner(&username), "the owner's role can't be reset");
+            changed |= extension.delete_member(&username).is_some();
+        }
+        if !changed {
+            return Ok(0);
+        }
+        let mut extensions = group.context().extensions().clone();
+        extensions.set_from(FireflyGroupExtension::new(extension)?)?;
+        let commit = group.commit_builder().set_group_context_ext(extensions)?.build().await?;
+        self.send_commit_to_server_and_apply_commit(&mut *group, commit).await
     }
 
     /// When the credential in this device's own leaf of the group expires (unix seconds).
