@@ -324,6 +324,26 @@ impl GroupMessagesStore {
         let rows = query.build().fetch_all(&self.pool).await?;
         rows.iter().map(GroupMessage::from_row).collect::<Result<Vec<_>,_>>().map_err(Into::into)
     }
+    /// Which of `ids` this device imported from another member's history (a joiner's handoff or a
+    /// history chunk) instead of receiving them itself over MLS: their sender is not
+    /// authenticated to this device, so apps show them as unverified.
+    pub async fn imported_ids(&self, group: u64, ids: &[u64]) -> anyhow::Result<std::collections::HashSet<u64>> {
+        let mut imported = std::collections::HashSet::new();
+        for batch in ids.chunks(500) {
+            let mut query = crate::sql::QueryBuilder::<crate::sql::Sqlite>::new("SELECT message_id FROM group_history_imports WHERE group_id=");
+            query.push_bind(group as i64).push(" AND message_id IN (");
+            let mut values = query.separated(",");
+            for id in batch { values.push_bind(*id as i64); }
+            values.push_unseparated(")");
+            let rows = query.build().fetch_all(&self.pool).await?;
+            for row in rows.iter() {
+                use crate::sql::Row;
+                let id: i64 = row.try_get("message_id")?;
+                imported.insert(id as u64);
+            }
+        }
+        Ok(imported)
+    }
     pub async fn import_verified_history(&self, group: u64, chunk: u64, hash: &[u8], records: &[GroupMessage]) -> anyhow::Result<usize> {
         let _lock = self.pin_writes.lock().await;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;

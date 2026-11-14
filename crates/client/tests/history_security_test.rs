@@ -51,6 +51,9 @@ async fn imports_never_overwrite_originals_or_become_vote_evidence() -> anyhow::
     let evidence=store.authenticated_history_ids(42,&[1,3]).await?;
     assert_eq!(evidence.len(),1); assert_eq!(evidence[0].by,"alice");
     assert_eq!(store.get_channel_page(42,1,4,10).await?.len(),2);
+    // apps mark imported records unverified: only id 3 was imported, the original 1 was received
+    assert_eq!(store.imported_ids(42,&[1,3,99]).await?, std::collections::HashSet::from([3]));
+    assert!(store.imported_ids(43,&[3]).await?.is_empty());
     let mut foreign=record(5,1)?; foreign.group_id=43;
     assert!(store.import_verified_history(42,8,&[2;32],&[record(4,1)?,foreign]).await.is_err());
     assert_eq!(store.get_channel_page(42,1,10,10).await?.len(),2,"partial import must roll back");
