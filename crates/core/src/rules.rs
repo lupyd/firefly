@@ -581,10 +581,10 @@ pub fn check_group_proposal(
     let sender_permissions = sender_permissions(current_extension, sender_username)?;
 
     match proposal {
-        Proposal::Psk(_) => {
-            info!("WARN: PSK proposal included, as I don't know what it suppose to do");
-            Ok(false)
-        }
+        // Nothing distributes pre-shared keys, so a PSK only the committer holds would leave every
+        // other member unable to process the commit while the server (which never needs the PSK)
+        // advances the epoch: the group would be bricked.
+        Proposal::Psk(_) => Err("PSK proposals are not allowed".into()),
         // nothing handles a reinitialised group, so accepting one would brick the group
         Proposal::ReInit(_) => Err("ReInit proposals are not allowed".into()),
         Proposal::ExternalInit(_) => Err(("External Init not allowed").into()),

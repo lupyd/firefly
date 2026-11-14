@@ -178,6 +178,21 @@ fn reinit_is_always_rejected() {
     assert!(check_group_proposal(&reinit(), &mut ext, "nobody").is_err());
 }
 
+fn psk() -> Proposal {
+    // external PSK id [0x42], empty nonce
+    let bytes = [1u8, 1, 0x42, 0];
+    Proposal::Psk(mls_rs::group::proposal::PreSharedKeyProposal::mls_decode(&mut bytes.as_slice()).unwrap())
+}
+
+#[test]
+fn psk_is_always_rejected() {
+    // a PSK only the committer holds would brick every other member (the server can't tell)
+    let mut ext = group();
+    assert!(check_group_proposal(&psk(), &mut ext, OWNER).is_err());
+    assert!(check_group_proposal(&psk(), &mut ext, MOD).is_err());
+    assert!(check_group_proposal(&psk(), &mut ext, "nobody").is_err());
+}
+
 fn gce(ext: Option<FireflyGroupExtension>) -> Proposal {
     let mut list = ExtensionList::new();
     if let Some(ext) = ext {
