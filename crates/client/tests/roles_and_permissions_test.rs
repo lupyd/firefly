@@ -1140,3 +1140,81 @@ async fn test_message_permissions_defaults_revocation_and_cached_history() {
     bob.dispose().await;
     cleanup_dir(&test_dir);
 }
+
+// =============================================================================
+// Resetting a member to the default role (role 0)
+// =============================================================================
+#[tokio::test]
+async fn test_owner_resets_a_member_to_the_default_role() {
+    let Some((base_url, ws_url)) = setup_server().await else { return };
+    let run = rand::random::<u32>();
+    let test_dir = format!("/tmp/firefly/roles_reset_{run}");
+    let _ = std::fs::create_dir_all(&test_dir);
+    let (alice_name, bob_name, carol_name) =
+        (format!("reset_a_{run}"), format!("reset_b_{run}"), format!("reset_c_{run}"));
+    let (alice, _, _) = create_client_helper(&base_url, &ws_url, &test_dir, &alice_name).await;
+    let (bob, _, _) = create_client_helper(&base_url, &ws_url, &test_dir, &bob_name).await;
+    let (carol, _, _) = create_client_helper(&base_url, &ws_url, &test_dir, &carol_name).await;
+
+    let group_id = alice.create_group("reset".into(), "".into(), 0).await.unwrap().id;
+    let manager = (UserPermission::AddMessage as u32)
+        | (UserPermission::ManageRole as u32)
+        | (UserPermission::ManageMember as u32);
+    alice
+        .update_group_roles(
+            group_id,
+            vec![UpdateRoleProposalFfi { name: "manager".into(), role_id: 2, permissions: manager, delete: false, color: 1 }],
+        )
+        .await
+        .unwrap();
+    alice.add_group_member(group_id, bob_name.clone(), 2).await.unwrap();
+    alice.add_group_member(group_id, carol_name.clone(), 2).await.unwrap();
+    bob.check_setup().await.unwrap();
+    carol.check_setup().await.unwrap();
+
+    async fn role_of(client: &FireflyWsClient, group_id: u64, username: &str) -> Option<u32> {
+        let bytes = client.get_group_extension(group_id).await.ok()?;
+        firefly_protos::deserialize_proto::<firefly::FireflyGroupExtension>(&bytes)
+            .ok()?
+            .members
+            .iter()
+            .find(|m| m.username == username)
+            .map(|m| m.role)
+            // the app's view lists every roster member; no entry of their own means role 0
+            .or(Some(0))
+    }
+    async fn await_role(client: &FireflyWsClient, group_id: u64, username: &str, expected: Option<u32>) {
+        for _ in 0..200 {
+            if role_of(client, group_id, username).await == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("{username}'s role never became {expected:?}");
+    }
+    await_role(&bob, group_id, &carol_name, Some(2)).await;
+
+    // A manager who isn't the owner gets an error, not a silent no-op.
+    let by_bob = bob
+        .update_group_users(group_id, vec![UpdateUserProposalFfi { username: carol_name.clone(), role_id: 0 }])
+        .await;
+    assert!(by_bob.is_err(), "only the owner can reset a role for now");
+    assert_eq!(role_of(&bob, group_id, &carol_name).await, Some(2));
+
+    // The owner's reset reaches every member: carol is back on the default role.
+    let reset_commit = alice
+        .update_group_users(group_id, vec![UpdateUserProposalFfi { username: carol_name.clone(), role_id: 0 }])
+        .await
+        .expect("owner resets carol");
+    assert!(reset_commit > 0);
+    await_role(&alice, group_id, &carol_name, Some(0)).await;
+    await_role(&bob, group_id, &carol_name, Some(0)).await;
+    await_role(&carol, group_id, &carol_name, Some(0)).await;
+
+    // The group still works afterwards: bob (still a manager) can commit.
+    bob.update_group_users(group_id, vec![UpdateUserProposalFfi { username: carol_name.clone(), role_id: 2 }])
+        .await
+        .expect("bob gives carol the manager role again");
+    await_role(&carol, group_id, &carol_name, Some(2)).await;
+    cleanup_dir(&test_dir);
+}
