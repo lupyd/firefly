@@ -29,6 +29,10 @@ impl KeyValueStore {
         Ok(Self { pool })
     }
 
+    pub fn pool(&self) -> SqlitePool {
+        self.pool.clone()
+    }
+
     pub async fn get(&self, key: &str) -> anyhow::Result<String> {
         let row = crate::sql::query(
             r#"

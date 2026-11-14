@@ -130,13 +130,78 @@ fn unpack(
     Ok(records)
 }
 
+/// How long after joining this device still takes a recent-history handoff.
+const HANDOFF_TTL_MS: u64 = 14 * 24 * 60 * 60 * 1000;
+
+/// Written when this device joins a group from a Welcome: who added it (the member whose commit
+/// the Welcome came from, MLS-authenticated) and when.
+#[derive(Serialize, Deserialize)]
+struct JoinHandoff {
+    adder: String,
+    at_ms: u64,
+}
+fn handoff_key(g: u64) -> String {
+    format!("snapshot-handoff:{g}")
+}
+fn added_key(g: u64, username: &str) -> String {
+    format!("snapshot-added:{g}:{username}")
+}
+
+pub(super) async fn record_join_handoff(kv: &KeyValueStore, g: u64, adder: Option<&str>) -> anyhow::Result<()> {
+    let handoff = JoinHandoff {
+        adder: adder.unwrap_or_default().to_string(),
+        at_ms: crate::utils::get_current_timestamp_millis_since_epoch(),
+    };
+    kv.set(&handoff_key(g), &serde_json::to_string(&handoff)?).await
+}
+
+/// This device committed the Add of `username` to `g`: it hands them the recent history even
+/// when another member claims their history request (see `handle_group_history_signal`).
+pub(super) async fn record_added_by_me(kv: &KeyValueStore, g: u64, username: &str) {
+    let now = crate::utils::get_current_timestamp_millis_since_epoch();
+    if let Err(err) = kv.set(&added_key(g, username), &now.to_string()).await {
+        log::warn!("could not record adding {username} to group {g}: {err:#}");
+    }
+}
+
+pub(super) async fn added_by_me_recently(kv: &KeyValueStore, g: u64, username: &str) -> bool {
+    let now = crate::utils::get_current_timestamp_millis_since_epoch();
+    kv.get(&added_key(g, username))
+        .await
+        .ok()
+        .and_then(|at| at.parse::<u64>().ok())
+        .is_some_and(|at| now.saturating_sub(at) < HANDOFF_TTL_MS)
+}
+
+/// Whether `sender` may hand this device the group's recent history (records it cannot check
+/// against messages it received itself): only while this device waits for the handoff after
+/// joining, and only the member who added it or another device of this account. Anyone else
+/// could put messages under any member's name into this device's history.
+pub(super) async fn handoff_sender_allowed(kv: &KeyValueStore, g: u64, sender: &str, me: &str) -> bool {
+    let Ok(encoded) = kv.get(&handoff_key(g)).await else { return false };
+    let Ok(handoff) = serde_json::from_str::<JoinHandoff>(&encoded) else { return false };
+    let now = crate::utils::get_current_timestamp_millis_since_epoch();
+    if now.saturating_sub(handoff.at_ms) >= HANDOFF_TTL_MS {
+        return false;
+    }
+    !sender.is_empty() && (sender == me || sender == handoff.adder)
+}
+
 // Called before advancing the received-message cursor. Persist keys first so a
 // restart after receipt but before download can safely resume without the adder.
+//
+// `sender` is the MLS-authenticated member who sent the bundle. Its recent tail is only taken
+// from the member who added this device during the join handoff, and its pin snapshot only
+// from that member or from a member who may pin in every channel; archive keys are bound to
+// peer-approved chunk hashes and are taken from any member.
 pub(super) async fn accept_bundle(
     kv: &KeyValueStore,
     keys: &HistoryKeysStore,
     group: u64,
     b: &firefly::GroupSyncBundle<'_>,
+    sender: &str,
+    me: &str,
+    sender_can_pin: bool,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
         b.format_version == 1
@@ -172,14 +237,23 @@ pub(super) async fn accept_bundle(
         )
         .await?;
     }
-    for s in [b.pinned.as_ref(), b.recent.as_ref()].into_iter().flatten() {
+    let handoff = handoff_sender_allowed(kv, group, sender, me).await;
+    let pinned = b.pinned.as_ref().filter(|_| handoff || sender_can_pin);
+    let recent = b.recent.as_ref().filter(|_| handoff);
+    if b.pinned.is_some() && pinned.is_none() {
+        log::warn!("ignoring pin snapshot in group {group} from {sender}: may not pin everywhere");
+    }
+    if b.recent.is_some() && recent.is_none() {
+        log::warn!("ignoring recent history in group {group} from {sender}: not this device's join handoff");
+    }
+    for s in [pinned, recent].into_iter().flatten() {
         kv.set(
             &format!("snapshot-candidate:{group}:{}:{}", s.kind, s.snapshot_id),
             &encode_secret(s)?,
         )
         .await?;
     }
-    if let Some(s) = &b.recent {
+    if let Some(s) = recent {
         kv.enqueue_snapshot_tail(group, &s.snapshot_id).await?;
     }
     // Keep each page, not just the last page. The normal history importer still
@@ -559,15 +633,20 @@ impl FireflyWsClient {
             anyhow::bail!("Recent snapshot unavailable; fresh handoff requested");
         };
         let (secret, records) = self.validated_snapshot(g, 2, id, &blob).await?;
-        // Tail snapshots are unverified imports, never independent evidence.
+        // Tail snapshots are unverified imports, never independent evidence. Every record this
+        // device received itself must match it exactly (sender included), or the whole
+        // snapshot is refused.
         let ids = records.iter().map(|r| r.id).collect::<Vec<_>>();
         let evidence = self
             .group_messages_store
             .authenticated_history_ids(g, &ids)
             .await?;
-        if evidence.len() == records.len() {
+        for original in &evidence {
+            let claimed = records.iter().find(|r| r.id == original.id);
             anyhow::ensure!(
-                compute_unencrypted_hash(&evidence)?.as_slice() == secret.plaintext_hash.as_ref(),
+                claimed.is_some_and(|r| r.by == original.by
+                    && r.message == original.message
+                    && r.channel_id == original.channel_id),
                 "Recent snapshot disagrees with authenticated originals"
             );
         }
@@ -576,6 +655,8 @@ impl FireflyWsClient {
         self.group_messages_store
             .import_verified_history(g, i64::MAX as u64, &secret.plaintext_hash, &records)
             .await?;
+        // The handoff is done: no further tail is taken for this join.
+        self.key_value_store.set(&handoff_key(g), "").await?;
         self.callbacks
             .on_group_history_signal(crate::callbacks::GroupHistorySignal {
                 group_id: g,
@@ -753,6 +834,7 @@ mod tests {
         let pool = crate::db::setup_pool("sqlite::memory:", 1).await?;
         let kv = KeyValueStore::new(pool.clone()).await?;
         let keys = HistoryKeysStore::new(pool.clone()).await?;
+        record_join_handoff(&kv, 42, Some("alice")).await?;
         let (pin, _) = pack(42, 1, &[])?;
         let (tail, blob) = pack(42, 2, &[record(10)])?;
         let bundle = firefly::GroupSyncBundle {
@@ -764,8 +846,8 @@ mod tests {
             last_page: true,
             ..Default::default()
         };
-        accept_bundle(&kv, &keys, 42, &bundle).await?;
-        accept_bundle(&kv, &keys, 42, &bundle).await?;
+        accept_bundle(&kv, &keys, 42, &bundle, "alice", "bob", true).await?;
+        accept_bundle(&kv, &keys, 42, &bundle, "alice", "bob", true).await?;
         assert!(kv.has_pending_snapshot_tails(42).await?);
         drop(kv);
         let kv = KeyValueStore::new(pool).await?;
@@ -774,12 +856,12 @@ mod tests {
                 .await?,
         )?;
         assert_eq!(unpack(42, &recovered, &blob)?.len(), 1);
-        assert!(accept_bundle(&kv, &keys, 43, &bundle).await.is_err());
+        assert!(accept_bundle(&kv, &keys, 43, &bundle, "alice", "bob", true).await.is_err());
         assert_eq!(
             kv.drain_snapshot_tails(42, 0, |_| async { Ok(()) }).await?,
             1
         );
-        accept_bundle(&kv, &keys, 42, &bundle).await?;
+        accept_bundle(&kv, &keys, 42, &bundle, "alice", "bob", true).await?;
         assert!(!kv.has_pending_snapshot_tails(42).await?);
         Ok(())
     }

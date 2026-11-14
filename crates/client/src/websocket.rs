@@ -2,6 +2,8 @@ use crate::callbacks::{CallSignal, GroupMeetingSignal, ReadUserMessagesUpto};
 use crate::storage::GroupMessage;
 #[path = "group_snapshots.rs"]
 mod group_snapshots;
+#[path = "own_device_trust.rs"]
+mod own_device_trust;
 use std::{
     collections::HashMap,
     sync::{
@@ -406,6 +408,12 @@ impl FireflyWsClientCallback for InternalSignalCallback {
     }
     async fn on_direct_history_page(&self, page: crate::callbacks::DirectHistoryPage) {
         self.inner.on_direct_history_page(page).await;
+    }
+    async fn on_own_device_trust_request(&self, request: crate::callbacks::OwnDeviceTrustRequest) {
+        self.inner.on_own_device_trust_request(request).await;
+    }
+    async fn on_own_device_trust_changed(&self) {
+        self.inner.on_own_device_trust_changed().await;
     }
 }
 
@@ -1922,6 +1930,15 @@ impl FireflyWsClient {
 
         if let Err(err) = self.refresh_accepted_users().await {
             log::warn!("failed to refresh accepted users: {:?}", err);
+        }
+
+        if let Some(token) = self.callbacks.get_access_token().await {
+            if let Err(err) = self.bootstrap_own_device_trust(&token).await {
+                log::warn!("could not list the account's devices to trust: {err:#}");
+            }
+        }
+        if let Err(err) = self.announce_own_device().await {
+            log::warn!("could not announce this device to the account's other devices: {err:#}");
         }
 
         let migrate_to_wt = async {
@@ -3569,6 +3586,7 @@ impl FireflyWsClient {
             }
         };
 
+        group_snapshots::record_added_by_me(&self.key_value_store, groupId, &request.username).await;
         self.group_messages_store
             .update_cursor(id, groupId, group.epoch().await as u32)
             .await?;
@@ -4131,6 +4149,7 @@ impl FireflyWsClient {
         let group = join_group_bound(
             firefly_mls_client,
             &self.group_info_store,
+            &self.key_value_store,
             groupId,
             invite.welcomeMessage.to_vec(),
         )
@@ -4344,6 +4363,11 @@ impl FireflyWsClient {
                 .await?;
 
             self.update_pre_key_bundles(&token).await?;
+
+            // Before any message is read: devices that already exist are trusted.
+            if let Err(err) = self.bootstrap_own_device_trust(&token).await {
+                log::warn!("could not list the account's devices to trust: {err:#}");
+            }
         }
 
         {
@@ -4849,7 +4873,8 @@ impl FireflyWsClient {
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
 
-        let id = group.add_member(username, role_id).await?;
+        let id = group.add_member(username.clone(), role_id).await?;
+        group_snapshots::record_added_by_me(&self.key_value_store, group_id, &username).await;
 
         self.group_messages_store
             .update_cursor(id, group_id, group.epoch().await as u32)
@@ -5443,8 +5468,18 @@ impl FireflyWsClient {
         CURRENT_CLIENT.scope(name, async {
             match signal.signal_type {
                 0 => {
+                    let mut shared = false;
                     for request in self.get_pending_group_history_requests(vec![signal.group_id]).await?.into_iter() {
-                        self.fulfill_group_history(signal.group_id, request.id, request.start_msg_id, request.end_msg_id).await?;
+                        shared |= self.fulfill_group_history(signal.group_id, request.id, request.start_msg_id, request.end_msg_id).await?;
+                    }
+                    // A device that just joined only takes recent history from the member who
+                    // added it: when another member claimed the request, the adder still sends it.
+                    if !shared
+                        && !signal.username.is_empty()
+                        && group_snapshots::added_by_me_recently(&self.key_value_store, signal.group_id, &signal.username).await
+                        && self.history_enabled(signal.group_id).await?
+                    {
+                        self.share_join_snapshots(signal.group_id).await?;
                     }
                 }
                 1 | 5 => { self.verify_published_chunks(signal.group_id).await?; }
@@ -5806,6 +5841,13 @@ impl FireflyWsClient {
                 "the asking device has no keys"
             );
         }
+        // Only a device the user approved gets history, checked against the keys used below.
+        anyhow::ensure!(
+            self.own_device_trust(request.requester_address, request.requester_device_id).await
+                == crate::db::own_devices::OwnDeviceTrust::Trusted,
+            "device {} of this account is not trusted",
+            request.requester_address
+        );
         let message = self
             .create_encrypted_message(
                 ProtocolAddress::new(username, DeviceId::new(device_id)?),
@@ -5839,8 +5881,10 @@ impl FireflyWsClient {
             message_type: 0,
         })?
         .to_vec();
-        let username = self.callbacks.name().to_string();
-        self.encrypt_and_send_internal(&username, &payload, 0).await.map(|_| ())
+        // The key decrypts the account's direct-message backup: only devices the user approved.
+        let sent = self.send_to_trusted_own_devices(&payload).await?;
+        log::info!("sent a backup key sync to {sent} trusted devices");
+        Ok(())
     }
 
     pub async fn fulfill_group_history(&self, group_id:u64, request_id:u64, start_msg_id:u64, end_msg_id:u64)->anyhow::Result<bool> {
@@ -6295,7 +6339,9 @@ async fn on_group_message(
             if let Some(firefly::GroupMessageInner{message:firefly::mod_GroupMessageInner::OneOfmessage::syncBundle(bundle),..})=inner.as_ref() {
                 // MLS already consumed this message, so a rejected bundle must not abort
                 // before the cursor advances (that would stall group sync forever).
-                match group_snapshots::accept_bundle(key_value_store,history_keys_store,groupId,bundle).await {
+                let sender = encrypted_group_message.sender.as_str();
+                let sender_can_pin = bundle.pinned.is_some() && group.can_pin_everywhere(sender).await.unwrap_or(false);
+                match group_snapshots::accept_bundle(key_value_store,history_keys_store,groupId,bundle,sender,callbacks.name(),sender_can_pin).await {
                     Ok(_) => callbacks.on_group_history_signal(crate::callbacks::GroupHistorySignal{group_id:groupId,signal_type:8,request_id:0,chunk_id:0,username:encrypted_group_message.sender.clone()}).await,
                     Err(err) => log::warn!("rejected sync bundle in group {} message {} from {}: {}", groupId, msg.id, encrypted_group_message.sender, err),
                 }
@@ -6485,6 +6531,26 @@ async fn on_user_message(
     // `settings` is an unauthenticated wire field chosen by the uploader, so only the
     // Signal-authenticated sender decides whether this came from one of our own devices.
     let is_self_msg = from == my_username;
+    // Another device of this account is only believed once the user approved it: anyone who can
+    // register a device for the account (its token holder, or the server) would otherwise feed
+    // this device fake "sent by me" copies, pins and history (see `own_device_trust`).
+    let self_trust = if is_self_msg {
+        own_device_trust::own_trust(key_value_store, my_username, msg.fromId, fromDeviceId as u32).await
+    } else {
+        crate::db::own_devices::OwnDeviceTrust::Unknown
+    };
+    let trusted_self = is_self_msg && self_trust == crate::db::own_devices::OwnDeviceTrust::Trusted;
+    if is_self_msg && !trusted_self {
+        log::warn!(
+            "message {} from own device {} (device {}) that is not trusted: ignoring it",
+            msg.id,
+            msg.fromId,
+            fromDeviceId
+        );
+        if self_trust == crate::db::own_devices::OwnDeviceTrust::Unknown {
+            own_device_trust::prompt(callbacks, msg.toId, msg.fromId, fromDeviceId as u32).await;
+        }
+    }
 
     let mut is_dummy = false;
     let mut other_username = from.into_owned();
@@ -6503,7 +6569,7 @@ async fn on_user_message(
                 is_dummy = true;
             }
             firefly::mod_UserMessageInner::OneOfmessage::selfMessage(self_msg) => {
-                if is_self_msg {
+                if trusted_self {
                     other_username = self_msg.to.into_owned();
                     final_message = self_msg.inner.into_owned();
                     sent_by_other = false;
@@ -6533,6 +6599,14 @@ async fn on_user_message(
                             callbacks.on_direct_backup_key_sync(owned_sync).await;
                         }
                     }
+                    if let Ok(inner_inner) = deserialize_proto::<firefly::UserMessageInner>(&final_message) {
+                        if let firefly::mod_UserMessageInner::OneOfmessage::ownDeviceTrust(update) = inner_inner.message {
+                            is_dummy = true;
+                            own_device_trust::apply_trust_update(key_value_store, callbacks, msg.toId, &update).await;
+                        }
+                    }
+                } else if is_self_msg {
+                    is_dummy = true;
                 } else {
                     log::warn!(
                         "ignoring selfMessage from {} device {}: not one of our own devices",
@@ -6541,6 +6615,10 @@ async fn on_user_message(
                     );
                     is_dummy = true;
                 }
+            }
+            // Only inside a selfMessage from a trusted device of this account (above).
+            firefly::mod_UserMessageInner::OneOfmessage::ownDeviceTrust(_) => {
+                is_dummy = true;
             }
             firefly::mod_UserMessageInner::OneOfmessage::backupKeySync(_) => {
                 if !is_self_msg {
@@ -6568,6 +6646,9 @@ async fn on_user_message(
             } else {
                 other_username.clone()
             };
+            if is_self_msg && !trusted_self {
+                log::warn!("ignoring direct pin snapshot from an untrusted own device {}", msg.fromId);
+            } else {
             callbacks
                 .on_direct_pin_snapshot(
                     conversation_peer,
@@ -6581,14 +6662,16 @@ async fn on_user_message(
                     },
                 )
                 .await;
+            }
         }
     }
 
     if let Ok(inner) = deserialize_proto::<firefly::UserMessageInner>(&final_message) {
         if let firefly::mod_UserMessageInner::OneOfmessage::directHistory(page) = inner.message {
             is_dummy = true;
-            // Only our own devices hold our history; anyone else could forge it.
-            if is_self_msg {
+            // Only our own devices hold our history; anyone else could forge it, and so could a
+            // device of this account the user never approved.
+            if trusted_self {
                 let other = page.other.to_string();
                 callbacks
                     .on_direct_history_page(crate::callbacks::DirectHistoryPage {
@@ -6846,6 +6929,7 @@ async fn re_add_member_internal(
         }
         res => res?,
     };
+    group_snapshots::record_added_by_me(key_value_store, group_id, &request.username).await;
 
     group_message_store
         .update_cursor(id, group_id, group.epoch().await as u32)
@@ -6886,7 +6970,8 @@ async fn add_member_internal(
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    let id = group.add_member(username, role_id).await?;
+    let id = group.add_member(username.clone(), role_id).await?;
+    group_snapshots::record_added_by_me(key_value_store, group_id, &username).await;
 
     group_message_store
         .update_cursor(id, group_id, group.epoch().await as u32)
@@ -6962,6 +7047,7 @@ async fn replenish_key_packages_standalone(
 async fn join_group_bound(
     firefly_mls_client: &FfiMlsClient,
     group_info_store: &GroupInfoStore,
+    key_value_store: &KeyValueStore,
     group_id: u64,
     welcome_message: Vec<u8>,
 ) -> anyhow::Result<Arc<FfiMlsGroup>> {
@@ -6979,8 +7065,8 @@ async fn join_group_bound(
         },
     };
 
-    let group = firefly_mls_client
-        .join_group(group_id, welcome_message)
+    let (group, adder) = firefly_mls_client
+        .join_group_with_adder(group_id, welcome_message)
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -6997,6 +7083,11 @@ async fn join_group_bound(
                 group_id
             ));
         }
+    }
+
+    // Only the member who added this device may hand it the group's recent history.
+    if let Err(err) = group_snapshots::record_join_handoff(key_value_store, group_id, adder.as_deref()).await {
+        log::warn!("could not record who added this device to group {group_id}: {err:#}");
     }
 
     Ok(group)
@@ -7018,6 +7109,7 @@ async fn join_group_internal(
     let group = join_group_bound(
         firefly_mls_client,
         group_info_store,
+        key_value_store,
         group_id,
         invite.welcomeMessage.to_vec(),
     )
@@ -7466,16 +7558,36 @@ async fn on_server_message(
                 request.requester_address
             );
             if request.requester_address != address_id {
-                callbacks
-                    .on_direct_history_request(crate::callbacks::DirectHistoryRequest {
-                        request_id: request.request_id,
-                        other: request.other.to_string(),
-                        before_id: request.before_id,
-                        limit: request.limit,
-                        requester_address: request.requester_address,
-                        requester_device_id: request.requester_device_id,
-                    })
-                    .await;
+                let request = crate::callbacks::DirectHistoryRequest {
+                    request_id: request.request_id,
+                    other: request.other.to_string(),
+                    before_id: request.before_id,
+                    limit: request.limit,
+                    requester_address: request.requester_address,
+                    requester_device_id: request.requester_device_id,
+                };
+                // Only a device the user approved gets the account's history; another one waits
+                // here until the user decides (`trust_own_device` answers it then).
+                match own_device_trust::own_trust(
+                    key_value_store,
+                    callbacks.name(),
+                    request.requester_address,
+                    request.requester_device_id,
+                )
+                .await
+                {
+                    crate::db::own_devices::OwnDeviceTrust::Trusted => {
+                        callbacks.on_direct_history_request(request).await;
+                    }
+                    crate::db::own_devices::OwnDeviceTrust::Rejected => {
+                        log::warn!("not answering direct history request of rejected device {}", request.requester_address);
+                    }
+                    crate::db::own_devices::OwnDeviceTrust::Unknown => {
+                        let (requester, device) = (request.requester_address, request.requester_device_id);
+                        own_device_trust::hold_history_request(address_id, request);
+                        own_device_trust::prompt(callbacks, address_id, requester, device).await;
+                    }
+                }
             }
         }
         firefly::mod_ServerMessage::OneOfmessage::groupLeaveRequests(requests) => {
@@ -7590,6 +7702,22 @@ impl FfiFireflyWsClient {
     pub async fn send_direct_history_page(&self, request: &crate::callbacks::DirectHistoryRequest, messages: &[crate::db::messages::UserMessage], has_more: bool) -> anyhow::Result<()> {
         let name = self.inner.callbacks.name().to_string();
         CURRENT_CLIENT.scope(name, self.inner.send_direct_history_page(request, messages, has_more)).await
+    }
+    /// See [`FireflyWsClient::trust_own_device`].
+    pub async fn trust_own_device(&self, address_id: u64, device_id: u32) -> anyhow::Result<()> {
+        let name = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT.scope(name, self.inner.trust_own_device(address_id, device_id)).await
+    }
+    /// See [`FireflyWsClient::reject_own_device`].
+    pub async fn reject_own_device(&self, address_id: u64, device_id: u32) -> anyhow::Result<()> {
+        let name = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT.scope(name, self.inner.reject_own_device(address_id, device_id)).await
+    }
+    pub async fn own_device_trust(&self, address_id: u64, device_id: u32) -> crate::db::own_devices::OwnDeviceTrust {
+        self.inner.own_device_trust(address_id, device_id).await
+    }
+    pub async fn own_device_trust_list(&self) -> anyhow::Result<Vec<crate::db::own_devices::OwnDeviceTrustEntry>> {
+        self.inner.own_device_trust_list().await
     }
     pub async fn import_group_history_page(&self, group: u64, since: u64, until: u64) -> anyhow::Result<HistoryImportPage> { self.inner.import_group_history_page(group,since,until).await }
     pub async fn handle_group_history_signal(&self, signal: crate::callbacks::GroupHistorySignal) -> anyhow::Result<()> {

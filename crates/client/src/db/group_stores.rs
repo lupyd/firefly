@@ -232,6 +232,7 @@ impl GroupStateStore {
                 for key in [
                     format!("snapshot-join-pending:{gid}"),
                     format!("snapshot-join-completed:{gid}"),
+                    format!("snapshot-handoff:{gid}"),
                     format!("history_export_cursor:{gid}"),
                     format!("history_verify_cursor:{gid}"),
                 ] {
@@ -246,6 +247,7 @@ impl GroupStateStore {
                     format!("snapshot-outbox:{gid}:"),
                     format!("snapshot-candidate:{gid}:"),
                     format!("snapshot-archive:{gid}:"),
+                    format!("snapshot-added:{gid}:"),
                 ] {
                     crate::sql::query("DELETE FROM key_value_store WHERE substr(key, 1, length(?1)) = ?1")
                         .bind(prefix)

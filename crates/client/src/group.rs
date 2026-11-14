@@ -415,7 +415,16 @@ impl FfiMlsClient {
         group_id: u64,
         welcome_message: Vec<u8>,
     ) -> anyhow::Result<Arc<FfiMlsGroup>> {
-        let group = self.inner().join_group(group_id, welcome_message).await?;
+        Ok(self.join_group_with_adder(group_id, welcome_message).await?.0)
+    }
+
+    /// Joins from a Welcome and returns the username of the member who added this device.
+    pub async fn join_group_with_adder(
+        &self,
+        group_id: u64,
+        welcome_message: Vec<u8>,
+    ) -> anyhow::Result<(Arc<FfiMlsGroup>, Option<String>)> {
+        let (group, adder) = self.inner().join_group_with_adder(group_id, welcome_message).await?;
 
         let group = Arc::new(FfiMlsGroup {
             group,
@@ -429,7 +438,7 @@ impl FfiMlsClient {
                 .insert(group_id, group.clone());
         }
 
-        Ok(group)
+        Ok((group, adder))
     }
 
     /// The group currently cached for `group_id`, if any.
@@ -524,6 +533,10 @@ impl FfiMlsGroup {
 
     pub async fn is_owner(&self) -> anyhow::Result<bool> {
         self.group.is_owner().await
+    }
+
+    pub async fn can_pin_everywhere(&self, username: &str) -> anyhow::Result<bool> {
+        self.group.can_pin_everywhere(username).await
     }
 
     /// Persists the departures recorded by commits applied through this group since the last
