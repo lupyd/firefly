@@ -4307,6 +4307,19 @@ impl FireflyWsClient {
 
             log::info!("address to upload {:?}", address);
 
+            // A device registering for the first time trusts the account's other devices only
+            // provisionally (see `own_device_trust`); an existing one upgrading trusts them.
+            if identity.id == 0
+                && self
+                    .key_value_store
+                    .get(crate::db::own_devices::KEY_SERVER_BOOTSTRAPPED)
+                    .await
+                    .unwrap_or_default()
+                    .is_empty()
+            {
+                self.key_value_store.set(own_device_trust::KEY_FRESH_DEVICE, "1").await?;
+            }
+
             self.addressId
                 .store(identity.id as u64, std::sync::atomic::Ordering::Relaxed);
 
@@ -5883,7 +5896,7 @@ impl FireflyWsClient {
         })?
         .to_vec();
         // The key decrypts the account's direct-message backup: only devices the user approved.
-        let sent = self.send_to_trusted_own_devices(&payload).await?;
+        let sent = self.send_to_trusted_own_devices(&payload, false).await?;
         log::info!("sent a backup key sync to {sent} trusted devices");
         Ok(())
     }
@@ -6603,7 +6616,7 @@ async fn on_user_message(
                     if let Ok(inner_inner) = deserialize_proto::<firefly::UserMessageInner>(&final_message) {
                         if let firefly::mod_UserMessageInner::OneOfmessage::ownDeviceTrust(update) = inner_inner.message {
                             is_dummy = true;
-                            own_device_trust::apply_trust_update(key_value_store, callbacks, msg.toId, &update).await;
+                            own_device_trust::apply_trust_update(key_value_store, callbacks, msg.toId, msg.fromId, &update).await;
                         }
                     }
                 } else if is_self_msg {
@@ -7603,7 +7616,7 @@ async fn on_server_message(
                 };
                 // Only a device the user approved gets the account's history; another one waits
                 // here until the user decides (`trust_own_device` answers it then).
-                match own_device_trust::own_trust(
+                match own_device_trust::own_trust_to_share(
                     key_value_store,
                     callbacks.name(),
                     request.requester_address,

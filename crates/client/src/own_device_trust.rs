@@ -17,6 +17,16 @@ use crate::db::own_devices::{KEY_SERVER_BOOTSTRAPPED, OwnDeviceTrust, OwnDeviceT
 
 /// Set once this device announced itself to the account's other devices.
 const KEY_ANNOUNCED: &str = "own_device_trust_announced";
+/// Set when this device registers for the first time (a fresh install), until its bootstrap ran.
+pub(super) const KEY_FRESH_DEVICE: &str = "own_device_trust_fresh_device";
+/// The account's devices this device trusts only provisionally (JSON list of address ids): a
+/// fresh install takes the server's word for which devices are the user's, so their messages are
+/// believed (the device that approves it sends its history and decisions), but they get nothing
+/// from it (history, the backup key) and vouch for no one until the user approves them here, or
+/// a device trusted here in full vouches for them. Otherwise a device the server (or a holder of
+/// the account's token) listed at install time would be trusted in full, get the history the
+/// approved install receives, and pass its trust on to the account's other devices.
+const KEY_PROVISIONAL: &str = "own_device_trust_provisional";
 /// How often the user is asked again about the same device while it keeps asking.
 const PROMPT_INTERVAL_MS: u64 = 60_000;
 /// History requests kept per untrusted device until the user decides.
@@ -45,6 +55,57 @@ pub(super) async fn own_trust(kv: &KeyValueStore, me: &str, address_id: u64, dev
             OwnDeviceTrust::Unknown
         }
     }
+}
+
+async fn provisional(kv: &KeyValueStore) -> std::collections::BTreeSet<u64> {
+    kv.get(KEY_PROVISIONAL)
+        .await
+        .ok()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default()
+}
+
+async fn update_provisional(kv: &KeyValueStore, f: impl FnOnce(&mut std::collections::BTreeSet<u64>)) -> anyhow::Result<()> {
+    let mut set = provisional(kv).await;
+    let before = set.clone();
+    f(&mut set);
+    if set != before {
+        kv.set(KEY_PROVISIONAL, &serde_json::to_string(&set)?).await?;
+    }
+    Ok(())
+}
+
+/// Whether this device may give the account's device `address_id` its history or the backup
+/// key, or vouch for it: trusted, and not just provisionally (see `KEY_PROVISIONAL`).
+pub(super) async fn own_trust_to_share(kv: &KeyValueStore, me: &str, address_id: u64, device_id: u32) -> OwnDeviceTrust {
+    match own_trust(kv, me, address_id, device_id).await {
+        OwnDeviceTrust::Trusted if provisional(kv).await.contains(&address_id) => OwnDeviceTrust::Unknown,
+        trust => trust,
+    }
+}
+
+/// Records the account's devices the server listed (`bootstrap_own_device_trust`). On a fresh
+/// install they are trusted only provisionally.
+pub(super) async fn trust_listed_devices(
+    kv: &KeyValueStore,
+    me: &str,
+    listed: &[(u64, u32)],
+    fresh: bool,
+) -> anyhow::Result<usize> {
+    let store = OwnDeviceTrustStore::new(kv.pool());
+    let mut others = 0;
+    for &(address_id, device_id) in listed {
+        let identity = store.current_identity(me, device_id).await?;
+        if fresh && store.trust_of(me, address_id, device_id).await? == OwnDeviceTrust::Unknown {
+            update_provisional(kv, |p| {
+                p.insert(address_id);
+            })
+            .await?;
+        }
+        store.trust_if_undecided(address_id, device_id, identity.as_deref()).await?;
+        others += 1;
+    }
+    Ok(others)
 }
 
 /// Asks the user about an unapproved device, at most once a minute per device.
@@ -80,21 +141,62 @@ fn take_held(my_address: u64, address_id: u64) -> Vec<DirectHistoryRequest> {
 }
 
 /// Applies the decisions another trusted device of this account sent (`ownDeviceTrust`).
+///
+/// `sender_address` is the trusted device that sent them. A device trusted only provisionally
+/// (`KEY_PROVISIONAL`) can't make another device more than provisionally trusted, and can't
+/// reject one: it may be the one the server slipped in.
 pub(super) async fn apply_trust_update(
     kv: &KeyValueStore,
     callbacks: &Arc<dyn FireflyWsClientCallback>,
     my_address: u64,
+    sender_address: u64,
     update: &firefly::OwnDeviceTrust<'_>,
 ) {
     if update.entries.is_empty() {
         return;
     }
+    apply_trust_entries(kv, my_address, sender_address, update).await;
+    callbacks.on_own_device_trust_changed().await;
+}
+
+async fn apply_trust_entries(kv: &KeyValueStore, my_address: u64, sender_address: u64, update: &firefly::OwnDeviceTrust<'_>) {
     let store = OwnDeviceTrustStore::new(kv.pool());
+    let sender_provisional = provisional(kv).await.contains(&sender_address);
     for entry in &update.entries {
-        if entry.address_id == my_address || entry.address_id == 0 {
+        if entry.address_id == my_address || entry.address_id == 0 || entry.address_id == sender_address {
             continue;
         }
         let identity = (!entry.identity_key.is_empty()).then_some(entry.identity_key.as_ref());
+        if sender_provisional {
+            if !entry.trusted {
+                log::warn!("ignoring a rejection of own device {} from provisionally trusted device {sender_address}", entry.address_id);
+                continue;
+            }
+            // Only a device this one never decided about: a decision made here stands, and a
+            // device already trusted stays as fully trusted as it was.
+            let decided = match store.list().await {
+                Ok(list) => list.iter().any(|e| e.address_id == entry.address_id),
+                Err(_) => true,
+            };
+            if decided {
+                continue;
+            }
+            if let Err(err) = update_provisional(kv, |p| {
+                p.insert(entry.address_id);
+            })
+            .await
+            {
+                log::warn!("could not record provisional trust of own device {}: {err:#}", entry.address_id);
+                continue;
+            }
+        } else if let Err(err) = update_provisional(kv, |p| {
+            p.remove(&entry.address_id);
+        })
+        .await
+        {
+            log::warn!("could not record trust of own device {}: {err:#}", entry.address_id);
+            continue;
+        }
         if let Err(err) = store.set(entry.address_id, entry.device_id, entry.trusted, identity).await {
             log::warn!("could not record trust of own device {}: {err:#}", entry.address_id);
         }
@@ -104,7 +206,6 @@ pub(super) async fn apply_trust_update(
             pending().prompted_at.remove(&(my_address, entry.address_id));
         }
     }
-    callbacks.on_own_device_trust_changed().await;
 }
 
 impl FireflyWsClient {
@@ -117,8 +218,11 @@ impl FireflyWsClient {
         self.own_trust_store().list().await
     }
 
+    /// Whether this device gives `address_id` the account's history and backup key. A device
+    /// trusted only provisionally (a fresh install's view of the account's other devices) is
+    /// `Unknown` here until the user approves it on this device.
     pub async fn own_device_trust(&self, address_id: u64, device_id: u32) -> OwnDeviceTrust {
-        own_trust(&self.key_value_store, self.callbacks.name(), address_id, device_id).await
+        own_trust_to_share(&self.key_value_store, self.callbacks.name(), address_id, device_id).await
     }
 
     /// The user approves another device of this account: it gets the account's history from
@@ -169,13 +273,20 @@ impl FireflyWsClient {
             identity = store.current_identity(&me, device_id).await?;
         }
         store.set(address_id, device_id, trusted, identity.as_deref()).await?;
+        update_provisional(&self.key_value_store, |p| {
+            p.remove(&address_id);
+        })
+        .await?;
         log::info!("own device {address_id} (device {device_id}) {}", if trusted { "trusted" } else { "rejected" });
 
         // Tell the other trusted devices (and the newly trusted one) so they don't ask again.
+        // Devices trusted here only provisionally are not vouched for.
+        let provisional = provisional(&self.key_value_store).await;
         let entries = store
             .list()
             .await?
             .into_iter()
+            .filter(|e| !provisional.contains(&e.address_id))
             .map(|e| firefly::OwnDeviceTrustEntry {
                 address_id: e.address_id,
                 device_id: e.device_id,
@@ -190,7 +301,7 @@ impl FireflyWsClient {
             message_type: firefly_protos::MESSAGE_TYPE_HIDDEN,
         })?
         .to_vec();
-        if let Err(err) = self.send_to_trusted_own_devices(&inner).await {
+        if let Err(err) = self.send_to_trusted_own_devices(&inner, true).await {
             log::warn!("could not tell the account's other devices about device {address_id}: {err:#}");
         }
         self.callbacks.on_own_device_trust_changed().await;
@@ -199,13 +310,25 @@ impl FireflyWsClient {
 
     /// Sends `inner` (a serialized `UserMessageInner`) inside a `selfMessage` to the account's
     /// other devices this device trusts, and to no other device. Returns how many it reached.
-    pub(super) async fn send_to_trusted_own_devices(&self, inner: &[u8]) -> anyhow::Result<usize> {
+    /// Devices trusted only provisionally get it only with `include_provisional` (never secrets).
+    pub(super) async fn send_to_trusted_own_devices(&self, inner: &[u8], include_provisional: bool) -> anyhow::Result<usize> {
         let me = self.callbacks.name().to_string();
         let my_address = self.address_id();
         let token = self.callbacks.get_access_token().await.context("token not found")?;
         let address_store = &self.key_stores.store().address_store;
         let store = self.own_trust_store();
 
+        let trust = |address_id: u64, device_id: u32| {
+            let kv = &self.key_value_store;
+            let me = me.clone();
+            async move {
+                if include_provisional {
+                    own_trust(kv, &me, address_id, device_id).await
+                } else {
+                    own_trust_to_share(kv, &me, address_id, device_id).await
+                }
+            }
+        };
         let trusted = store.list().await?.into_iter().filter(|e| e.trusted).collect::<Vec<_>>();
         let known = address_store.get(&me).await?;
         let missing = trusted
@@ -235,7 +358,7 @@ impl FireflyWsClient {
             if address.address_id == my_address {
                 continue;
             }
-            if store.trust_of(&me, address.address_id, address.device_id as u32).await? != OwnDeviceTrust::Trusted {
+            if trust(address.address_id, address.device_id as u32).await != OwnDeviceTrust::Trusted {
                 continue;
             }
             match self
@@ -251,9 +374,7 @@ impl FireflyWsClient {
             {
                 // Refreshing may have replaced the device's keys: only a still trusted identity
                 // gets the message.
-                Ok(message)
-                    if store.trust_of(&me, address.address_id, address.device_id as u32).await?
-                        == OwnDeviceTrust::Trusted =>
+                Ok(message) if trust(address.address_id, address.device_id as u32).await == OwnDeviceTrust::Trusted =>
                 {
                     upload.messages.push(message)
                 }
@@ -295,18 +416,19 @@ impl FireflyWsClient {
         anyhow::ensure!(response.status().is_success(), "listing devices failed: {}", response.status());
         let body = response.bytes().await?;
         let addresses = deserialize_proto::<firefly::Addresses>(&body)?;
-        let store = self.own_trust_store();
-        let mut others = 0;
-        for address in addresses.addresses.iter() {
-            if address.id == my_address || (!address.username.is_empty() && address.username != me) {
-                continue;
-            }
-            let identity = store.current_identity(&me, address.deviceId).await?;
-            store.trust_if_undecided(address.id, address.deviceId, identity.as_deref()).await?;
-            others += 1;
-        }
+        let listed = addresses
+            .addresses
+            .iter()
+            .filter(|a| a.id != my_address && a.id != 0 && (a.username.is_empty() || a.username == me))
+            .map(|a| (a.id, a.deviceId))
+            .collect::<Vec<_>>();
+        let fresh = !self.key_value_store.get(KEY_FRESH_DEVICE).await.unwrap_or_default().is_empty();
+        let others = trust_listed_devices(&self.key_value_store, &me, &listed, fresh).await?;
         self.key_value_store.set(KEY_SERVER_BOOTSTRAPPED, "1").await?;
-        log::info!("trusting the account's {others} existing devices");
+        log::info!(
+            "trusting the account's {others} existing devices{}",
+            if fresh { " provisionally (fresh install)" } else { "" }
+        );
         Ok(())
     }
 
@@ -331,8 +453,85 @@ impl FireflyWsClient {
             message_type: firefly_protos::MESSAGE_TYPE_HIDDEN,
         })?
         .to_vec();
-        self.send_to_trusted_own_devices(&inner).await?;
+        self.send_to_trusted_own_devices(&inner, true).await?;
         self.key_value_store.set(KEY_ANNOUNCED, "1").await?;
+        Ok(())
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    async fn kv() -> anyhow::Result<KeyValueStore> {
+        let pool = crate::db::setup_pool("sqlite::memory:", 1).await?;
+        crate::db::migrations::run_migrations(&pool).await?;
+        crate::db::stores::IdentityDb::new(pool.clone()).await?;
+        KeyValueStore::new(pool).await
+    }
+
+    fn update(entries: &[(u64, u32, bool)]) -> firefly::OwnDeviceTrust<'static> {
+        firefly::OwnDeviceTrust {
+            version: 1,
+            request: false,
+            entries: entries
+                .iter()
+                .map(|&(address_id, device_id, trusted)| firefly::OwnDeviceTrustEntry {
+                    address_id,
+                    device_id,
+                    identity_key: Default::default(),
+                    trusted,
+                })
+                .collect(),
+        }
+    }
+
+    /// R3-FF-C1. A fresh install (address 30) is told by the server that the account has the
+    /// devices 10 (the user's phone) and 66 (a ghost the server, or whoever holds the account's
+    /// token, registered). It used to trust both in full: once the user approved the install on
+    /// the phone and the phone sent it the history, the ghost could ask the install for that
+    /// history and the backup key, and any decision the user made on the install vouched for
+    /// the ghost to the phone.
+    #[tokio::test]
+    async fn fresh_install_trusts_listed_devices_only_provisionally() -> anyhow::Result<()> {
+        let kv = kv().await?;
+        trust_listed_devices(&kv, "bob", &[(10, 1), (66, 7)], true).await?;
+        // Their messages are believed (the phone's history and decisions must get through)...
+        assert_eq!(own_trust(&kv, "bob", 10, 1).await, OwnDeviceTrust::Trusted);
+        assert_eq!(own_trust(&kv, "bob", 66, 7).await, OwnDeviceTrust::Trusted);
+        // ...but neither gets history or the backup key without the user's approval here.
+        assert_eq!(own_trust_to_share(&kv, "bob", 10, 1).await, OwnDeviceTrust::Unknown);
+        assert_eq!(own_trust_to_share(&kv, "bob", 66, 7).await, OwnDeviceTrust::Unknown);
+
+        // The ghost (provisional) can't reject the phone, nor make another ghost more than
+        // provisional, nor touch its own entry.
+        apply_trust_entries(&kv, 30, 66, &update(&[(10, 1, false), (67, 8, true), (66, 7, true)])).await;
+        assert_eq!(own_trust(&kv, "bob", 10, 1).await, OwnDeviceTrust::Trusted);
+        assert_eq!(own_trust(&kv, "bob", 67, 8).await, OwnDeviceTrust::Trusted);
+        assert_eq!(own_trust_to_share(&kv, "bob", 67, 8).await, OwnDeviceTrust::Unknown);
+
+        // The user approves the phone here: from then on the phone gets history, and its own
+        // decisions (it rejected the ghosts) count in full.
+        update_provisional(&kv, |p| {
+            p.remove(&10);
+        })
+        .await?;
+        assert_eq!(own_trust_to_share(&kv, "bob", 10, 1).await, OwnDeviceTrust::Trusted);
+        apply_trust_entries(&kv, 30, 10, &update(&[(66, 7, false), (67, 8, false), (30, 2, true)])).await;
+        assert_eq!(own_trust(&kv, "bob", 66, 7).await, OwnDeviceTrust::Rejected);
+        assert_eq!(own_trust(&kv, "bob", 67, 8).await, OwnDeviceTrust::Rejected);
+        Ok(())
+    }
+
+    /// An existing device upgrading (not a fresh install) keeps trusting the devices it lists.
+    #[tokio::test]
+    async fn upgrade_bootstrap_trusts_in_full() -> anyhow::Result<()> {
+        let kv = kv().await?;
+        trust_listed_devices(&kv, "bob", &[(10, 1)], false).await?;
+        assert_eq!(own_trust_to_share(&kv, "bob", 10, 1).await, OwnDeviceTrust::Trusted);
+        // A fully trusted device vouches in full.
+        apply_trust_entries(&kv, 30, 10, &update(&[(11, 3, true)])).await;
+        assert_eq!(own_trust_to_share(&kv, "bob", 11, 3).await, OwnDeviceTrust::Trusted);
         Ok(())
     }
 }
