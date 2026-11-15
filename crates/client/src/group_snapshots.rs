@@ -227,13 +227,14 @@ pub(super) async fn accept_bundle(
         );
     }
     for key in &b.keys {
-        keys.save_verified_key(
+        keys.save_key_from(
             group,
             key.start_msg_id,
             key.end_msg_id,
             &key.unencrypted_hash,
             &key.key,
             &key.nonce,
+            sender,
         )
         .await?;
     }
