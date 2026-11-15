@@ -4307,6 +4307,19 @@ impl FireflyWsClient {
 
             log::info!("address to upload {:?}", address);
 
+            // A device registering for the first time trusts the account's other devices only
+            // provisionally (see `own_device_trust`); an existing one upgrading trusts them.
+            if identity.id == 0
+                && self
+                    .key_value_store
+                    .get(crate::db::own_devices::KEY_SERVER_BOOTSTRAPPED)
+                    .await
+                    .unwrap_or_default()
+                    .is_empty()
+            {
+                self.key_value_store.set(own_device_trust::KEY_FRESH_DEVICE, "1").await?;
+            }
+
             self.addressId
                 .store(identity.id as u64, std::sync::atomic::Ordering::Relaxed);
 
@@ -5655,6 +5668,8 @@ impl FireflyWsClient {
                 validate_chunk_records(&messages,group_id,start,end,packed.msg_count)?;
                 let url=self.upload_chunk_blob(group_id,packed.blob,start,end,&packed.unencrypted_hash).await?;
                 self.history_keys_store.save_verified_key(group_id,start,end,&packed.unencrypted_hash,&packed.key,&packed.nonce).await?;
+                // This device's own key is the chunk's key, whatever key a member sent for it first.
+                self.history_keys_store.promote_key(group_id,start,end,&packed.unencrypted_hash,&packed.key,&packed.nonce).await?;
                 self.publish_group_history_chunk(group_id,start,end,packed.msg_count,packed.unencrypted_hash.clone(),url).await?;
                 self.share_group_history_keys(group_id,vec![firefly::GroupHistoryChunkKey{group_id,start_msg_id:start,end_msg_id:end,key:packed.key.into(),nonce:packed.nonce.into(),unencrypted_hash:packed.unencrypted_hash.into()}]).await?;
                 cursor=end;
@@ -5883,7 +5898,7 @@ impl FireflyWsClient {
         })?
         .to_vec();
         // The key decrypts the account's direct-message backup: only devices the user approved.
-        let sent = self.send_to_trusted_own_devices(&payload).await?;
+        let sent = self.send_to_trusted_own_devices(&payload, false).await?;
         log::info!("sent a backup key sync to {sent} trusted devices");
         Ok(())
     }
@@ -5899,6 +5914,41 @@ impl FireflyWsClient {
         Ok(true)
     }
 
+    /// Opens a downloaded history chunk with the keys this device holds for it, the first kept
+    /// first (see `HistoryKeysStore::save_key_from`); a later one that opens it becomes its key.
+    /// On failure, tells whether a key the chunk's uploader sent was among those that failed.
+    async fn open_history_chunk(&self, group_id: u64, chunk: &firefly::GroupHistoryChunkItem<'_>, blob: &[u8]) -> Result<Vec<GroupMessage>, bool> {
+        let candidates = self
+            .history_keys_store
+            .chunk_key_candidates(group_id, chunk.start_msg_id, chunk.end_msg_id, &chunk.unencrypted_hash)
+            .await
+            .map_err(|_| false)?;
+        let mut uploader_key_failed = false;
+        for (index, (key, nonce, sender)) in candidates.iter().enumerate() {
+            let opened = decrypt_and_unpack_chunk(blob, key, &chunk.unencrypted_hash).and_then(|records| {
+                validate_chunk_records(&records, group_id, chunk.start_msg_id, chunk.end_msg_id, chunk.msg_count)?;
+                Ok(records)
+            });
+            match opened {
+                Ok(records) => {
+                    if index > 0 {
+                        log::warn!("group {group_id}: history chunk {} opened with a later key; the first one was wrong", chunk.id);
+                        if let Err(err) = self.history_keys_store.promote_key(group_id, chunk.start_msg_id, chunk.end_msg_id, &chunk.unencrypted_hash, key, nonce).await {
+                            log::warn!("could not keep the working key of history chunk {}: {err:#}", chunk.id);
+                        }
+                    }
+                    return Ok(records);
+                }
+                Err(_) => {
+                    if sender.as_deref() == Some(chunk.uploaded_by.as_ref()) {
+                        uploader_key_failed = true;
+                    }
+                }
+            }
+        }
+        Err(uploader_key_failed)
+    }
+
     pub async fn fetch_and_verify_group_history(&self, group_id: u64, since: u64, until: u64) -> anyhow::Result<usize> {
         Ok(self.import_group_history_page(group_id, since, until).await?.imported_count)
     }
@@ -5911,10 +5961,10 @@ impl FireflyWsClient {
             page.next_before = Some(chunk.start_msg_id);
             if !chunk.verified || chunk.status != 0 || self.history_keys_store.is_chunk_disapproved(group_id, chunk.id).await? { continue; }
             if self.history_keys_store.is_imported(group_id, chunk.id, &chunk.unencrypted_hash).await? { continue; }
-            let Some(key) = self.history_keys_store.verified_key(group_id, chunk.start_msg_id, chunk.end_msg_id, &chunk.unencrypted_hash).await? else { page.pending = true; continue; };
+            if self.history_keys_store.verified_key(group_id, chunk.start_msg_id, chunk.end_msg_id, &chunk.unencrypted_hash).await?.is_none() { page.pending = true; continue; }
             let blob = self.download_chunk_blob(group_id, &chunk.chunk_url).await?;
-            let records = decrypt_and_unpack_chunk(&blob, &key, &chunk.unencrypted_hash)?;
-            validate_chunk_records(&records, group_id, chunk.start_msg_id, chunk.end_msg_id, chunk.msg_count)?;
+            // No key we hold opens it (a member may have sent a wrong one first): wait for more.
+            let Ok(records) = self.open_history_chunk(group_id, chunk, &blob).await else { page.pending = true; continue; };
             // Read policy is checked again when returning rows to callers. Imports
             // never overwrite live messages and never become evidence for a vote.
             page.imported_count += self.group_messages_store.import_verified_history(group_id, chunk.id, &chunk.unencrypted_hash, &records).await?;
@@ -5946,7 +5996,7 @@ impl FireflyWsClient {
         let next=chunks.last().map(|c|c.start_msg_id).unwrap_or(0);
         for chunk in chunks {
             if chunk.verified || chunk.uploaded_by == self.callbacks.name() || self.history_keys_store.is_chunk_disapproved(group_id, chunk.id).await? { continue; }
-            let Some(key) = self.history_keys_store.verified_key(group_id, chunk.start_msg_id, chunk.end_msg_id, &chunk.unencrypted_hash).await? else { continue; };
+            if self.history_keys_store.verified_key(group_id, chunk.start_msg_id, chunk.end_msg_id, &chunk.unencrypted_hash).await?.is_none() { continue; }
             // Approval needs every message of the chunk received here; skip the download when
             // there are fewer (a device that joined later, a sparse member).
             if self.group_messages_store.authenticated_history_count(group_id, chunk.start_msg_id, chunk.end_msg_id).await? < chunk.msg_count as u64 { continue; }
@@ -5954,14 +6004,14 @@ impl FireflyWsClient {
                 Ok(blob)=>blob,
                 Err(err)=>{log::debug!("Peer chunk unavailable for verification: {}",err);continue;}
             };
-            let records = match decrypt_and_unpack_chunk(&blob, &key, &chunk.unencrypted_hash)
-                .and_then(|records| {
-                    validate_chunk_records(&records, group_id, chunk.start_msg_id, chunk.end_msg_id, chunk.msg_count)?;
-                    Ok(records)
-                }) {
+            let records = match self.open_history_chunk(group_id, &chunk, &blob).await {
                 Ok(records) => records,
-                Err(_) => {
-                    self.disapprove_group_history_chunk(group_id, chunk.id, "Invalid history chunk".into()).await?;
+                // Only the uploader's own key failing shows the chunk is bad; a key another
+                // member sent may simply be wrong, so this device abstains then.
+                Err(uploader_key_failed) => {
+                    if uploader_key_failed {
+                        self.disapprove_group_history_chunk(group_id, chunk.id, "Invalid history chunk".into()).await?;
+                    }
                     continue;
                 }
             };
@@ -6385,13 +6435,14 @@ async fn on_group_message(
                     for key in keys_payload.keys {
                         if key.group_id != groupId { continue; }
                         if let Err(err) = history_keys_store
-                            .save_verified_key(
+                            .save_key_from(
                                 groupId,
                                 key.start_msg_id,
                                 key.end_msg_id,
                                 &key.unencrypted_hash,
                                 &key.key,
                                 &key.nonce,
+                                &encrypted_group_message.sender,
                             )
                             .await
                         {
@@ -6603,7 +6654,7 @@ async fn on_user_message(
                     if let Ok(inner_inner) = deserialize_proto::<firefly::UserMessageInner>(&final_message) {
                         if let firefly::mod_UserMessageInner::OneOfmessage::ownDeviceTrust(update) = inner_inner.message {
                             is_dummy = true;
-                            own_device_trust::apply_trust_update(key_value_store, callbacks, msg.toId, &update).await;
+                            own_device_trust::apply_trust_update(key_value_store, callbacks, msg.toId, msg.fromId, &update).await;
                         }
                     }
                 } else if is_self_msg {
@@ -7603,7 +7654,7 @@ async fn on_server_message(
                 };
                 // Only a device the user approved gets the account's history; another one waits
                 // here until the user decides (`trust_own_device` answers it then).
-                match own_device_trust::own_trust(
+                match own_device_trust::own_trust_to_share(
                     key_value_store,
                     callbacks.name(),
                     request.requester_address,
