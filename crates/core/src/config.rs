@@ -328,6 +328,15 @@ pub struct FireflyIdentityProvider {
     base_url: Arc<str>,
     // TODO: handle this more elegantly
     keys_string: Arc<RwLock<(String, u64)>>, // jwks body + expiration time in seconds
+    /// When a credential with a kid missing from the cached JWKS last made it refetch them.
+    last_kid_miss_refresh: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// A kid missing from the cached JWKS refetches them at most this often.
+const KID_MISS_REFRESH_SECS: u64 = 60;
+
+fn jwks_has_kid(jwks: &str, kid: &str) -> bool {
+    serde_json::from_str::<JsonWebKeys>(jwks).is_ok_and(|keys| keys.keys.iter().any(|k| k.kid() == kid))
 }
 
 /// Upper bound on how long fetched JWKS are trusted, whatever the server's cache headers say.
@@ -391,6 +400,7 @@ impl FireflyIdentityProvider {
         Self {
             base_url,
             keys_string: Arc::new(RwLock::new((r#"""{"keys": []}"""#.to_string(), 0))),
+            last_kid_miss_refresh: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -462,12 +472,32 @@ impl FireflyIdentityProvider {
         signed_token: &'a SignedToken<'a>,
         valid_at: Option<u64>,
     ) -> anyhow::Result<AuthToken<'a>> {
-        let jwks = self.get_keys().await?;
+        let mut jwks = self.get_keys().await?;
+        // The server signs with a key it publishes when it starts using it, which a cached JWKS
+        // (kept up to a day) doesn't have yet. Refetch rather than fail: a credential that fails
+        // validation strands a group member until it is re-added.
+        if !jwks_has_kid(&jwks, &signed_token.kid) && self.claim_kid_miss_refresh() {
+            log::info!("kid '{}' not in the cached JWKS; refetching", signed_token.kid);
+            self.refresh().await?;
+            jwks = self.get_keys().await?;
+        }
         let keys: JsonWebKeys = serde_json::from_str(&jwks)?;
 
         let result = verify_signed_token_at(keys, signed_token, valid_at)?;
 
         Ok(result)
+    }
+
+    fn claim_kid_miss_refresh(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        let now = get_current_timestamp_in_secs();
+        let last = self.last_kid_miss_refresh.load(Ordering::Relaxed);
+        if last != 0 && now.saturating_sub(last) < KID_MISS_REFRESH_SECS {
+            return false;
+        }
+        self.last_kid_miss_refresh
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
     }
 
     pub async fn get_credential(
