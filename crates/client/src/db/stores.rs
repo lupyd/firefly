@@ -257,9 +257,8 @@ impl IdentityDb {
             )"#;
         connection.execute(sql).await?;
 
-        // it will return error in case of duplicate column, just ignoring
-        let sql = "ALTER TABLE identity_keypair ADD COLUMN username TEXT NOT NULL DEFAULT ''";
-        let _ = connection.execute(sql).await;
+        // Added after the table shipped; added only when missing, so a real failure surfaces.
+        crate::db::migrations::add_column(&mut connection, "identity_keypair", "username", "TEXT NOT NULL DEFAULT ''").await?;
 
         {
             connection

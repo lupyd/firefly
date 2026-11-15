@@ -7,7 +7,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use sqlx::{
-    Error, Executor, FromRow, Pool, QueryBuilder, Row, Sqlite, SqlitePool, Transaction, prelude,
+    Error, Executor, FromRow, Pool, QueryBuilder, Row, Sqlite, SqliteConnection, SqlitePool, Transaction, prelude,
     query, query_as, query_scalar, sqlite,
 };
 
