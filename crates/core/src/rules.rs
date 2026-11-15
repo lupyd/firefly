@@ -464,6 +464,10 @@ impl RosterDevice {
 ///   role for good: nothing can grant it again.)
 /// - Only an owner may give `OWNER_ROLE_ID` to anyone, change an owner's role, or change or
 ///   delete `OWNER_ROLE_ID` (in the group or in a channel).
+/// - A role goes only to a user with a device in the group, one the commit adds, or one already
+///   listed in the group extension: the receive rules take any username (of any length), so a
+///   member who may manage members or roles could otherwise grow the extension, carried in
+///   every Welcome and GroupInfo, without bound.
 ///
 /// Expiry is judged against the current time: the server's clock for the server, which is what
 /// decides; the committer's for its own commits, which the server checks again.
@@ -471,6 +475,8 @@ pub struct StrictRules {
     owners: HashSet<String>,
     devices: Vec<RosterDevice>,
     removed: HashSet<u32>,
+    /// Users the commit adds a device of.
+    added: HashSet<String>,
     now: u64,
 }
 
@@ -486,6 +492,17 @@ impl StrictRules {
             proposals.remove_proposals().iter().map(|p| p.proposal.to_remove()),
             get_current_timestamp_in_secs(),
         )
+        .with_added(proposals.add_proposals().iter().filter_map(|p| {
+            get_auth_token_from_signing_identity(p.proposal.key_package().signing_identity())
+                .ok()
+                .map(|t| t.username.into_owned())
+        }))
+    }
+
+    /// `added`: the users the commit adds a device of.
+    pub fn with_added(mut self, added: impl IntoIterator<Item = String>) -> Self {
+        self.added = added.into_iter().collect();
+        self
     }
 
     /// `removed`: every leaf the commit removes explicitly.
@@ -502,7 +519,7 @@ impl StrictRules {
             .filter(|m| m.role == OWNER_ROLE_ID)
             .map(|m| m.username.to_string())
             .collect();
-        Self { owners, devices, removed: removed.into_iter().collect(), now }
+        Self { owners, devices, removed: removed.into_iter().collect(), added: HashSet::new(), now }
     }
 
     fn is_owner(&self, username: &str) -> bool {
@@ -594,10 +611,23 @@ impl StrictRules {
         proposal: &CustomProposal,
         extension: &FireflyGroupExtensionWrapper,
     ) -> Result<(), FireflyError> {
+        let proposal_type = proposal.proposal_type();
+        if proposal_type == UpdateUserProposal::proposal_type() {
+            let update = UpdateUserProposal::from_custom_proposal(proposal)?;
+            let known = self.added.contains(&update.username)
+                || self.devices.iter().any(|d| d.username == update.username)
+                || extension.has_member(&update.username);
+            if !known {
+                return Err(format!(
+                    "rejected proposal from {sender}, {} is not a member of the group",
+                    update.username.chars().take(64).collect::<String>()
+                )
+                .into());
+            }
+        }
         if self.is_owner(sender) {
             return Ok(());
         }
-        let proposal_type = proposal.proposal_type();
         let touches_owner = if proposal_type == UpdateUserProposal::proposal_type() {
             let update = UpdateUserProposal::from_custom_proposal(proposal)?;
             update.role_id == OWNER_ROLE_ID

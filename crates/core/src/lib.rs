@@ -811,7 +811,6 @@ impl FireflyMlsGroup {
     }
 
     pub async fn re_add_member(&self, username: String, address_id: u64) -> anyhow::Result<u64> {
-        self.make_room_for(&username).await?;
         let url = format!(
             "{}/group/keyPackages?other={}&address={}",
             self.base_url, username, address_id
@@ -829,16 +828,8 @@ impl FireflyMlsGroup {
             ));
         }
 
-        let mut group = self.group.lock().await;
-
-        let mut commit_builder = group.commit_builder();
-
         let body = response.bytes().await?;
-
         let package = deserialize_proto::<GroupKeyPackage>(&body)?;
-
-        let mut invitee_addresses = Vec::new();
-
         let key_package = MlsMessage::from_bytes(&package.package)?;
         if package.address != address_id {
             return Err(anyhow::anyhow!(
@@ -848,6 +839,26 @@ impl FireflyMlsGroup {
             ));
         }
         ensure_key_package_belongs_to(&key_package, &username, address_id)?;
+
+        // At the device limit an in-place re-add is an Add for a user with every device slot
+        // taken, which the server refuses: take the device's old leaf out first.
+        let to_clear = {
+            let group = self.group.lock().await;
+            re_add_leaf_to_clear(&group.roster(), &username, address_id)
+        };
+        if let Some(leaf) = to_clear {
+            let mut group = self.group.lock().await;
+            log::info!("{username} is at the device limit; removing the leaf of {address_id} before re-adding it");
+            let commit = group.commit_builder().remove_member(leaf)?.build().await?;
+            self.send_commit_to_server_and_apply_commit(&mut group, commit).await?;
+        }
+        self.make_room_for(&username).await?;
+
+        let mut group = self.group.lock().await;
+
+        let mut commit_builder = group.commit_builder();
+
+        let mut invitee_addresses = Vec::new();
 
         commit_builder = commit_builder.add_member(key_package)?;
 
@@ -1380,6 +1391,21 @@ impl FireflyMlsGroup {
 
         return Ok(message.id);
     }
+}
+
+/// Before re-adding the device `address_id` of `username` in place: the leaf it holds, when
+/// `username` has [`rules::MAX_DEVICES_ALLOWED`] devices in the group. An Add for a user at the
+/// limit is refused (see [`rules::StrictRules::check_add`]), so that leaf goes in a commit of its
+/// own first. None when there is room (the Add replaces the leaf itself) or the device has none.
+pub fn re_add_leaf_to_clear(roster: &mls_rs::group::Roster, username: &str, address_id: u64) -> Option<u32> {
+    let devices = rules::get_devices_already_in(roster, username);
+    if devices.len() < rules::MAX_DEVICES_ALLOWED {
+        return None;
+    }
+    devices
+        .iter()
+        .find(|(_, token)| token.address_id == address_id)
+        .map(|(member, _)| member.index)
 }
 
 /// Of `candidates` (leaf indices, oldest first preferred), those this member can remove in one
