@@ -200,6 +200,19 @@ impl FireflyMlsClient {
         description: String,
         settings: u32,
     ) -> anyhow::Result<FireflyMlsGroup> {
+        self.create_group_in(extension, description, settings, None).await
+    }
+
+    /// Creates a group; with `private_channel_of` (parent group id, channel id) the group behind
+    /// a private channel of that parent. The server takes a private channel's settings from its
+    /// parent and creates one only for the parent's owner.
+    pub async fn create_group_in(
+        &self,
+        extension: protos::firefly::FireflyGroupExtension<'_>,
+        description: String,
+        settings: u32,
+        private_channel_of: Option<(u64, u32)>,
+    ) -> anyhow::Result<FireflyMlsGroup> {
         let group_name = extension.name.clone();
         let mut extensions = ExtensionList::new();
         extensions.set(
@@ -221,6 +234,8 @@ impl FireflyMlsClient {
             description: description.into(),
             settings,
             state: group_info_message.into(),
+            parent_group_id: private_channel_of.map(|(parent, _)| parent).unwrap_or(0),
+            parent_channel_id: private_channel_of.map(|(_, channel)| channel).unwrap_or(0),
             ..Default::default()
         };
 

@@ -355,6 +355,22 @@ impl<'a> FireflyGroupExtensionWrapper<'a> {
         Some(&self.inner.channels[idx])
     }
 
+    /// Whether SeeMessage granted at the channel level puts `username` in the private channel
+    /// `channel_id`: their role's override in the channel has it, or, for members without a role,
+    /// the channel's default (when set) has it. A role's group-wide permissions don't count: most
+    /// roles can see messages everywhere, which would put everyone in every private channel.
+    pub fn grants_private_channel(&self, username: &str, channel_id: u32) -> bool {
+        let Some(channel) = self.get_channel(channel_id) else {
+            return false;
+        };
+        let see = crate::config::UserPermission::SeeMessage as u32;
+        let role = self.get_role_of_user(username).unwrap_or(0);
+        if let Ok(idx) = channel.roles.search_by_key(&role, |x| x.id) {
+            return channel.roles[idx].permissions & see != 0;
+        }
+        role == 0 && channel.default_permissions & see != 0
+    }
+
     pub fn delete_channel_role(&mut self, channel_id: u32, role_id: u32) -> Option<()> {
         let idx = self
             .inner

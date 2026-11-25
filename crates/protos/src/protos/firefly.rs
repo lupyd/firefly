@@ -335,6 +335,8 @@ pub struct Group<'a> {
     pub upgraded: bool,
     pub pending: bool,
     pub owner: Cow<'a, str>,
+    pub parent_group_id: u64,
+    pub parent_channel_id: u32,
 }
 
 impl<'a> MessageRead<'a> for Group<'a> {
@@ -350,6 +352,8 @@ impl<'a> MessageRead<'a> for Group<'a> {
                 Ok(56) => msg.upgraded = r.read_bool(bytes)?,
                 Ok(64) => msg.pending = r.read_bool(bytes)?,
                 Ok(74) => msg.owner = r.read_string(bytes).map(Cow::Borrowed)?,
+                Ok(81) => msg.parent_group_id = r.read_fixed64(bytes)?,
+                Ok(88) => msg.parent_channel_id = r.read_uint32(bytes)?,
                 Ok(t) => { r.read_unknown(bytes, t)?; }
                 Err(e) => return Err(e),
             }
@@ -369,6 +373,8 @@ impl<'a> MessageWrite for Group<'a> {
         + if self.upgraded == false { 0 } else { 1 + sizeof_varint(*(&self.upgraded) as u64) }
         + if self.pending == false { 0 } else { 1 + sizeof_varint(*(&self.pending) as u64) }
         + if self.owner == "" { 0 } else { 1 + sizeof_len((&self.owner).len()) }
+        + if self.parent_group_id == 0u64 { 0 } else { 1 + 8 }
+        + if self.parent_channel_id == 0u32 { 0 } else { 1 + sizeof_varint(*(&self.parent_channel_id) as u64) }
     }
 
     fn write_message<W: WriterBackend>(&self, w: &mut Writer<W>) -> Result<()> {
@@ -380,6 +386,8 @@ impl<'a> MessageWrite for Group<'a> {
         if self.upgraded != false { w.write_with_tag(56, |w| w.write_bool(*&self.upgraded))?; }
         if self.pending != false { w.write_with_tag(64, |w| w.write_bool(*&self.pending))?; }
         if self.owner != "" { w.write_with_tag(74, |w| w.write_string(&**&self.owner))?; }
+        if self.parent_group_id != 0u64 { w.write_with_tag(81, |w| w.write_fixed64(*&self.parent_group_id))?; }
+        if self.parent_channel_id != 0u32 { w.write_with_tag(88, |w| w.write_uint32(*&self.parent_channel_id))?; }
         Ok(())
     }
 }

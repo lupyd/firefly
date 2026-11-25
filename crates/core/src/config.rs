@@ -157,6 +157,22 @@ pub enum UserPermission {
 pub const DEFAULT_GROUP_PERMISSIONS: u32 = UserPermission::SeeMessage as u32
     | UserPermission::AddMessage as u32;
 
+/// Channel type bit of a private channel: its messages are in an MLS group of its own (a child
+/// group, tied to this one by the server), so only the members of that group can read them. The
+/// low bits keep the kind of channel (1 text, 2 voice). Only the group owner creates private
+/// channels and decides who is in them.
+pub const PRIVATE_CHANNEL_FLAG: u32 = 0x10;
+
+pub const fn is_private_channel(channel_type: u32) -> bool {
+    channel_type & PRIVATE_CHANNEL_FLAG != 0
+}
+
+/// Roles in the group behind a private channel. They record why a member is in it: the owner
+/// added them, or SeeMessage granted to their role in the parent's channel brought them in (and
+/// taking it away removes them again).
+pub const PRIVATE_CHANNEL_ADDED_ROLE_ID: u32 = 2;
+pub const PRIVATE_CHANNEL_BY_ROLE_ROLE_ID: u32 = 3;
+
 #[derive(MlsSize, MlsDecode, MlsEncode)]
 pub struct UpdateRoleProposal {
     pub name: String,
