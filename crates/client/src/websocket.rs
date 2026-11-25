@@ -3722,6 +3722,173 @@ impl FireflyWsClient {
         return self.group_info_store.get(group.group_id()).await;
     }
 
+    /// Creates a private channel in `parent_group_id` (owner only; see `private_channels`):
+    /// the group behind it first, then the channel in the parent, then the members. A failure
+    /// to add the channel to the parent deletes the new group again. `channel_kind` is 1 (text)
+    /// or 2 (voice). Members that can't be added yet are returned; the owner can retry them.
+    pub async fn create_private_channel(
+        &self,
+        parent_group_id: u64,
+        name: String,
+        channel_kind: u32,
+        members: Vec<String>,
+    ) -> anyhow::Result<FfiPrivateChannel> {
+        use firefly_core::config::{PRIVATE_CHANNEL_ADDED_ROLE_ID, PRIVATE_CHANNEL_FLAG, UserPermission};
+        let client = self
+            .firefly_mls_client
+            .get()
+            .context("firefly_mls_client is not initialized")?;
+        let me = client.username().context("user not authenticated")?;
+        let parent_info = self.group_info_store.get(parent_group_id).await?;
+        let parent = client
+            .load_group(parent_group_id, parent_info.identifier)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        if !parent.is_owner().await? {
+            anyhow::bail!("only the group owner can create private channels");
+        }
+        let kind = channel_kind & !PRIVATE_CHANNEL_FLAG;
+        let channel_type = u8::try_from(kind | PRIVATE_CHANNEL_FLAG).context("invalid channel kind")?;
+        let parent_extension = parent.extension().await?;
+        let parent_extension = deserialize_proto::<firefly::FireflyGroupExtension>(&parent_extension)?;
+        let channel_id = parent_extension.channels.iter().map(|c| c.id).max().unwrap_or(0) + 1;
+
+        let child = client
+            .create_private_channel_group(name.clone(), parent_group_id, channel_id, kind)
+            .await?;
+        let child_id = child.group_id();
+        self.group_info_store
+            .set(child_id, name.clone(), String::new(), child.group_identifier().await?)
+            .await?;
+        let link = crate::private_channels::PrivateChannelLink { parent_group_id, channel_id };
+        crate::private_channels::record_links(&self.key_value_store, [(child_id, link)]).await?;
+
+        // No one is in by default (NullPermission): SeeMessage granted to a role in this channel
+        // brings that role's members in.
+        match parent
+            .update_channel(channel_id, false, name, channel_type, UserPermission::NullPermission as u32)
+            .await
+        {
+            Ok(commit_id) => {
+                self.group_messages_store
+                    .update_cursor(commit_id, parent_group_id, parent.epoch().await as u32)
+                    .await?;
+            }
+            Err(err) => {
+                log::error!("private channel {child_id}: adding it to group {parent_group_id} failed: {err:#}");
+                if let Err(delete_err) = self.delete_group(child_id).await {
+                    log::warn!("deleting the group of the failed private channel {child_id} failed: {delete_err:#}");
+                }
+                let _ = crate::private_channels::forget_link(&self.key_value_store, child_id).await;
+                return Err(err);
+            }
+        }
+        self.callbacks.on_group_updated(parent_group_id).await;
+
+        match child.add_own_devices(me.clone()).await {
+            Ok(0) => {}
+            Ok(commit_id) => {
+                self.group_messages_store
+                    .update_cursor(commit_id, child_id, child.epoch().await as u32)
+                    .await?;
+            }
+            Err(err) => log::warn!("adding this account's other devices to private channel {child_id} failed: {err:#}"),
+        }
+
+        let mut failed_members = Vec::new();
+        let mut wanted: Vec<String> = members.into_iter().filter(|m| *m != me).collect();
+        wanted.sort();
+        wanted.dedup();
+        for username in wanted {
+            match child.add_member(username.clone(), PRIVATE_CHANNEL_ADDED_ROLE_ID).await {
+                Ok(commit_id) => {
+                    group_snapshots::record_added_by_me(&self.key_value_store, child_id, &username).await;
+                    self.group_messages_store
+                        .update_cursor(commit_id, child_id, child.epoch().await as u32)
+                        .await?;
+                }
+                Err(err) => {
+                    log::warn!("private channel {child_id}: adding {username} failed: {err:#}");
+                    failed_members.push(username);
+                }
+            }
+        }
+        sync_group_members(&child, &self.key_value_store, &self.callbacks).await;
+        self.callbacks.on_group_updated(child_id).await;
+
+        Ok(FfiPrivateChannel { group_id: child_id, channel_id, failed_members })
+    }
+
+    /// Deletes the private channel `channel_id` of `parent_group_id` (owner only): the channel
+    /// from the parent, then its group with all its messages.
+    pub async fn delete_private_channel(&self, parent_group_id: u64, channel_id: u32) -> anyhow::Result<()> {
+        let client = self
+            .firefly_mls_client
+            .get()
+            .context("firefly_mls_client is not initialized")?;
+        let parent_info = self.group_info_store.get(parent_group_id).await?;
+        let parent = client
+            .load_group(parent_group_id, parent_info.identifier)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        if !parent.is_owner().await? {
+            anyhow::bail!("only the group owner can delete private channels");
+        }
+        let child_id = crate::private_channels::children_of(&self.key_value_store, parent_group_id)
+            .await
+            .into_iter()
+            .find(|(_, channel)| *channel == channel_id)
+            .map(|(child, _)| child);
+
+        let commit_id = parent
+            .update_channel(channel_id, true, String::new(), 0, 0)
+            .await?;
+        self.group_messages_store
+            .update_cursor(commit_id, parent_group_id, parent.epoch().await as u32)
+            .await?;
+        self.callbacks.on_group_updated(parent_group_id).await;
+
+        if let Some(child_id) = child_id {
+            self.delete_group(child_id).await?;
+            crate::private_channels::forget_link(&self.key_value_store, child_id).await?;
+        }
+        Ok(())
+    }
+
+    /// Refuses changes to who is in a private channel's group unless this user owns it (the
+    /// owner of its parent). The server refuses them too; this gives a clear error first.
+    async fn ensure_private_channel_owner(&self, group: &FfiMlsGroup) -> anyhow::Result<()> {
+        if crate::private_channels::link_of(&self.key_value_store, group.group_id()).await.is_some()
+            && !group.is_owner().await?
+        {
+            anyhow::bail!("only the group owner can change who is in a private channel");
+        }
+        Ok(())
+    }
+
+    /// After this device changed `parent_group_id`: brings its private channels in line (owner
+    /// only, see `reconcile_private_channels`).
+    async fn reconcile_private_channels_of(&self, parent_group_id: u64) {
+        let Some(client) = self.firefly_mls_client.get() else {
+            return;
+        };
+        let Ok(info) = self.group_info_store.get(parent_group_id).await else {
+            return;
+        };
+        let Ok(parent) = client.load_group(parent_group_id, info.identifier).await else {
+            return;
+        };
+        reconcile_private_channels(
+            &parent,
+            client,
+            &self.group_info_store,
+            &self.group_messages_store,
+            &self.key_value_store,
+            &self.callbacks,
+        )
+        .await;
+    }
+
     /// Asks the server to have this device re-added to the groups it is missing: groups of its
     /// account it has no state for (the server lists them, e.g. one created on another device of
     /// the account). The server passes the request on to the group's online members, and the
@@ -4660,6 +4827,8 @@ impl FireflyWsClient {
                 description: g.description.clone(),
                 pending: g.pending,
                 owner: g.owner.clone(),
+                parent_group_id: g.parent_group_id,
+                parent_channel_id: g.parent_channel_id,
             })
             .collect();
         self.key_value_store
@@ -4676,6 +4845,8 @@ impl FireflyWsClient {
             Err(_) => Vec::new(),
         };
         let local_ids: std::collections::HashSet<u64> = local_groups.iter().map(|g| g.id).collect();
+        // Private channels joined since the last list are known from their invites.
+        let links = crate::private_channels::links(&self.key_value_store).await;
 
         let me = self.callbacks.name().to_string();
         let mut result: Vec<FfiGroupInfo> = cached
@@ -4689,6 +4860,8 @@ impl FireflyWsClient {
                 description: g.description,
                 pending: g.pending,
                 owner: g.owner,
+                parent_group_id: g.parent_group_id,
+                parent_channel_id: g.parent_channel_id,
             })
             .collect();
         for group in local_groups {
@@ -4697,6 +4870,7 @@ impl FireflyWsClient {
                 existing.name = group.name;
                 existing.description = group.description;
             } else {
+                let link = links.get(&group.id);
                 result.push(FfiGroupInfo {
                     id: group.id,
                     name: group.name,
@@ -4704,6 +4878,8 @@ impl FireflyWsClient {
                     pending: false,
                     owner: String::new(),
                     has_local_state: true,
+                    parent_group_id: link.map(|l| l.parent_group_id).unwrap_or(0),
+                    parent_channel_id: link.map(|l| l.channel_id).unwrap_or(0),
                 });
             }
         }
@@ -4761,6 +4937,7 @@ impl FireflyWsClient {
             .update_cursor(id, groupId, group.epoch().await as u32)
             .await?;
 
+        self.reconcile_private_channels_of(groupId).await;
         Ok(id)
     }
 
@@ -4811,6 +4988,7 @@ impl FireflyWsClient {
         self.group_messages_store
             .update_cursor(commit_id, groupId, group.epoch().await as u32)
             .await?;
+        self.reconcile_private_channels_of(groupId).await;
         Ok(commit_id)
     }
 
@@ -4838,6 +5016,7 @@ impl FireflyWsClient {
         self.group_messages_store
             .update_cursor(id, groupId, group.epoch().await as u32)
             .await?;
+        self.reconcile_private_channels_of(groupId).await;
         Ok(id)
     }
 
@@ -4866,6 +5045,7 @@ impl FireflyWsClient {
         self.group_messages_store
             .update_cursor(id, groupId, group.epoch().await as u32)
             .await?;
+        self.reconcile_private_channels_of(groupId).await;
         Ok(id)
     }
 
@@ -4885,6 +5065,7 @@ impl FireflyWsClient {
             .load_group(group_id, group_info.identifier)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
+        self.ensure_private_channel_owner(&group).await?;
 
         let id = group.add_member(username.clone(), role_id).await?;
         group_snapshots::record_added_by_me(&self.key_value_store, group_id, &username).await;
@@ -4898,6 +5079,7 @@ impl FireflyWsClient {
             log::warn!("Failed to re-encrypt pinned messages after add_group_member: {:?}", err);
         }
 
+        self.reconcile_private_channels_of(group_id).await;
         Ok(())
     }
 
@@ -5065,6 +5247,7 @@ impl FireflyWsClient {
             .load_group(groupId, group_info.identifier)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
+        self.ensure_private_channel_owner(&group).await?;
 
         let id = group.kick_member(username).await?;
 
@@ -5073,6 +5256,7 @@ impl FireflyWsClient {
             .await?;
         sync_group_members(&group, &self.key_value_store, &self.callbacks).await;
 
+        self.reconcile_private_channels_of(groupId).await;
         Ok(())
     }
 
@@ -6518,6 +6702,16 @@ async fn on_group_message(
                 .await?;
             callbacks.on_group_updated(groupId).await;
             sync_group_members(&group, key_value_store, callbacks).await;
+            // Someone joined, left or changed role while the owner wasn't the one committing.
+            reconcile_private_channels(
+                &group,
+                firefly_mls_client,
+                group_info_store,
+                group_message_store,
+                key_value_store,
+                callbacks,
+            )
+            .await;
         }
         _ => {
             group_message_store
@@ -7034,6 +7228,97 @@ async fn add_member_internal(
     Ok(())
 }
 
+/// On the owner's devices: commits to each private channel of `parent` what it takes to match
+/// the parent (see `private_channels::plan_membership`). Does nothing on other devices or for
+/// groups without private channels. Failures are logged; the next change to the parent or the
+/// next commit to it tries again.
+async fn reconcile_private_channels(
+    parent: &FfiMlsGroup,
+    firefly_mls_client: &FfiMlsClient,
+    group_info_store: &GroupInfoStore,
+    group_message_store: &GroupMessagesStore,
+    key_value_store: &KeyValueStore,
+    callbacks: &Arc<dyn FireflyWsClientCallback>,
+) {
+    let parent_id = parent.group_id();
+    let children = crate::private_channels::children_of(key_value_store, parent_id).await;
+    if children.is_empty() || !parent.is_owner().await.unwrap_or(false) {
+        return;
+    }
+    let Some(owner) = firefly_mls_client.username() else {
+        return;
+    };
+    let parent_extension = match parent.extension().await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            log::warn!("private channels of group {parent_id}: reading its extension failed: {err:#}");
+            return;
+        }
+    };
+    let Ok(parent_extension) = firefly_core::extension::FireflyGroupExtensionWrapper::deserialize(&parent_extension) else {
+        return;
+    };
+    let mut parent_users: std::collections::HashSet<String> =
+        parent.member_device_addresses().await.into_iter().map(|(_, _, username)| username).collect();
+    parent_users.insert(owner.clone());
+
+    for (child_id, channel_id) in children {
+        let Ok(info) = group_info_store.get(child_id).await else {
+            continue;
+        };
+        let child = match firefly_mls_client.load_group(child_id, info.identifier).await {
+            Ok(child) => child,
+            Err(err) => {
+                log::warn!("private channel {child_id} of group {parent_id}: loading failed: {err:#}");
+                continue;
+            }
+        };
+        let Ok(child_extension) = child.extension().await else {
+            continue;
+        };
+        let Ok(child_extension) = firefly_core::extension::FireflyGroupExtensionWrapper::deserialize(&child_extension) else {
+            continue;
+        };
+        let child_users: std::collections::HashSet<String> =
+            child.member_device_addresses().await.into_iter().map(|(_, _, username)| username).collect();
+        let plan = crate::private_channels::plan_membership(
+            &parent_extension,
+            &parent_users,
+            channel_id,
+            &child_extension,
+            &child_users,
+            &owner,
+        );
+        if plan.add.is_empty() && plan.remove.is_empty() {
+            continue;
+        }
+        log::info!("private channel {child_id} of group {parent_id}: adding {:?}, removing {:?}", plan.add, plan.remove);
+
+        for username in plan.remove {
+            match child.kick_member(username.clone()).await {
+                Ok(commit_id) => {
+                    let _ = group_message_store.update_cursor(commit_id, child_id, child.epoch().await as u32).await;
+                }
+                Err(err) => log::warn!("private channel {child_id}: removing {username} failed: {err:#}"),
+            }
+        }
+        for username in plan.add {
+            match child
+                .add_member(username.clone(), firefly_core::config::PRIVATE_CHANNEL_BY_ROLE_ROLE_ID)
+                .await
+            {
+                Ok(commit_id) => {
+                    group_snapshots::record_added_by_me(key_value_store, child_id, &username).await;
+                    let _ = group_message_store.update_cursor(commit_id, child_id, child.epoch().await as u32).await;
+                }
+                Err(err) => log::warn!("private channel {child_id}: adding {username} failed: {err:#}"),
+            }
+        }
+        sync_group_members(&child, key_value_store, callbacks).await;
+        callbacks.on_group_updated(child_id).await;
+    }
+}
+
 async fn replenish_key_packages_standalone(
     firefly_base_url: &str,
     token: &str,
@@ -7189,6 +7474,15 @@ async fn join_group_internal(
                     .map_err(|e| anyhow::anyhow!(e))?,
             )
             .await?;
+        if info.parent_group_id != 0 {
+            let link = crate::private_channels::PrivateChannelLink {
+                parent_group_id: info.parent_group_id,
+                channel_id: info.parent_channel_id,
+            };
+            if let Err(err) = crate::private_channels::record_links(key_value_store, [(group_id, link)]).await {
+                log::warn!("failed to record private channel {group_id} of group {}: {err:#}", info.parent_group_id);
+            }
+        }
 
         group_message_store
             .update_cursor(invite.commitId, group_id, group.epoch().await as u32)
@@ -7741,6 +8035,10 @@ struct CachedGroupInfo {
     description: String,
     pending: bool,
     owner: String,
+    #[serde(default)]
+    parent_group_id: u64,
+    #[serde(default)]
+    parent_channel_id: u32,
 }
 
 pub struct FfiGroupInfo {
@@ -7750,6 +8048,18 @@ pub struct FfiGroupInfo {
     pub pending: bool,
     pub owner: String,
     pub has_local_state: bool,
+    /// For the group behind a private channel: the group it is a channel of, and the channel's
+    /// id there. 0 for ordinary groups. Apps show these inside their parent, not as groups.
+    pub parent_group_id: u64,
+    pub parent_channel_id: u32,
+}
+
+/// What `create_private_channel` made.
+pub struct FfiPrivateChannel {
+    pub group_id: u64,
+    pub channel_id: u32,
+    /// Members that could not be added (e.g. no key packages yet); the owner can add them later.
+    pub failed_members: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -8133,6 +8443,26 @@ impl FfiFireflyWsClient {
             .scope(id, async {
                 self.inner.create_group(name, description, settings).await
             })
+            .await
+    }
+
+    pub async fn create_private_channel(
+        &self,
+        parent_group_id: u64,
+        name: String,
+        channel_kind: u32,
+        members: Vec<String>,
+    ) -> anyhow::Result<FfiPrivateChannel> {
+        let id = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT
+            .scope(id, self.inner.create_private_channel(parent_group_id, name, channel_kind, members))
+            .await
+    }
+
+    pub async fn delete_private_channel(&self, parent_group_id: u64, channel_id: u32) -> anyhow::Result<()> {
+        let id = self.inner.callbacks.name().to_string();
+        CURRENT_CLIENT
+            .scope(id, self.inner.delete_private_channel(parent_group_id, channel_id))
             .await
     }
 
@@ -8520,7 +8850,8 @@ impl FfiFireflyWsClient {
             .await
             .context("token not found")?;
 
-        let url = format!("{}/groups", self.inner.firefly_base_url);
+        // privateChannels=1: this client shows private channels inside their group.
+        let url = format!("{}/groups?privateChannels=1", self.inner.firefly_base_url);
         let response = HTTP_CLIENT.get(url).bearer_auth(&token).send().await?;
 
         if !response.status().is_success() {
@@ -8540,6 +8871,17 @@ impl FfiFireflyWsClient {
 
         let claims = get_claims_from_token(&token).context("failed to parse claims")?;
         let username = claims.uname.to_string();
+
+        if let Err(err) = crate::private_channels::record_links(
+            &self.inner.key_value_store,
+            groups.groups.iter().filter(|g| g.parent_group_id != 0).map(|g| {
+                (g.id, crate::private_channels::PrivateChannelLink { parent_group_id: g.parent_group_id, channel_id: g.parent_channel_id })
+            }),
+        )
+        .await
+        {
+            log::warn!("failed to record private channel links: {err:#}");
+        }
 
         let mut result = Vec::new();
         for group in groups.groups {
@@ -8572,6 +8914,8 @@ impl FfiFireflyWsClient {
                     pending: is_pending,
                     owner: group.owner.into_owned(),
                     has_local_state: has_local_keys,
+                    parent_group_id: group.parent_group_id,
+                    parent_channel_id: group.parent_channel_id,
                 });
             }
         }

@@ -380,7 +380,70 @@ impl FfiMlsClient {
             role: 1,
         });
 
-        let group = self.inner().create_group_with_settings(ext.inner().clone(),description.clone(),settings).await?;
+        self.create_group_from(ext, group_name, description, settings, None).await
+    }
+
+    /// Creates the group behind the private channel `channel_id` of `parent_group_id` (see
+    /// `firefly_core::config::PRIVATE_CHANNEL_FLAG`), with this user as its owner and only member.
+    /// Its one channel (id 1) is where the private channel's messages go; the roles
+    /// `PRIVATE_CHANNEL_ADDED_ROLE_ID` and `PRIVATE_CHANNEL_BY_ROLE_ROLE_ID` record why each
+    /// member is in it. Only the owner holds ManageMember, so only they add or remove others.
+    pub async fn create_private_channel_group(
+        &self,
+        name: String,
+        parent_group_id: u64,
+        channel_id: u32,
+        channel_kind: u32,
+    ) -> anyhow::Result<Arc<FfiMlsGroup>> {
+        use firefly_core::config::{
+            PRIVATE_CHANNEL_ADDED_ROLE_ID, PRIVATE_CHANNEL_BY_ROLE_ROLE_ID, PRIVATE_CHANNEL_FLAG, UserPermission,
+        };
+        let Some(username) = self.username() else {
+            return Err(anyhow::anyhow!("user not authenticated"));
+        };
+        let member_permissions = UserPermission::SeeMessage as u32
+            | UserPermission::AddMessage as u32
+            | UserPermission::PinMessage as u32;
+
+        let mut ext = FireflyGroupExtensionWrapper::new(Default::default());
+        ext.update_group(name.clone(), member_permissions);
+        ext.update_role(FireflyGroupRole { id: 1, name: "owner".into(), permissions: u32::MAX, color: Default::default() });
+        ext.update_role(FireflyGroupRole {
+            id: PRIVATE_CHANNEL_ADDED_ROLE_ID,
+            name: "member".into(),
+            permissions: member_permissions,
+            color: Default::default(),
+        });
+        ext.update_role(FireflyGroupRole {
+            id: PRIVATE_CHANNEL_BY_ROLE_ROLE_ID,
+            name: "member by role".into(),
+            permissions: member_permissions,
+            color: Default::default(),
+        });
+        ext.update_channel(firefly_protos::firefly::FireflyGroupChannel {
+            id: 1,
+            name: name.clone().into(),
+            type_pb: channel_kind & !PRIVATE_CHANNEL_FLAG,
+            roles: Vec::new(),
+            default_permissions: member_permissions,
+        });
+        ext.update_member(FireflyGroupMember { username: username.into(), role: 1 });
+
+        self.create_group_from(ext, name, String::new(), 0, Some((parent_group_id, channel_id))).await
+    }
+
+    async fn create_group_from(
+        &self,
+        ext: FireflyGroupExtensionWrapper<'_>,
+        group_name: String,
+        description: String,
+        settings: u32,
+        private_channel_of: Option<(u64, u32)>,
+    ) -> anyhow::Result<Arc<FfiMlsGroup>> {
+        let group = self
+            .inner()
+            .create_group_in(ext.inner().clone(), description.clone(), settings, private_channel_of)
+            .await?;
 
         self.group_info_state
             .set(
